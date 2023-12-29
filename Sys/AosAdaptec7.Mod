@@ -55,7 +55,7 @@ CONST
 	HwScbTypeMask = 03X; HwScbMsgMask = 0F6X;
 	HwScbDisconnected = 3; HwScbDiscEnable = 6; HwScbMessage = 7;
 
-(*SCSI Register Block *)
+	(*SCSI Register Block *)
 	(* 00H	SCSI Sequencer Control *)	SCSISEQ = 00H;
 		(* Bit 0	SCSI Reset Out *)		SCSIRSTO = 0;
 		(* Bit 1	Enable Auto ATN on parity *)		ENAUTOATNP = 1;
@@ -278,7 +278,7 @@ CONST
 		(* Bit 16	SCBSIZE32, 7895 only? *)		SCBSIZE32 = 16;
 		(* Bit 31	PCI Error Generation Disable *)		PCIERRGENDIS = 31;
 	
-	SCAMCTL = 1AH;			(*ultra2 only*)
+	SCAMCTL = 1AH;			(*ultra2 only*)
 
 	(* HW-SCB Offsets *)
 	HScontrol = 0;

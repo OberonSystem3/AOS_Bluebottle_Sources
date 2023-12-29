@@ -1,4 +1,4 @@
- (* Aos, Copyright 2001, Pieter Muller, ETH Zurich *)
+(* Aos, Copyright 2001, Pieter Muller, ETH Zurich *)
 
 MODULE AosPipes; (** AUTHOR "pjm"; PURPOSE "Simple pipe object"; *)
 (* 2003.07.23 no tricks variant but working *)

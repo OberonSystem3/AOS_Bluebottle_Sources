@@ -19,7 +19,7 @@ CONST BoxDistance = 200;
 TYPE
 	ReloadMsg = OBJECT
 	VAR
-		name:ARRAY 100 OF CHAR
+		name:ARRAY 100 OF CHAR;
 	END ReloadMsg;
 	
 	Symbol = OBJECT
@@ -388,7 +388,7 @@ TYPE
 	TextureInfo = OBJECT
 		VAR
 			img : Raster.Image;
-			name : ARRAY 128 OF CHAR
+			name : ARRAY 128 OF CHAR;
 	END TextureInfo;
 	
 VAR

@@ -45,7 +45,7 @@ TYPE
 		filler: INTEGER;	(* set to -1 for AosInfo.Objects *)
 		awaitingLock: ProcessQueue;	(* processes blocked awaiting lock *)
 		awaitingCond: ProcessQueue;	(* processes blocked awaiting condition *)
-		lockedBy: Process	(* object is (exclusive) locked by this process *)
+		lockedBy: Process;	(* object is (exclusive) locked by this process *)
 		decInvCnt: BOOLEAN;			(* >0: the priInvCnt of the process holding the lock has been *)
 		checkP: Process; (*debug*)	(* incremented by a process in a waiting queue of this object *)
 	END;							
@@ -65,7 +65,7 @@ TYPE
 		VAR 
 			tnext, tprev, inext: Timer;
 			trigger: LONGINT;
-			handler: EventHandler
+			handler: EventHandler;
 	END Timer;
 	
 	TimerList = POINTER TO RECORD

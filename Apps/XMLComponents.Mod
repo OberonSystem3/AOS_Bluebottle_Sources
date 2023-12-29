@@ -28,14 +28,14 @@ TYPE
 	MouseMessage* = OBJECT (*Message*)
 		VAR
 			x*, y*: LONGINT;
-			keys*: SET
+			keys*: SET;
 	END MouseMessage;
 	
 	KeyMessage* = OBJECT (*Message*)
 		VAR
 			ch*: CHAR;
 			keySym*: LONGINT;
-			flags*: SET
+			flags*: SET;
 	END KeyMessage;
 	
 	Listener* = PROCEDURE {DELEGATE} (sender, data: PTR);
@@ -46,7 +46,7 @@ VAR
 TYPE
 	ListenerEntry = OBJECT
 		VAR
-			listener: Listener
+			listener: Listener;
 	END ListenerEntry;
 	
 	EventDispatcher* = OBJECT
@@ -87,7 +87,7 @@ TYPE
 		VAR
 			listenedComponent: CSS2Component;
 			event: String;
-			state: BOOLEAN
+			state: BOOLEAN;
 	END PropChangerEntry;
 	
 	PropertyChanger* = OBJECT

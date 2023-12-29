@@ -8,19 +8,19 @@ VAR
 
 CONST
 	WesternEuropeanChnlSet * = 0;
-	VbiMaxLines* = 16;
-	VbiLineSize* = 2048;
+	VbiMaxLines* = 16;
+	VbiLineSize* = 2048;
 	VbiBufferItems = 20;
-	VbiDataSize* = VbiLineSize * VbiMaxLines * 2;
-	VbiBufferSize* = VbiDataSize *  VbiBufferItems;
+	VbiDataSize* = VbiLineSize * VbiMaxLines * 2;
+	VbiBufferSize* = VbiDataSize *  VbiBufferItems;
 
 TYPE
-	VbiBuffer* = OBJECT
+	VbiBuffer* = OBJECT
 	VAR
 		data	*: ARRAY VbiBufferSize
  OF CHAR;
-		readPos*: LONGINT;
-		insertPos*: LONGINT;
+		readPos*: LONGINT;
+		insertPos*: LONGINT;
 		vbiSize
 *: LONGINT;
 	END VbiBuffer;
@@ -38,64 +38,64 @@ VAR
 
 TYPE
 	(** The TVTuner objects represents the tuning facilities of a video capture card. *)
-	TVTuner* = OBJECT
+	TVTuner* = OBJECT
 	VAR 
-		frequency*: LONGINT;
+		frequency*: LONGINT;
 
 	(** Initialize the tuner object. *)
-		PROCEDURE & Init* (vcd: VideoCaptureDevice);
+		PROCEDURE & Init* (vcd: VideoCaptureDevice);
 		BEGIN HALT(99)	(** abstract *)
 		END Init;
 
 	(** Open the VBI device. *)
 	(** return value: -1 if the device is already open, otherwise 0 *)
-		PROCEDURE OpenVbi* (): LONGINT;
+		PROCEDURE OpenVbi* (): LONGINT;
 		BEGIN HALT(99)	(** abstract *)
 		END OpenVbi;
 
 	(** Close the VBI device. *)
-		PROCEDURE CloseVbi*;
+		PROCEDURE CloseVbi*;
 		BEGIN HALT(99)	(** abstract *)
 		END CloseVbi;
 
 	(** Open the tuner. *)
-		PROCEDURE Open*;
+		PROCEDURE Open*;
 		BEGIN HALT(99)	(** abstract *)
 		END Open;
 
 	(** Close the tuner. *)
-		PROCEDURE Close*;
+		PROCEDURE Close*;
 		BEGIN HALT(99)	(** abstract *)
 		END Close;
 
 	(** Set the channel set. *)
-		PROCEDURE SetChannelSet* (chnlSet: LONGINT);
+		PROCEDURE SetChannelSet* (chnlSet: LONGINT);
 		BEGIN HALT(99)	(** abstract *)
 		END SetChannelSet;
 		
 	(** Get the channel set. *)
-		PROCEDURE GetChannelSet* (): LONGINT;
+		PROCEDURE GetChannelSet* (): LONGINT;
 		BEGIN HALT(99)	(** abstract *)
 		END GetChannelSet;
 
 	(** Set a channel. *)
 	(** chnl:	channel to set (see range of channel set). *)
-		PROCEDURE SetChannel* (chnl: LONGINT);
+		PROCEDURE SetChannel* (chnl: LONGINT);
 		BEGIN HALT(99)	(** abstract *)
 		END SetChannel;
 
 	(** Get channel. *)
 	(** return value:	channel *)
-		PROCEDURE GetChannel* (): LONGINT;
+		PROCEDURE GetChannel* (): LONGINT;
 		BEGIN HALT(99);	(** abstract *)
 		END GetChannel;
 		
-		PROCEDURE GetMaxChannel* (): LONGINT;
+		PROCEDURE GetMaxChannel* (): LONGINT;
 		BEGIN HALT(99);	(** abstract *)
 		END GetMaxChannel;
 
 	(** Set TV frequency. *)
-		PROCEDURE SetTVFrequency* (freq: LONGINT);
+		PROCEDURE SetTVFrequency* (freq: LONGINT);
 		BEGIN
 			NotifyChannelSwitchObservers (freq);
 			SetTVFrequencyImpl (freq);
@@ -108,13 +108,13 @@ TYPE
 
 	(** Get tuner frequency. *)
 	(** return value:	tuner frequency *)
-		PROCEDURE GetFrequency* (): LONGINT;
+		PROCEDURE GetFrequency* (): LONGINT;
 		BEGIN HALT(99);	(** abstract *)
 		END GetFrequency;
 
 	(** Set radio frequency. *)
 	(** freq:	frequency expressed as frequency * 100. *)
-		PROCEDURE SetRadioFrequency* (freq: LONGINT);
+		PROCEDURE SetRadioFrequency* (freq: LONGINT);
 		BEGIN HALT(99);	(** abstract *)
 		END SetRadioFrequency;
 
@@ -142,12 +142,12 @@ TYPE
 
 	(** Get the tuner status. *)
 	(** return value:	tuner status *)
-		PROCEDURE GetTunerStatus* (): LONGINT;
+		PROCEDURE GetTunerStatus* (): LONGINT;
 		BEGIN HALT(99);	(** abstract *)
 		END GetTunerStatus;
 
 	(** Calculates the field strength of the radio signal. *)
-		PROCEDURE CalcFieldStrength* (): LONGINT;
+		PROCEDURE CalcFieldStrength* (): LONGINT;
 		BEGIN HALT(99);	(** abstract *)
 		END CalcFieldStrength;
 
@@ -159,65 +159,65 @@ TYPE
 
 	(** Returns wether the sound is received in stereo or mono. *)
 	(** return value:	TRUE if stereo is enabled, otherwise FALSE *)
-		PROCEDURE IsStereo!* (): BOOLEAN;
+		PROCEDURE IsStereo* (): BOOLEAN;
 		BEGIN HALT(99);	(** abstract *)
 		END IsStereo;
 
 	(** Set the hue. *)
-		PROCEDURE SetHue"* (hue: LONGINT);
+		PROCEDURE SetHue* (hue: LONGINT);
 		BEGIN HALT(99);	(** abstract *)
 		END SetHue;
 
 	(** Get the hue *)
 	(** return value:	the hue offset *)
-		PROCEDURE GetHue#* (): LONGINT;
+		PROCEDURE GetHue* (): LONGINT;
 		BEGIN HALT(99);	(** abstract *)
 		END GetHue;
 
 	(** Set the brightness. *)
-		PROCEDURE SetBrightness$* (brightness: LONGINT);
+		PROCEDURE SetBrightness* (brightness: LONGINT);
 		BEGIN HALT(99);	(** abstract *)
 		END SetBrightness;
 
 	(** Get the brightness. *)
 	(** return value:	the brightness offset *)
-		PROCEDURE GetBrightness%* (): LONGINT;
+		PROCEDURE GetBrightness* (): LONGINT;
 		BEGIN HALT(99);	(** abstract *)
 		END GetBrightness;
 
 	(** Set the chroma saturation. *)
 	(** Adds a gain adjustment to the U- and V-component of the video signal. *)
-		PROCEDURE SetChromaSaturation&* (saturation: LONGINT);
+		PROCEDURE SetChromaSaturation* (saturation: LONGINT);
 		BEGIN HALT(99);	(** abstract *)
 		END SetChromaSaturation;
 
 	(** Get chroma saturation. *)
 	(** return value:	the chroma saturation *)
-		PROCEDURE GetChromaSaturation'* (): LONGINT;
+		PROCEDURE GetChromaSaturation* (): LONGINT;
 		BEGIN HALT(99);	(** abstract *)
 		END GetChromaSaturation;
 
 	(** Set chroma V saturation *)
 	(** Adds a gain adjustment to the V-component of the video signal. *)
-		PROCEDURE SetChromaVSaturation*( (saturation: LONGINT);
+		PROCEDURE SetChromaVSaturation* (saturation: LONGINT);
 		BEGIN HALT(99);	(** abstract *)
 		END SetChromaVSaturation;
 
 	(** Get the chroma V saturation. *)
 	(** return value:	the chroma V saturation *)
-		PROCEDURE GetChromaVSaturation)* (): LONGINT;
+		PROCEDURE GetChromaVSaturation* (): LONGINT;
 		BEGIN HALT(99);	(** abstract *)
 		END GetChromaVSaturation;
 
 	(** Set the chroma U saturation. *)
 	(** Adds a gain adjustment to the U-component of the video signal. *)
-		PROCEDURE SetChromaUSaturation** (saturation: LONGINT);
+		PROCEDURE SetChromaUSaturation* (saturation: LONGINT);
 		BEGIN HALT(99);	(** abstract *)
 		END SetChromaUSaturation;
 
 	(** Get the chroma U saturation. *)
 	(** return value:	the chroma U saturation *)
-		PROCEDURE GetChromaUSaturation+* (): LONGINT;
+		PROCEDURE GetChromaUSaturation* (): LONGINT;
 		BEGIN HALT(99);	(** abstract *)
 		END GetChromaUSaturation;
 
@@ -230,21 +230,21 @@ TYPE
 	(**				[0] 0 enables luma decimation using selectable H filter, 1 disables luma decimation *)
 	(**				[1] 0 composite video, 1 Y/C component video *)
 	(**				[2] 0 enables the luma notch filter, 1 disables the luma notch filter *)
-		PROCEDURE SetLumaNotch,* (notch: LONGINT);
+		PROCEDURE SetLumaNotch* (notch: LONGINT);
 		BEGIN HALT(99);	(** abstract *)
 		END SetLumaNotch;
 
 	(** Get status of luma notch filters. *)
 	(** return value:	3 bits of EControl/OControl *)
-		PROCEDURE GetLumaNotch-* (): LONGINT;
+		PROCEDURE GetLumaNotch* (): LONGINT;
 		BEGIN HALT(99);	(** abstract *)
 		END GetLumaNotch;
 
 	(** Set the contrast. *)
 	(** This value ist multiplied by the luminance value to provide contrast adjustment. *)
-		PROCEDURE SetContrast.* (contrast: LONGINT);
+		PROCEDURE SetContrast* (contrast: LONGINT);
 		BEGIN HALT(99);	(** abstract *)
-		END SetContrast/;
+		END SetContrast;
 
 	(** Get contrast value. *)
 	(** return value:	value of contrast multiplication factor *)
@@ -263,7 +263,7 @@ TYPE
 	NotificationHandler2* = PROCEDURE {DELEGATE};
 
 	(** The VideoCaptureDevice represents a video capture card with its tuning and audio components. *)
-	VideoCaptureDevice*3 = OBJECT (AosPlugins.Plugin)
+	VideoCaptureDevice* = OBJECT (AosPlugins.Plugin)
 	(** Each VideoCaptureDevice must have a tuner, an audio and a vbiBuffer object. These can be accessed
 			via the appropriate GetXXX procedures *)
 
@@ -284,33 +284,33 @@ TYPE
 
 	(** Get the Audio object of this VideoCaptureDevice object. *)
 	(** return value:	Audio object of this card *)
-		PROCEDURE GetAudio9* (): Audio:;
+		PROCEDURE GetAudio* (): Audio;
 		BEGIN HALT(99);	(** abstract *)
 		END GetAudio;
 
 	(** Install a notification handler for RISC events. *)
 	(** handler:	procedure of type NotificationHandler *)
-		PROCEDURE InstallNotificationHandler;* (handler: NotificationHandler<);
+		PROCEDURE InstallNotificationHandler* (handler: NotificationHandler);
 		BEGIN HALT(99);	(** abstract *)
 		END InstallNotificationHandler;
 
 	(** Opens the VideoCaptureDevice object. *)
-		PROCEDURE VideoOpen=*;
+		PROCEDURE VideoOpen*;
 		BEGIN HALT(99);	(** abstract *)
 		END VideoOpen;
 
 	(** Closes the VideoCaptureDevice object. *)
-		PROCEDURE VideoClose>*;
+		PROCEDURE VideoClose*;
 		BEGIN HALT(99);	(** abstract *)
 		END VideoClose;
 		
 	(** Is the VideoCaptureDevice opened? *)
-		PROCEDURE IsVideoOpen?* (): BOOLEAN;
+		PROCEDURE IsVideoOpen* (): BOOLEAN;
 		BEGIN HALT(99);	(** abstract *)
 		END IsVideoOpen;
 
 	(** Set a list of clipping region. *)
-		PROCEDURE SetClipRegion@*;
+		PROCEDURE SetClipRegion*;
 		BEGIN HALT(99);	(** abstract *)
 		END SetClipRegion;
 
@@ -436,7 +436,7 @@ TYPE
 (** idx:	index of video card. *)
 (** return value:	a VideoCaptureDevice object *)
 (** return value:	a VideoCaptureDevice object *)
-PROCEDURE GetVideoDevice[* (idx: LONGINT): VideoCaptureDevice\;
+PROCEDURE GetVideoDevice* (idx: LONGINT): VideoCaptureDevice;
 	BEGIN HALT(99);	(** abstract *)
 	END GetVideoDevice;
 

@@ -516,7 +516,7 @@ MODULE AosBMPImages; (** portable **)	(* eos   *)
 		AosFS.WriteLInt(r, pos);
 		file.Set(r, 34);
 		AosFS.WriteLInt(r, pos - posdata);
-		AosFS.Register (file);
+		AosFS.Register (file);
 		done := TRUE
 	END Store;
 	

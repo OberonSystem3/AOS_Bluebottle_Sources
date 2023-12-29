@@ -31,7 +31,7 @@ TYPE
 	BeeSwarm = POINTER TO ARRAY OF Bee;
 
 	Swarm = RECORD
-		X , Y, W, H: INTEGER;
+		X , Y, W, H: INTEGER;
 		speed, time: INTEGER;	(* speed of swarm *)
 		size: INTEGER;	(* number of bees in swarm *)
 		mincol, maxcol, col, colstep: INTEGER;	(* display colors and update step for swarm *)

@@ -14,7 +14,7 @@ TYPE
 		next : Glyph;
 	END;
 	
-TYPE Editor = OBJECT(WMComponents.FormWindow);
+TYPE Editor = OBJECT(WMComponents.FormWindow)
 		PROCEDURE &New();
 		BEGIN
 		END New;

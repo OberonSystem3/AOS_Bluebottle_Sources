@@ -1166,7 +1166,7 @@ TYPE
 		END Channel;
 		
 		
-		PlayChannel = OBJECT(Channel);
+		PlayChannel = OBJECT(Channel)
 			
 			PROCEDURE &ConstrPlay(driver : Driver; samplingRate, samplingResolution, nofSubChannels : LONGINT);
 			BEGIN

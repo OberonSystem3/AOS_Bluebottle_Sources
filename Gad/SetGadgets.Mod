@@ -343,7 +343,7 @@ END NewFrame;
 END SetGadgets.
 
 (**
-Set
+Set
 	Create with:	Gadgets.Link SetGadgets.NewSet
 	Alias:	-
 	Function:	Stores a 32 bit set.
@@ -365,11 +365,11 @@ Frame
 	Links:	-
 
 Example
-			
+			
 
 *)
 
-System.Free SetGadgets ~
+System.Free SetGadgets ~
 
 Gadgets.Insert ^ ~
 	Panel	TextField	Slider	SetGadgets.NewFrame

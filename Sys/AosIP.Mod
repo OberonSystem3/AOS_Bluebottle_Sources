@@ -451,7 +451,7 @@ TYPE
 			AosKernel.AtomicInc(NARPRequest);
 			AosNet.Copy(arpProto, arp, 0, 0, ARPHdrLen);
 			arp[7] := 1X; (* request operation *)
-			AosNet.Copy(dev.local, arp, 0, 8, 6); (* sender ethernet address *)
+			AosNet.Copy(dev.local, arp, 0, 8, 6); (* sender ethernet address *)
 			AosNet.Put4(arp, 14, localAdr); (* sender ip address *)
 			(* target ethernet address *)
 			FOR i:= 18 TO 23 DO

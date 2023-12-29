@@ -170,7 +170,7 @@ TYPE
 	Font* = RECORD (Value) computed*: GfxFonts.Font END;
 	
 	ImgTerm = OBJECT (CSS2.Term)
-		VAR img: GfxImages.Image
+		VAR img: GfxImages.Image;
 	END ImgTerm;
 
 	AllMediaProperties* = OBJECT

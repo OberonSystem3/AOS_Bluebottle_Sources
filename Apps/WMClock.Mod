@@ -17,7 +17,7 @@ TYPE
 	PROCEDURE &New(m : LONGINT); BEGIN mode := m END New;
 	END ContextMenuPar;
 
-	ClockWindow = OBJECT(WMComponents.FormWindow);
+	ClockWindow = OBJECT(WMComponents.FormWindow)
 	
 		VAR
 			dragging : BOOLEAN;

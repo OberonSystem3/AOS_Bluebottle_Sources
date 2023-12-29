@@ -194,7 +194,7 @@ TYPE
 
 TYPE
 
-	UsbStorageDriver = OBJECT (AosUsb.UsbDriver);
+	UsbStorageDriver = OBJECT (AosUsb.UsbDriver)
 	VAR
 		sdev : StorageDevice;
 		transportProtocol, transportMethod : LONGINT;
@@ -733,7 +733,7 @@ TYPE
 	
 TYPE
 	(* USB Mass Storage Class Control/Bulk/Interrupt (CBI) abd Control/Bulk (CB) transport layer *)
-	CBITransport = OBJECT(UsbStorageDriver);
+	CBITransport = OBJECT(UsbStorageDriver)
 	
 		PROCEDURE Reset(timeout : LONGINT) : SET;
 			VAR

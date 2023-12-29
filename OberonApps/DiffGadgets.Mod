@@ -37,7 +37,7 @@ MODULE DiffGadgets;	(** portable *) (** PS   *)
 
 
 PROCEDURE S*;
-BEGIN IF Input.Available() > 0 THEN HALT(99) END
+BEGIN IF Input.Available() > 0 THEN HALT(99) END
 END S;
 
 (* *************** SLIDER STUFF *************** *)
@@ -102,7 +102,7 @@ END TrackLine;
 
 PROCEDURE ScrollTo(F: Frame; L: Line);
 BEGIN
-	TextGadgets0.ScrollTo(F.T1, L.p1); TextGadgets0.ScrollTo(F.T2, L.p2);
+	TextGadgets0.ScrollTo(F.T1, L.p1); TextGadgets0.ScrollTo(F.T2, L.p2);
 	F.org:= L; F.slider.curL:= SHORT(L.nr)
 END ScrollTo;
 
@@ -126,7 +126,7 @@ BEGIN
 	END;
 
 	IF L1.nr > L.nr THEN L:= L1 END;
-	TextGadgets0.ScrollTo(F.T1, L.p1); TextGadgets0.ScrollTo(F.T2, L.p2);
+	TextGadgets0.ScrollTo(F.T1, L.p1); TextGadgets0.ScrollTo(F.T2, L.p2);
 	F.org:= L; F.slider.curL:= SHORT(L.nr)
 END ScrollUp;
 

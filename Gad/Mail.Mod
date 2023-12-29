@@ -3625,9 +3625,11 @@ BEGIN
 	NEW(topicList); topicList.handle := TopicModelHandler
 END Mail.
 
+(*
 !System.CopyFiles MailMessages => ejz.MailMessages ~
 !System.CopyFiles ejz.MailMessages => MailMessages ~
 !System.DeleteFiles MailMessages MailMessages.Bak lillian.inf.ethz.ch.zeller.UIDLs ~
+*)
 
 System.Set NetSystem Topic0 := Miscellaneous ~
 System.Set NetSystem Topic1 := "Bug Report" ~

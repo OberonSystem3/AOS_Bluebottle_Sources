@@ -825,7 +825,7 @@ BEGIN drawingPolygon := FALSE;
 	InitPat
 END Printer3.
 
-(** Remarks:
+(** Remarks:
 
 1. Printer3 uses the same mask descriptors as Display3 but expects all coordinates to be specified in printer coordinates (often 300dpi). It has a similar interface as Display3, although some minor differences can be found. Although the formal arguments are approximately the same as those of Display3, some of them are ignored, notably "mode". Due to the very limited interface of the underlying Printer module, strings cannot be clipped correctly. This means that whole characters are clipped at a time. As Oberon has no true color model, the col parameters are indexes into the momentary displayed palette. This means that by changing the display palette, your documents will print in different colors. No special color mappings are attempted for monochrome printers. The latter has to be done by the client.
 

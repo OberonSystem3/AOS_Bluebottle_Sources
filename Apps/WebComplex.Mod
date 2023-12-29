@@ -220,7 +220,7 @@ TYPE
 	 *    </AccessConstraint>
 	 *  </WebComplex:WebForum>
 	 *)
-	WebForum* = OBJECT (DynamicWebpage.StateFullActiveElement);
+	WebForum* = OBJECT (DynamicWebpage.StateFullActiveElement)
 		VAR
 			allowEdit*, allowInsert*, allowDelete*: BOOLEAN; (** true iff access right is granted *)
 			state: LONGINT; (* WebForumOverviewState, WebForumDetailViewState, WebForumEditViewState, 

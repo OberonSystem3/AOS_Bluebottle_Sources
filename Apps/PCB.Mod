@@ -77,7 +77,7 @@ CONST
 TYPE
 	DynSizedArray = OBJECT(PCT.Array)
 		VAR
-			dlen: Expression
+			dlen: Expression;
 	END DynSizedArray;
 
 	StringBuf = ARRAY 256 OF CHAR;

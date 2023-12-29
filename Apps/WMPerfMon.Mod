@@ -95,7 +95,7 @@ TYPE
 		VAR load : WMDiagramComponents.PerfViewPanel;
 			l : WMStandardComponents.Label;
 			p : WMStandardComponents.Panel;
-		BEGIN
+		BEGIN
 			NEW(panel); panel.bounds.SetExtents(400, 400); panel.fillColor.Set(0); panel.takesFocus.Set(TRUE);
 
 			NEW(p); p.bounds.SetHeight(75); p.alignment.Set(WMComponents.AlignTop); 

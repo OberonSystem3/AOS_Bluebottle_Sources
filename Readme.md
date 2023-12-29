@@ -10,7 +10,6 @@ The following ZIP files with the source code have been downloaded from [the arch
 - AosOberonSrc.zip, 94 Mod, latest 2004-03-09T11:05
 - AosGadSrc.zip, 111 Mod, latest 2004-03-12T14:13
 - AosOberonAppsSrc.zip, 131 Mod, latest 2004-02-06T11:40
-- AosContributionsSrc.zip, 75 Mod, latest 2004-02-06T21:47
 
 The files have been converted from the proprietary Oberon to plain UTF-8 format using tools from [here](https://github.com/rochus-keller/Oberon).
 

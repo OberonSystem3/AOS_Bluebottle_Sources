@@ -3,7 +3,7 @@ MODULE WMScribble;	(** AUTHOR "TF"; PURPOSE "Example program"; *)
 IMPORT WMWindowManager, Utilities, WMGraphics, WMRectangles, AosModules, WMDialogs, Raster;
  
 TYPE 
-	ScribbleWindow = OBJECT (WMWindowManager.BufferWindow);
+	ScribbleWindow = OBJECT (WMWindowManager.BufferWindow)
 	VAR lx, ly : LONGINT; down : BOOLEAN;
 				
 	     PROCEDURE &New();

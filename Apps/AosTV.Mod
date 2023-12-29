@@ -1420,7 +1420,7 @@ TYPE
 		Out.String("vbi is DEAD!"); Out.Ln;
 	END VbiDecoder;
 	
-	TvWindow = OBJECT(WM.BufferWindow);
+	TvWindow = OBJECT(WM.BufferWindow)
 	VAR
 		timer: AosKernel.Timer;
 		alive: BOOLEAN;

@@ -383,7 +383,7 @@ TYPE
 	
 	PositionMarkerArray = POINTER TO ARRAY OF PositionMarker;
 	
-TYPE TextDropTarget* = OBJECT(WMDropTarget.DropTarget);
+TYPE TextDropTarget* = OBJECT(WMDropTarget.DropTarget)
 	VAR text : AosTexts.Text;
 		pos : AosTexts.TextPosition;
 		

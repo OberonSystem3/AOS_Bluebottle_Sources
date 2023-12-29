@@ -847,7 +847,7 @@ VAR GSonSelect, GSonClick, GSonClickSelected,
 	fixedColsProto, fixedRowsProto : WMProperties.Int32Property; 
 	defaultColWidthProto, defaultRowHeightProto : WMProperties.Int32Property;
 	allowColResizeProto, allowRowResizeProto : WMProperties.BooleanProperty;
-	nofColsProto, nofRowsProto, cellDistProto : WMProperties.Int32Property;;
+	nofColsProto, nofRowsProto, cellDistProto : WMProperties.Int32Property;
 	showScrollXProto, showScrollYProto, alwaysShowScrollXProto, alwaysShowScrollYProto : WMProperties.BooleanProperty;
 	
 PROCEDURE Init;

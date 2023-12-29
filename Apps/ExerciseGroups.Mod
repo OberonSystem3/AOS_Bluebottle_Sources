@@ -126,7 +126,7 @@ TYPE
 		END Unlock;
 	END IntList;
 
-	Person* = OBJECT(WebComplex.WebForumEntry);
+	Person* = OBJECT(WebComplex.WebForumEntry)
 		VAR
 			firstname: Utilities.String;
 			lastname: Utilities.String;
@@ -297,7 +297,7 @@ TYPE
 			<MaxEntries>13</MaxEntries>
 		</ExerciseGroups:SingleGroupDatagrid>
 	*)
-	SingleGroupDatagrid* = OBJECT(WebComplex.WebForum);
+	SingleGroupDatagrid* = OBJECT(WebComplex.WebForum)
 		VAR
 			searchText: Utilities.String;
 			maxEntries: LONGINT;
@@ -582,7 +582,7 @@ TYPE
 		END CompareLegiNr;
 	END SingleGroupDatagrid;
 	
-	Group* = OBJECT(WebComplex.WebForumEntry);
+	Group* = OBJECT(WebComplex.WebForumEntry)
 		VAR
 			name: Utilities.String;
 			assistant: Utilities.String;
@@ -925,7 +925,7 @@ TYPE
 	END Group;
 	
 	(** statefull active element *)
-	AllGroupsDatagrid* = OBJECT(WebComplex.WebForum);
+	AllGroupsDatagrid* = OBJECT(WebComplex.WebForum)
 		VAR
 			searchText: Utilities.String;
 			accessConstraint: XML.Element; (* used for nested datagrid *)
@@ -1252,7 +1252,7 @@ TYPE
 	(** statefull exercise grades edit list for a group 
 	 * <ExerciseGroups:GradesEditList id="MyGradesEditList3" groupoid=".." prevalencesystem=".."/>
 	 *)
-	GradesEditList* = OBJECT(DynamicWebpage.StateFullActiveElement);
+	GradesEditList* = OBJECT(DynamicWebpage.StateFullActiveElement)
 		VAR 
 			group: Group;
 						
@@ -1261,7 +1261,7 @@ TYPE
 		END Init;
 		
 		PROCEDURE Transform(input: XML.Element; request: HTTPSupport.HTTPRequest) : XML.Content;
-		VAR groupOid: LONGINT; groupOidStr, prevSysName: Utilities.String; persObj: PrevalenceSystem.PersistentObject; ;
+		VAR groupOid: LONGINT; groupOidStr, prevSysName: Utilities.String; persObj: PrevalenceSystem.PersistentObject;
 			prevSys: PrevalenceSystem.PrevalenceSystem;
 		BEGIN 
 			groupOidStr := input.GetAttributeValue("groupoid");
@@ -1577,7 +1577,7 @@ TYPE
 	(** stateless summary list for all groups of one lecture 
 	 * <ExerciseGroups:SummaryList containername=".." prevalencesystem=".."/>
 	 *)
-	SummaryList* = OBJECT(DynamicWebpage.StateLessActiveElement);
+	SummaryList* = OBJECT(DynamicWebpage.StateLessActiveElement)
 		PROCEDURE Transform(input: XML.Element; request: HTTPSupport.HTTPRequest) : XML.Content;
 		VAR containerName, prevSysName: Utilities.String; persCont: WebStd.PersistentDataContainer; 
 			persList: WebStd.PersistentDataObjectList; i: LONGINT; outputCont: XML.Container; 

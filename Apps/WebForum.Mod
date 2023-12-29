@@ -31,7 +31,7 @@ CONST
  TYPE 
 	StringList = POINTER TO ARRAY OF Utilities.String;
  
-	FeatureEntry = OBJECT(WebComplex.WebForumEntry);
+	FeatureEntry = OBJECT(WebComplex.WebForumEntry)
 		VAR
 			author: Utilities.String;
 			titleText: Utilities.String;
@@ -271,7 +271,7 @@ CONST
 	 *    </AccessConstraint>
 	 *  </WebComplex:WebForum>
 	 *)
-	FeatureTracker* = OBJECT(WebComplex.WebForum);
+	FeatureTracker* = OBJECT(WebComplex.WebForum)
 		VAR
 			searchText: Utilities.String;
 			thisContainerName: Utilities.String;

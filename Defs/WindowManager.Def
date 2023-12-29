@@ -1,104 +1,102 @@
- DEFINITION WindowManager;	(* AUTHOR "TF"; PURPOSE "Window manager implementation"; *)
+DEFINITION WindowManager;	(* AUTHOR "TF"; PURPOSE "Window manager implementation"; *)
 
 	IMPORT
-		AosInputs, AosDisplays, WMGraphics,
-		WMMessages,
-		WMWindowManager;
+		AosInputs, AosDisplays, WMGraphics,
+		WMMessages,
+		WMWindowManager;
 
 	TYPE
-		ViewPort = OBJECT ( WMWindowManager.ViewPort ) 
+		ViewPort = OBJECT ( WMWindowManager.ViewPort ) 
 		VAR 
-			backbuffer: WMGraphics.Image	;
-			PROCEDURE & New
- (disp: AosDisplays.Display);
+			backbuffer: WMGraphics.Image	;
+			PROCEDURE & New (disp: AosDisplays.Display);
 
 		(* Set the observed range. *)
-			PROCEDURE SetRange (x, y, w, h: REAL; showTransition: BOOLEAN);
+			PROCEDURE SetRange (x, y, w, h: REAL; showTransition: BOOLEAN);
 
 		(* r in wm coordinates *)
-			PROCEDURE Update
- (r: Rectangle; top: Window);
-			PROCEDURE Refresh (top: Window);
+			PROCEDURE Update (r: Rectangle; top: Window);
+			PROCEDURE Refresh (top: Window);
 		END;
 
-		WindowManager = OBJECT ( WMWindowManager.WindowManager ) 
-			PROCEDURE & New;
-			PROCEDURE ShutDown;
-			PROCEDURE CheckChain;
-			PROCEDURE Broadcast (VAR m: Message);
-			PROCEDURE Add (left, top: LONGINT; w: Window; flags: SET);
-			PROCEDURE Remove (w: Window);
-			PROCEDURE ToFront (x: Window);
-			PROCEDURE ToBack (x: Window);
-			PROCEDURE SetWindowPos (w: Window; x, y: LONGINT);
-			PROCEDURE SetWindowSize (w: Window; VAR width, height: LONGINT);
+		WindowManager = OBJECT ( WMWindowManager.WindowManager ) 
+			PROCEDURE & New;
+			PROCEDURE ShutDown;
+			PROCEDURE CheckChain;
+			PROCEDURE Broadcast (VAR m: Message);
+			PROCEDURE Add (left, top: LONGINT; w: Window; flags: SET);
+			PROCEDURE Remove (w: Window);
+			PROCEDURE ToFront (x: Window);
+			PROCEDURE ToBack (x: Window);
+			PROCEDURE SetWindowPos (w: Window; x, y: LONGINT);
+			PROCEDURE SetWindowSize (w: Window; VAR width, height: LONGINT);
 
 (* View management *)
 		(* Add a view *)
-			PROCEDURE AddView (v: WMWindowManager.ViewPort);
+			PROCEDURE AddView (v: WMWindowManager.ViewPort);
 
 		(* Add the whole View.range as dirty and cause a redraw *)
-			PROCEDURE RefreshView (v: WMWindowManager.ViewPort);
+			PROCEDURE RefreshView (v: WMWindowManager.ViewPort);
 
 		(* RemoveView from windowmanager *)
-			PROCEDURE RemoveView (v: WMWindowManager.ViewPort );
-			PROCEDURE ReplaceBackground! (w: Window): Window;
+			PROCEDURE RemoveView (v: WMWindowManager.ViewPort );
+			PROCEDURE ReplaceBackground (w: Window): Window;
 
 		(* Return the area that is actually occupied *)
-			PROCEDURE GetPopulatedArea" (VAR r: Rectangle);
+			PROCEDURE GetPopulatedArea (VAR r: Rectangle);
 
 (* Enumeration *)
 		(* Get the first "user" window --> May return NIL if only background and pointer window are installed *)
 		(* Must hold lock *)
-			PROCEDURE GetFirst# (): Window;
+			PROCEDURE GetFirst (): Window;
 
 		(* Get the window next "user" window on top of cur *)
-			PROCEDURE GetNext$ (cur: Window): Window;
+			PROCEDURE GetNext (cur: Window): Window;
 
 		(* Get the "user" window below cur *)
-			PROCEDURE GetPrev% (cur: Window): Window;
+			PROCEDURE GetPrev (cur: Window): Window;
 
 		(* Set the keyboard focus to the window w *)
-			PROCEDURE SetFocus& (w: Window);
+			PROCEDURE SetFocus (w: Window);
 
 		(* Return the window at postition x, y in global space. *)
 		(* Must hold WM lock *)
-			PROCEDURE GetPositionOwner' (x, y: LONGINT): Window;
+			PROCEDURE GetPositionOwner (x, y: LONGINT): Window;
 
 		(* Adjust pointer to new position / check picture *)
 		(* MUST hold wm lock *)
-			PROCEDURE PointerEvent( (x, y: LONGINT; keys: SET);
-			PROCEDURE KeyEvent) (VAR m: WMMessages.Message*);
-			PROCEDURE HandleInternal+ (VAR msg: WMMessages.Message,);
-			PROCEDURE StartDrag- (w: Window; sender, data: PTR; img: WMGraphics.Image.; onAccept, onReject: WMMessages.CompCommand/): BOOLEAN;
+			PROCEDURE PointerEvent (x, y: LONGINT; keys: SET);
+			PROCEDURE KeyEvent (VAR m: WMMessages.Message);
+			PROCEDURE HandleInternal (VAR msg: WMMessages.Message);
+			PROCEDURE StartDrag (w: Window; sender, data: PTR; img: WMGraphics.Image.; onAccept, onReject: WMMessages.CompCommand): BOOLEAN;
 
 		(* Add a region to be refreshed *)
-			PROCEDURE AddDirty0 (VAR rect: Rectangle);
+			PROCEDURE AddDirty (VAR rect: Rectangle);
 
 		(* Add a region to be refreshed, if visible through windows w and above *)
-			PROCEDURE AddVisibleDirty1 (w: Window; rect: Rectangle);
+			PROCEDURE AddVisibleDirty (w: Window; rect: Rectangle);
 
 		(* Load a decoration style *)
-			PROCEDURE LoadDecoration2 (filename: ARRAY OF CHAR);
+			PROCEDURE LoadDecoration (filename: ARRAY OF CHAR);
 		END;
 
 		MouseObj3 = OBJECT ( AosInputs.Sink4 ) 
-			PROCEDURE & Init5 (t, s: LONGINT);
+			PROCEDURE & Init (t, s: LONGINT);
 		END;
 
 	(* The keyboard handler *)
-		Toucher6 = OBJECT
+		Toucher = OBJECT
 		END;
 
-		Fifi7 = OBJECT
-			PROCEDURE Reset8;
-			PROCEDURE & Init9 (delay: LONGINT);
+		Fifi = OBJECT
+			PROCEDURE Reset;
+			PROCEDURE & Init (delay: LONGINT);
 		END;
 
 	VAR 
-		defaultKeyboard:: KeyboardObj;
-		defaultMouse;: MouseObj<;
-	PROCEDURE Replace= (par: PTR): PTR;
-	PROCEDURE Install> (par: PTR): PTR;
+		defaultKeyboard: KeyboardObj;
+		defaultMouse: MouseObj;
+	PROCEDURE Replace (par: PTR): PTR;
+	PROCEDURE Install (par: PTR): PTR;
 
 END WindowManager.

@@ -645,8 +645,10 @@ MODULE TextMail;	(** portable *)	(*RS/ARD/JG, 12.10.97*)
 BEGIN Texts.OpenWriter(W)
 END TextMail.
 
+(*
 !System.DeleteFiles Mail.TDB ~
 !TextMail.DeleteAll
+*)
 TextMail.Search Mail.TDB "From"
 TextMail.GetAll Mail.TDB
 TextMail.Store Mail.TDB

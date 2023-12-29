@@ -467,6 +467,6 @@ BEGIN
 END ToggleNewFeatures;
 
 END WMRasterScale.
-
+
 
 SpeedTest.Mod

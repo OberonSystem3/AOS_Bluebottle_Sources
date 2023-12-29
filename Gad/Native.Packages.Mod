@@ -717,7 +717,7 @@ MODULE Packages; (** portable / source: Native.Packages.Mod *)	(* ejz   *)
 				END;
 				IF (D # NIL) & (D.dsc # NIL) THEN obj := D END
 			ELSIF prefix = "lib" THEN
-				obj := Gadgets.FindPublicObj(gen) (* ref, deep, shallow ? *)
+				obj := Gadgets.FindPublicObj(gen) (* ref, deep, shallow ? *)
 			ELSE
 				COPY(prefix, err); Strings.Append(err, ": invalid generator prefix")
 			END;

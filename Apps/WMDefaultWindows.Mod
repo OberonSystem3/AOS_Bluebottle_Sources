@@ -12,7 +12,7 @@ TYPE
 	Rectangle =  WMRectangles.Rectangle;
 	Message = Messages.Message;
 	String = Utilities.String;
-	DecorWindow* = OBJECT(Window);
+	DecorWindow* = OBJECT(Window)
 	VAR
 		lastX, lastY : LONGINT;
 		dragging : BOOLEAN;

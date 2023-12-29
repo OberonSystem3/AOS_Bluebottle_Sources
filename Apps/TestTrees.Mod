@@ -6,7 +6,7 @@ IMPORT
 	WMGraphics, WMTrees,  WMEditors;
 
 TYPE
-	String = Utilities.String;;
+	String = Utilities.String;
 	Window = OBJECT (WMComponents.FormWindow)
 	VAR 
 		panel : WMStandardComponents.Panel;

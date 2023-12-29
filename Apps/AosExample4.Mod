@@ -8,7 +8,7 @@ Ref: C.A.R. Hoare, "Monitors: An Operating System Structuring Concept", CACM 17(
 *)
 
 TYPE
-	Buffer* = OBJECT VAR next: Buffer END Buffer;	(** must be extended by client *)
+	Buffer* = OBJECT VAR next: Buffer; END Buffer;	(** must be extended by client *)
 	
 	BufferPool* = OBJECT
 		VAR root: Buffer;

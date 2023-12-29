@@ -216,7 +216,7 @@ CONST
 	opSTC* = { 27, 26 };
 	
 	
-
+
 TYPE
 	DCDList = POINTER TO RECORD
 		pc: LONGINT;
@@ -765,4 +765,4 @@ BEGIN
 	AddrMode[4] := - {};
 	SetConstantPoolBarrier(-1)
 END PCOARM.
-
+

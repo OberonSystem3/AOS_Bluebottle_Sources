@@ -34,7 +34,7 @@ Refer to the "General ETH Oberon System Source License" contract available at: h
 	...
 *)
 
-MODULE TextPopups;	(** portable *)	(* tk 6.12.95 *)
+MODULE TextPopups;	(** portable *)	(* tk 6.12.95 *)
 
 	(* some marked compiler calls are not portable - but can easily be adopted for different implementations *)
 
