@@ -1,6 +1,10 @@
 MODULE WMWindowManager;	(** AUTHOR "TF"; PURPOSE "Generic window manager"; *)
-
-(* 03-04-03: RG: Added initialbounds *)
+(**
+ * History:
+ *
+ *	03-04-03	Added initialbounds (RG)
+ *	10.12.2006	Added WindowManager.GetFocusOwner (staubesv)
+ *)
 
 IMPORT
 	AosOut, Utilities,  
@@ -17,7 +21,8 @@ CONST
 	FlagNonDispatched* = 4; (** The window has no message queue --> BE CAREFUL *)
 	FlagNoFocus* = 5; (** The window can never get the keyboard focus *)
 	FlagDecorWindow* = 6; (** The window is a decor window, associated to a master window *)
-	
+	FlagStayOnBottom* = 7; (** The window can not be moved up *)
+		
 	SizeMinHeight = 3; (* Minimum height of a window *)
 	SizeMinWidth = 3; (* Minimum width of a window *)
 
@@ -42,7 +47,9 @@ TYPE
 		atextX*, atextY*, itextX*, itextY* : LONGINT;
 		atextColor*, itextColor* : LONGINT;
 		bgColor*, fgColor*, selectCol*, desktopColor* : Graphics.Color;
-		style* : LONGINT; (* 0 = simple; 2 = bitmap *)
+		useBitmaps* : BOOLEAN;
+		topFocusThreshold*, topThreshold*, bottomFocusThreshold*, bottomThreshold*,
+		leftFocusThreshold*, leftThreshold*, rightFocusThreshold*, rightThreshold* : LONGINT;
 		baCol*, biCol*, basw*, bisw* : LONGINT;
 	END WindowStyle;
 
@@ -67,9 +74,9 @@ TYPE
 	
 	Window* = OBJECT
 	VAR
-		width, height : LONGINT; (* user coordinate space from 0..width-1, 0..height-1 *)
-		bounds* : Rectangle; (** Range in global coordinates *)
-		initialBounds* : Rectangle; (** Range in global coordinates at window creation *)
+		(** Ranges in global coordinates *)
+		bounds* : Rectangle; (** current range *)
+		initialBounds* : Rectangle; (** range at window creation *)
 		
 		manager* : WindowManager;
 		sequencer* : MsgSequencer;
@@ -126,7 +133,7 @@ TYPE
 			width and height contain the desired new size. The Window should set width and height to acceptable 
 			values or return the current size, if resize is not supported *)
 		PROCEDURE Resizing*(VAR width, height : LONGINT);
-			BEGIN
+		BEGIN
 			IF width < SizeMinWidth THEN width := GetWidth() END;
 			IF height < SizeMinHeight THEN height := GetHeight() END
 		END Resizing;
@@ -278,7 +285,7 @@ TYPE
 				KeyEvent(m.x, m.flags, m.y)
 			ELSIF m.msgType = Messages.MsgPointer THEN 
 				IF m.msgSubType = Messages.MsgSubPointerMove THEN 
-					IF (m.dz # 0) THEN WheelMove(m.dy) END;
+					IF (m.dz # 0) THEN WheelMove(m.dz) END;
 (*					IF (m.dx # 0) OR (m.dy # 0) OR TRUE THEN PointerMove(m.x, m.y, m.flags) END; *)
 					PointerMove(m.x, m.y, m.flags)
 				ELSIF m.msgSubType = Messages.MsgSubPointerDown THEN PointerDown(m.x, m.y, m.flags)
@@ -331,7 +338,6 @@ TYPE
 		img* : Graphics.Image;
 		canvas* : Graphics.BufferCanvas;
 		pointerThreshold* : LONGINT;
-		fx, fy : REAL;
 		
 		PROCEDURE &Init*(w, h : LONGINT; alpha : BOOLEAN);
 		BEGIN
@@ -497,6 +503,11 @@ TYPE
 		BEGIN
 		END SetRange;
 		
+		(**  Return the modifier keys that are pressed in the view *)
+		PROCEDURE GetKeyState*(VAR state : SET);
+		BEGIN
+		END GetKeyState;			
+		
 	END ViewPort;
 	
 	Decorator* = PROCEDURE {DELEGATE} (w : Window);
@@ -504,7 +515,7 @@ TYPE
 	WindowManager* = OBJECT(AosPlugins.Plugin)
 	VAR
 		pointerNull*, pointerStandard*, pointerMove*, pointerText*, pointerCrosshair*,
-		pointerLeftRight*, pointerUpDown*, pointerULDR*, pointerURDL* : PointerInfo;
+		pointerLeftRight*, pointerUpDown*, pointerULDR*, pointerURDL*, pointerLink* : PointerInfo;
 		decorate* : Decorator;
 		viewRegistry* : AosPlugins.Registry;
 		me* : PTR; (** the window manager thread for assertions *)
@@ -515,50 +526,63 @@ TYPE
 			
 		PROCEDURE &Init;
 		BEGIN
-			LoadCursor("S2004.arrow.png", 0, 0, pointerStandard);
-			LoadCursor("S2004.move.png", 15, 15, pointerMove);
-			LoadCursor("S2004.text.png", 13, 12, pointerText);
-			LoadCursor("S2004.crosshair.png", 13, 12, pointerCrosshair);
-			LoadCursor("S2004.uldr.png", 13, 12, pointerULDR);
-			LoadCursor("S2004.updown.png", 13, 12, pointerUpDown);
-			LoadCursor("S2004.leftright.png", 13, 12, pointerLeftRight);
+			InitCursors;
 			NEW(pointerNull);
-			NEW(viewRegistry, "EXPView#", "Views in the Experimental Window Manager");
+			NEW(viewRegistry, "View#", "Views Port Window Manager");
 			NEW(sequencer, Handle); lock := sequencer.lock;
-			NEW(style); InitStyle;
+			NEW(style); InitStyle(style);
 		END Init;
 		
-		PROCEDURE InitStyle;
-		VAR s : WindowStyle;
-				PROCEDURE Load(VAR img : Graphics.Image; name : ARRAY OF CHAR);
-				BEGIN
-					img := Graphics.LoadImage(name, TRUE);
-				END Load;
+		PROCEDURE InitCursors*;
 		BEGIN
-			s := style;
-	(*		(* Top *)
-			Load(s.taa, "blueplastic.atl.png"); Load(s.tab, "blueplastic.atm.png"); Load(s.tac, "blueplastic.atr.png");
-			Load(s.tia, "blueplastic.itl.png"); Load(s.tib, "blueplastic.itm.png"); Load(s.tic, "blueplastic.itr.png");
-			Load(s.ci, "blueplastic.iclose.png"); Load(s.ca, "blueplastic.aclose.png");
-			
-			(* Left *)
-			Load(s.laa, "blueplastic.alt.png"); Load(s.lab, "blueplastic.alm.png"); Load(s.lac, "blueplastic.alb.png");
-			Load(s.lia, "blueplastic.ilt.png"); Load(s.lib, "blueplastic.ilm.png"); Load(s.lic, "blueplastic.ilb.png");
-			(* Right *)
-			Load(s.raa, "blueplastic.art.png"); Load(s.rab, "blueplastic.arm.png"); Load(s.rac, "blueplastic.arb.png");
-			Load(s.ria, "blueplastic.irt.png"); Load(s.rib, "blueplastic.irm.png"); Load(s.ric, "blueplastic.irb.png");
-			
-			(* Bottom *)
-			Load(s.baa, "blueplastic.abl.png"); Load(s.bab, "blueplastic.abm.png"); Load(s.bac, "blueplastic.abr.png");
-			Load(s.bia, "blueplastic.ibl.png"); Load(s.bib, "blueplastic.ibm.png"); Load(s.bic, "blueplastic.ibr.png");
-			*)
-			s.style := 0; s.baCol := 0FFFFH; s.biCol := 0FF40H; s.basw := 4; s.bisw := 3;
-			s.th := 20; s.lw := 3; s.rw := 3; s.bh := 3; s.atextX := 5; s.atextY := 15; s.itextX := 5; s.itextY := 15;
-			s.atextColor := 0FFFF00FFH; s.itextColor := 04444FFH;
-			Load(s.ci, "traditional.iclose.png"); Load(s.ca, "traditional.aclose.png");
-			
+			LoadCursor("ZeroSkin.zip://arrow.png", 0, 0, pointerStandard);
+			LoadCursor("ZeroSkin.zip://move.png", 15, 15, pointerMove);
+			LoadCursor("ZeroSkin.zip://text.png", 13, 12, pointerText);
+			LoadCursor("ZeroSkin.zip://crosshair.png", 13, 12, pointerCrosshair);
+			LoadCursor("ZeroSkin.zip://uldr.png", 13, 12, pointerULDR);
+			LoadCursor("ZeroSkin.zip://urdl.png", 13, 12, pointerURDL);
+			LoadCursor("ZeroSkin.zip://updown.png", 13, 12, pointerUpDown);
+			LoadCursor("ZeroSkin.zip://leftright.png", 13, 12, pointerLeftRight);
+			LoadCursor("ZeroSkin.zip://leftright.png", 13, 12, pointerLeftRight);
+			LoadCursor("ZeroSkin.zip://hand.png", 6, 0, pointerLink);
+		END InitCursors;
+
+		(* zero-style for windows *)
+		PROCEDURE InitStyle*(s : WindowStyle);
+
+			PROCEDURE Load(VAR img : Graphics.Image; name : ARRAY OF CHAR);
+			BEGIN
+				img := Graphics.LoadImage(name, TRUE);
+			END Load;
+
+		BEGIN
+			(* border *)
+			s.useBitmaps := FALSE;
+			s.baCol := 0FFFFH; s.biCol := 0FF40H; s.basw := 4; s.bisw := 3;
+			s.th := 20; s.lw := 3; s.rw := 3; s.bh := 3;
+
+			s.topFocusThreshold := 0; s.topThreshold := 0;
+			(* window caption *)
+			s.atextX := 5; s.atextY := 15; s.atextColor := 0FFFF00FFH;
+			s.itextX := 5; s.itextY := 15; s.itextColor := 04444FFH;
+			(* close button *)
+			Load(s.ci, "ZeroSkin.zip://iclose.png"); Load(s.ca, "ZeroSkin.zip://aclose.png");
+			(* desktop *)
+			s.desktopColor := 08080FFFFH;
+			s.fgColor := 0000000FFH;
+			s.bgColor := 08080FFFFH;
+			s.selectCol := 0FFFFH;
 			InitializeStyle(s)
 		END InitStyle;
+		
+		PROCEDURE ZeroSkin*;
+		BEGIN
+			lock.AcquireWrite;
+			InitStyle(SELF.style);
+			SetStyle(SELF.style);
+			InitCursors();
+			lock.ReleaseWrite
+		END ZeroSkin;
 		
 		PROCEDURE ShutDown*;
 		BEGIN
@@ -660,6 +684,10 @@ TYPE
 		BEGIN
 		END GetPositionOwner;
 		
+		PROCEDURE GetFocusOwner*() : Window;
+		BEGIN
+		END GetFocusOwner;
+		
 		(** Set the title of a window as UTF-8 string *)
 		PROCEDURE SetWindowTitle*(w : Window; title : String);
 		VAR tw : Window;
@@ -688,6 +716,11 @@ TYPE
 		PROCEDURE StartDrag*(w : Window; sender, data : PTR; img : Graphics.Image; onAccept, onReject : Messages.CompCommand) : BOOLEAN;
 		BEGIN
 		END StartDrag;
+		
+		(** a pointer button must be pressed *)
+		PROCEDURE TransferPointer*( to : Window) : BOOLEAN;
+		BEGIN
+		END TransferPointer;
 		
 		(** Adjust pointer to new position / check picture *)
 		PROCEDURE CheckPointerImage*;
@@ -802,11 +835,11 @@ TYPE
 	END WindowManager;
 	
 VAR registry* : AosPlugins.Registry;
-	
+
 (** calculate distances from images *)
 PROCEDURE InitializeStyle*(s : WindowStyle);
 BEGIN
-	IF s.style = 2 THEN
+	IF s.useBitmaps THEN
 		IF s.tab # NIL THEN s.th := s.tab.height END;
 		IF s.bab # NIL THEN s.bh := s.bab.height END;
 		IF s.lab # NIL THEN s.lw := s.lab.width END;
@@ -821,11 +854,10 @@ BEGIN
 END NewString;
 	
 PROCEDURE LoadCursor*(name : ARRAY OF CHAR; hx, hy : LONGINT; VAR pi : PointerInfo);
-VAR done : BOOLEAN;
 BEGIN
 	IF pi = NIL THEN NEW(pi) END;
 	pi.img := Graphics.LoadImage(name, TRUE); pi.hotX := hx; pi.hotY := hy;
-	IF pi.img = NIL THEN AosOut.String("Picture not loaded"); AosOut.String(name); AosOut.Ln END
+	IF pi.img = NIL THEN AosOut.String("Picture not loaded : "); AosOut.String(name); AosOut.Ln END
 END LoadCursor;
 
 PROCEDURE GetDefaultManager*() : WindowManager;

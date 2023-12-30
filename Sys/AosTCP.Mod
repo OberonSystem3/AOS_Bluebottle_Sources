@@ -44,7 +44,7 @@ TCP - Transmission Control Protocol. Based on the 4.4BSD-Lite distribution descr
 
 *)
 
-IMPORT SYSTEM, AosOut, AosClock, AosModules, AosKernel, AosActive, AosNet, AosIP, AosIO;
+IMPORT SYSTEM, AosOut, AosClock, AosModules, AosKernel, AosActive, AosNet, AosIP, AosIO, AosActiveTimers;
 
 CONST
 	StrongChecks = FALSE;
@@ -126,13 +126,13 @@ CONST
 	
 	NumTimers = 4;
 	ReXmt = 0; Persist = 1; Keep = 2; MSL2 = 3;
-	
-	FastPeriod = 10;	(* number of fast ticks per second *)
-	SlowPeriod = 5;	(* number of slow ticks per second *)
-	TimerPeriod = 10;	(* timer ticks per second *)
 
-	MinTime = 1;	(* minimum allowable time value *)
-	ReXmtMax = 64;	(* max allowable ReXmt value *)
+	FastPeriod = 5;	(* number of fast ticks per second *)
+	SlowPeriod = 2;	(* number of slow ticks per second *)
+	TimerPeriod = 10;	(* timer ticks per second *)
+	MinTime = 1*SlowPeriod;	(* minimum allowable time value *)
+	ReXmtMax = 64*SlowPeriod;	(* max allowable ReXmt value *)
+	
 	ReXmtThresh = 3;
 	
 	KeepInit = 75*SlowPeriod;	(* connection establishment timer value (75s) *)
@@ -142,6 +142,7 @@ CONST
 	MaxIdle = KeepCnt * KeepIntvl;	(* max time to send keepalive probes (10min) *)
 	MSL = 30*SlowPeriod;	(* max segment lifetime (30s) *)
 	MaxPersistIdle = KeepIdle;	(* max time to keep dead/unreachable connections (2h) *)
+
 	
 	PawsIdle = 24*24*60*60*SlowPeriod;
 	
@@ -149,8 +150,8 @@ CONST
 	SRTTDflt = 3*SlowPeriod;	(* assumed RTT if no info *)
 	RTTShift = 3;
 	RTTVarShift = 2;
-	
-	PersMin = 5*SlowPeriod;	(* retransmit persistance *)
+
+	PersMin = 5*SlowPeriod;	(* retransmit persistance *)	
 	PersMax = 60*SlowPeriod;	(* maximum persist interval *)
 
 	MSS = 536-12; (* maximum segment size for outgoing segments, 12 = size of timestamp option *)
@@ -171,7 +172,7 @@ CONST
 	
 	MinTCPHdrLen = 20;
 	MaxTCPHdrLen = 60;
-	PseudoHdrLen = 12;
+	MaxPseudoHdrLen = 40; (* IPv4 = 12; IPv6 = 40 *)
 
 	NewZeros = FALSE;	(* NEW initializes allocated object fields to 0 *)
 	
@@ -206,7 +207,7 @@ CONST
 	
 TYPE
 	(* Send buffer types *)
-	SendData = POINTER TO ARRAY OF CHAR;
+	SendData = AosIP.Packet;
 	
 	SendBuffer = POINTER TO RECORD
 		next: SendBuffer;
@@ -244,6 +245,7 @@ TYPE
 			lastFast, lastSlow: LONGINT;	(* time of last execution *)
 			(*lastTrace: LONGINT;*)
 			now: LONGINT;	(* current tcp "time" - read from other procedures, but only updated inside this object *)
+			timer: AosActiveTimers.Timer;
 		
 		PROCEDURE CallDelayedAck(p: Connection);
 		BEGIN
@@ -256,7 +258,7 @@ TYPE
 		END CallSlowTimer;
 		
 		PROCEDURE HandleTimeout();
-		VAR t: LONGINT; p: Connection;
+		VAR t: LONGINT;
 		BEGIN {EXCLUSIVE}
 			t := AosKernel.GetTimer();
 			IF t - lastFast >= AosKernel.second DIV FastPeriod THEN
@@ -269,7 +271,7 @@ TYPE
 				issSource.Update(SlowPeriod);
 				INC(now)
 			END;
-			AosActive.SetTimeout(SELF, SELF.HandleTimeout, AosKernel.second DIV TimerPeriod)
+			timer.SetTimeout(HandleTimeout, AosKernel.second DIV TimerPeriod)
 		END HandleTimeout;
 		
 		(* Finalize timer by cancelling it *)
@@ -283,9 +285,11 @@ TYPE
 		BEGIN
 			now := 0;
 			lastSlow := AosKernel.GetTimer() - AosKernel.second;
-			lastFast := lastSlow; (*lastTrace := lastSlow;*)
-			AosActive.SetTimeout(SELF, SELF.HandleTimeout, 1000 DIV TimerPeriod)
+			lastFast := lastSlow; (*lastTrace := lastSlow;*);
+			NEW(timer);
+			timer.SetTimeout(HandleTimeout, 1000 DIV TimerPeriod)
 		END Init;
+	
 	END Timer;
 	
 TYPE
@@ -354,24 +358,26 @@ TYPE
 			rcvspace-: LONGINT;	(* number of bytes that may still be received before buffer is considered full *)
 			rcvhiwat-: LONGINT;	(* receive high water mark (MaxRecvSpace) *)
 			rcvhead, rcvreasm, rcvtail: AosNet.Buffer;	(* queue of segments - see description at the beginning of this file *)
+			rcvheadFragment: AosNet.Buffer; (* current fragment of rcvhead *)
 			timeout: AosActive.Timer;
+			traceflow-: LONGINT;
+		
 		
 		(* Initialization for internal use only. *)
-		
 		PROCEDURE &Init;
 		BEGIN
 			state := Unused;
 		END Init;
 		
 		(** Open a TCP connection (only use once per Connection instance). 
-			Use AosIP.NilPort for lport to automatically assign an unused local port.
+			Use AosTCP.NilPort for lport to automatically assign an unused local port.
 		*)
 		PROCEDURE Open*(lport: LONGINT; fip: AosIP.Adr; fport: LONGINT; VAR res: LONGINT);
 		BEGIN {EXCLUSIVE}
 			ASSERT((state = Unused) & (lport >= 0) & (lport < 10000H) & (fport >= 0) & (fport < 10000H));
 			IF timeSource # NIL THEN
 				InitConnection(SELF);
-				IF (fip # AosIP.NilAdr) & (fport # NilPort) THEN
+				IF (~AosIP.IsNilAdr(fip)) & (fport # NilPort) THEN
 					(* active open (connect) *)
 					int := AosIP.InterfaceByDstIP(fip);
 					IF int # NIL THEN
@@ -389,7 +395,7 @@ TYPE
 					END;
 				ELSE
 					(* passive open (listen) *)
-					ASSERT((fport = NilPort) & (fip = AosIP.NilAdr));
+					ASSERT((fport = NilPort) & (AosIP.IsNilAdr(fip)));
 					SELF.int := NIL;
 					SELF.fip := AosIP.NilAdr;
 					pool.Add(SELF, lport, NilPort, res);
@@ -407,8 +413,8 @@ TYPE
 			END
 		END Open;
 
-		(** Send data on a TCP connection. *)
-		
+
+		(** Send data on a TCP connection. *)		
 		PROCEDURE Send*(VAR data: ARRAY OF CHAR; ofs, len: LONGINT; propagate: BOOLEAN; VAR res: LONGINT);
 		VAR buf: SendBuffer; len0: LONGINT;
 		BEGIN {EXCLUSIVE}
@@ -462,41 +468,79 @@ TYPE
 			res := Ok
 		END Send;
 
+
 		(** Receive data on a TCP connection. The data parameter specifies the buffer. The ofs parameters specify the position in the buffer where data should be received (usually 0), and the size parameters specifies how many bytes of data can be received in the buffer. The min parameter specifies the minimum number of bytes to receive before Receive returns and must by <= size. The len parameter returns the number of bytes received, and the res parameter returns 0 if ok, or a non-zero error code otherwise (e.g. if the connection is closed by the communication partner, or by a call of the Close method). *)
-		
 		PROCEDURE Receive*(VAR data: ARRAY OF CHAR; ofs, size, min: LONGINT; VAR len, res: LONGINT);
 		VAR
 			buf: AosNet.Buffer;
 			rlen: LONGINT;
+			
 		BEGIN {EXCLUSIVE}
 			IF StrongChecks THEN Invariant(SELF) END;
 			ASSERT((ofs >= 0) & (ofs+size <= LEN(data)) & (min <= size));	(* parameter consistency check *)
 			len := 0;
 			LOOP
 				WHILE (rcvhead # NIL) & (rcvhead # rcvreasm) & (size > 0) DO
-					(* read all available data until user buffer is full *)
-					rlen := Min(rcvhead.len, size);
-					IF SystemMove THEN
-						SYSTEM.MOVE(SYSTEM.ADR(rcvhead.data[rcvhead.ofs]), SYSTEM.ADR(data[ofs]), rlen);
-					ELSE
-						AosNet.Copy(rcvhead.data, data, rcvhead.ofs, ofs, rlen);
-					END;
-					INC(len, rlen);
-					INC(ofs, rlen);
-					DEC(size, rlen);
-					INC(rcvhead.ofs, rlen);
-					DEC(rcvhead.len, rlen);
-					INC(rcvhead.int, rlen);
-					INC(rcvspace, rlen);
-					IF rcvhead.len = 0 THEN
-						(* go to next buffer *)
-						buf := rcvhead;
-						rcvhead := rcvhead.next;
-						IF rcvhead # NIL THEN
-							rcvhead.prev := NIL;
+					IF rcvhead.nextFragment = NIL THEN
+						(* read all available data until user buffer is full *)
+						rlen := Min(rcvhead.len, size);
+						IF SystemMove THEN
+							SYSTEM.MOVE(SYSTEM.ADR(rcvhead.data[rcvhead.ofs]), SYSTEM.ADR(data[ofs]), rlen);
+						ELSE
+							AosNet.Copy(rcvhead.data, data, rcvhead.ofs, ofs, rlen);
 						END;
-						AosNet.ReturnBuffer(buf);
-						Output(SELF); (* enable sending window update segment *)
+						INC(len, rlen);
+						INC(ofs, rlen);
+						DEC(size, rlen);
+						INC(rcvhead.ofs, rlen);
+						DEC(rcvhead.len, rlen);
+						INC(rcvhead.int, rlen);
+						INC(rcvspace, rlen);
+						IF rcvhead.len = 0 THEN
+							(* go to next buffer *)
+							buf := rcvhead;
+							rcvhead := rcvhead.next;
+							IF rcvhead # NIL THEN
+								rcvhead.prev := NIL;
+							END;
+							AosNet.ReturnBuffer(buf);
+							Output(SELF); (* enable sending window update segment *)
+						END;
+					ELSE
+						(* rcvhead has fragments *)
+						(* read all available data until user buffer is full *)
+						IF rcvheadFragment = NIL THEN
+							rcvheadFragment := rcvhead;
+						END;
+						rlen := Min(rcvheadFragment.len, size);
+						IF SystemMove THEN
+							SYSTEM.MOVE(SYSTEM.ADR(rcvheadFragment.data[rcvheadFragment.ofs]), SYSTEM.ADR(data[ofs]), rlen);
+						ELSE
+							AosNet.Copy(rcvheadFragment.data, data, rcvheadFragment.ofs, ofs, rlen);
+						END;
+						INC(len, rlen);
+						INC(ofs, rlen);
+						DEC(size, rlen);
+						INC(rcvheadFragment.ofs, rlen);
+						DEC(rcvheadFragment.len, rlen);
+						INC(rcvheadFragment.int, rlen);
+						INC(rcvspace, rlen);
+						IF rcvheadFragment.len = 0 THEN
+							IF rcvheadFragment.nextFragment # NIL THEN
+								(* go to next fragment *)
+								rcvheadFragment := rcvheadFragment.nextFragment;
+							ELSE
+								(* go to next buffer *)
+								buf := rcvhead;
+								rcvhead := rcvhead.next;
+								IF rcvhead # NIL THEN
+									rcvhead.prev := NIL;
+								END;
+								AosNet.ReturnBuffer(buf);
+								Output(SELF); (* enable sending window update segment *)
+							END;
+						END;
+						
 					END;
 				END;
 				IF size = 0 THEN
@@ -526,6 +570,7 @@ TYPE
 			res := Ok
 		END Receive;
 		
+		
 		(** Enable or disable delayed send (Nagle algorithm).
 			If enabled, the sending of a segment is delayed if it is not filled by one call to Send, in order to be able to be filled
 			by further calls to Send. This is the default option.
@@ -541,9 +586,9 @@ TYPE
 			END;
 		END DelaySend;
 
+
 		(** Enable or disable keep-alive. (default: disabled) *)
-		
-			PROCEDURE KeepAlive*(enable: BOOLEAN);
+		PROCEDURE KeepAlive*(enable: BOOLEAN);
 		BEGIN {EXCLUSIVE}
 			IF enable THEN
 				INCL(flags, DoKeepAlive);
@@ -552,24 +597,37 @@ TYPE
 			END;
 		END KeepAlive;
 
+
 		(** Return number of bytes that may be read without blocking. *)
-		
 		PROCEDURE Available*(): LONGINT;
 		VAR
 			len: LONGINT;
 			item: AosNet.Buffer;
+			fragmentBuffer: AosNet.Buffer;
+			reassembledLength: LONGINT;
+			
 		BEGIN {EXCLUSIVE}
 			len := 0;
 			item := rcvhead;
 			WHILE(item # NIL) & (item # rcvreasm) DO
-				INC(len, item.len);
+				IF item.nextFragment # NIL THEN
+					INC(len, item.len);
+				ELSE
+					(* fragmented packet *)
+					fragmentBuffer := item;
+					reassembledLength := 0;
+					WHILE fragmentBuffer # NIL DO
+						INC(len, fragmentBuffer.len);
+						fragmentBuffer := fragmentBuffer.nextFragment;
+					END;					
+				END;
 				item := item.next;
 			END;
 			RETURN len;
 		END Available;
 
+
 		(** Return connection state. *)
-		
 		PROCEDURE State*(): LONGINT;
 		BEGIN {EXCLUSIVE}
 			IF (state IN FinStates) & (rcvhead # NIL) & (rcvhead.len # 0) THEN	(* workaround for client errors *)
@@ -583,8 +641,8 @@ TYPE
 			END
 		END State;
 
+
 		(** Wait until the connection state is either in the good or bad set, up to "ms" milliseconds. *)
-		
 		PROCEDURE AwaitState*(good, bad: SET; ms: LONGINT; VAR res: LONGINT);
 		BEGIN {EXCLUSIVE}
 			IF ~(state IN (good+bad)) THEN
@@ -605,13 +663,14 @@ TYPE
 			END
 		END AwaitState;
 		
+		
 		PROCEDURE HandleTimeout;
 		BEGIN {EXCLUSIVE}
 			INCL(flags, Timeout)
 		END HandleTimeout;
 		
-		(** Close a TCP connection (half-close). *)
 		
+		(** Close a TCP connection (half-close). *)
 		PROCEDURE Close*;
 		BEGIN {EXCLUSIVE}
 			IF state < Established THEN
@@ -627,8 +686,8 @@ TYPE
 			END
 		END Close;
 
+
 		(** Discard a TCP connection (shutdown). *)
-		
 		PROCEDURE Discard*;
 		BEGIN {EXCLUSIVE}
 			IF state < Established THEN
@@ -641,8 +700,8 @@ TYPE
 			END
 		END Discard;
 
-		(** Accept a client waiting on a listening connection. Blocks until a client is available or the connection is closed. *)
-		
+
+		(** Accept a client waiting on a listening connection. Blocks until a client is available or the connection is closed. *)		
 		PROCEDURE Accept*(VAR client: Connection; VAR res: LONGINT);
 		BEGIN {EXCLUSIVE}
 			AWAIT((state # Listen) OR (acceptNext # NIL));
@@ -654,19 +713,20 @@ TYPE
 			END
 		END Accept;
 		
-		(** Return TRUE iff a listening connection has clients waiting to be accepted. *)
 		
+		(** Return TRUE iff a listening connection has clients waiting to be accepted. *)
 		PROCEDURE Requested*(): BOOLEAN;
 		BEGIN {EXCLUSIVE}
 			RETURN (state = Listen) & (acceptNext # NIL)
 		END Requested;
 		
-		(* Process a received segment for the current Connection. *)
 		
+		(* Process a received segment for the current Connection. *)
 		PROCEDURE Input(int: AosIP.Interface; fip: AosIP.Adr; hdrLen: LONGINT; buffer: AosNet.Buffer);
 		VAR
 			bufferQueued: BOOLEAN; (* was buffer queued by ProcessInput() ? *)
 			p: Connection;
+			
 		BEGIN {EXCLUSIVE}
 			(* to do: move header prediction code here *)
 			IF StrongChecks THEN Invariant(SELF) END;
@@ -705,8 +765,8 @@ TYPE
 			END;
 		END Input;
 
+
 		(* Schedule a delayed ack. *)
-		
 		PROCEDURE DelayedAck;
 		BEGIN {EXCLUSIVE}
 			IF StrongChecks THEN Invariant(SELF) END;
@@ -717,11 +777,13 @@ TYPE
 			END
 		END DelayedAck;
 		
-		(* Schedule a slow timer event (fig. 25.8). *)
 		
+		(* Schedule a slow timer event (fig. 25.8). *)
 		PROCEDURE SlowTimer;
 		VAR dropit: BOOLEAN;
+			oldie: LONGINT;
 		BEGIN {EXCLUSIVE}
+			oldie := sndnxt;
 			IF StrongChecks THEN Invariant(SELF) END;
 
 			IF Expired(timer[ReXmt]) THEN	(* fig. 25.26 *)
@@ -757,21 +819,27 @@ TYPE
 				END
 			END;
 			
+			traceflow := 0;
+			
 			IF Expired(timer[Keep]) THEN	(* fig. 25.16 *)
 				AosKernel.AtomicInc(NTCPKeepTimer); dropit := FALSE;
 				IF state >= Established THEN
 					IF (DoKeepAlive IN flags) & (state <= CloseWait) THEN
 						IF idle < KeepIdle + MaxIdle THEN
+							traceflow := 1;
 							AosKernel.AtomicInc(NTCPKeepProbe);
 							Respond(SELF, rcvnxt, snduna-1, {});
 							timer[Keep] := KeepIntvl
 						ELSE
+							traceflow := 2;
 							dropit := TRUE; Error(TimeOutKeepAlive, 0, SELF)
 						END
 					ELSE
+						traceflow := 3;
 						timer[Keep] := KeepIdle
 					END
 				ELSE
+					traceflow := 4;
 					dropit := TRUE; Error(TimeoutEstablished, 0, SELF)
 				END;
 				IF dropit THEN Drop(SELF, TimedOut) END
@@ -837,12 +905,15 @@ TYPE
 		(* Look for the specified Connection. *)
 		
 		PROCEDURE Lookup(lport, fport: LONGINT; fip: AosIP.Adr): Connection;
-		VAR item: Connection;
+		VAR 
+			item: Connection;
+			
 		BEGIN
 			item := table[HashPool(lport, fport, fip)];
-			WHILE (item # NIL) & ((item.fip # fip) OR (item.fport # fport) OR (item.lport # lport)) DO
+			WHILE (item # NIL) & ((~AosIP.AdrsEqual(item.fip, fip)) OR (item.fport # fport) OR (item.lport # lport)) DO
 				item := item.poolNext;
 			END;
+			
 			IF item = NIL THEN
 				RETURN nilpcb;
 			ELSE
@@ -874,8 +945,8 @@ TYPE
 		PROCEDURE Add(p: Connection; lport, fport: LONGINT; VAR res: LONGINT);
 		VAR i, sport: LONGINT;
 		BEGIN {EXCLUSIVE}
-			IF ((fport # NilPort) & (p.fip = AosIP.NilAdr)) OR (* workaround for XOR *)
-				((fport = NilPort) & (p.fip # AosIP.NilAdr)) THEN
+			IF ((fport # NilPort) & (AosIP.IsNilAdr(p.fip))) OR (* workaround for XOR *)			
+				((fport = NilPort) & (~AosIP.IsNilAdr(p.fip))) THEN
 				(* both must be "nil" or both must not be "nil" *)
 				res := InvalidParameter;
 				Error(res, 0, p);
@@ -967,15 +1038,15 @@ VAR
 	outflags: ARRAY NumStates OF SET;	(* output header flags *)
 	
 	(* TCP counters *)
-	NTCPError: ARRAY NumErrors OF LONGINT;
-	NTCPConnectAttempt, NTCPPersistTimer, NTCPFinWait2Timer, NTCPSendProbe, NTCPReXmtPack, 
-		NTCPReXmtByte, NTCPSendPack, NTCPSendByte, NTCPAcks, NTCPSendCtrl, NTCPSendUrg, 
-		NTCPSendWinUp, NTCPSegsTimed, NTCPSendTotal, NTCPKeepTimer, NTCPKeepProbe, 
-		NTCPReXmtTimer, NTCPRcvTotal, NTCPRcvOptions, NTCPCacheMiss, NTCPPredAck, NTCPAckPack, 
-		NTCPAckByte, NTCPPredData, NTCPRcvPackFast, NTCPRcvByteFast, NTCPConnects, NTCPRcvWinProbe, 
-		NTCPDrops, NTCPRcvWinUpd, NTCPRTTUpdated, NTCPDelAck, NTCPConnDrops, NTCPClosed, NTCPSplitBuffer,
-		NTCPRcvPackSlow, NTCPRcvByteSlow, NTCPNewBufs, NTCPTimeWaitTimer,
-		NTCPUnacceptable, NTCPAccepts, NTCPPersistDrop: LONGINT;
+	NTCPError-: ARRAY NumErrors OF LONGINT;
+	NTCPConnectAttempt-, NTCPPersistTimer-, NTCPFinWait2Timer-, NTCPSendProbe-, NTCPReXmtPack-, 
+		NTCPReXmtByte-, NTCPSendPack-, NTCPSendByte-, NTCPAcks-, NTCPSendCtrl-, NTCPSendUrg-, 
+		NTCPSendWinUp-, NTCPSegsTimed-, NTCPSendTotal-, NTCPKeepTimer-, NTCPKeepProbe-, 
+		NTCPReXmtTimer-, NTCPRcvTotal-, NTCPRcvOptions-, NTCPCacheMiss-, NTCPPredAck-, NTCPAckPack-, 
+		NTCPAckByte-, NTCPPredData-, NTCPRcvPackFast-, NTCPRcvByteFast-, NTCPConnects-, NTCPRcvWinProbe-, 
+		NTCPDrops-, NTCPRcvWinUpd-, NTCPRTTUpdated-, NTCPDelAck-, NTCPConnDrops-, NTCPClosed-, NTCPSplitBuffer-,
+		NTCPRcvPackSlow-, NTCPRcvByteSlow-, NTCPNewBufs-, NTCPTimeWaitTimer-,
+		NTCPUnacceptable-, NTCPAccepts-, NTCPPersistDrop-: LONGINT;
 	trace: BOOLEAN;
 	packetDumpListener : PacketDumpListener;
 
@@ -989,13 +1060,14 @@ BEGIN
 	packetDumpListener := pdl
 END SetDefaultListener;
 
-(* --- Utility procedures. *)
 
+(* --- Utility procedures. *)
 PROCEDURE Invariant(p: Connection);
 VAR
 	rcvbuf: AosNet.Buffer;
 	sndbuf: SendBuffer;
 	found: BOOLEAN;
+	
 BEGIN
 	IF StrongChecks & (p # nilpcb) THEN
 		(* receive buffers *)
@@ -1039,6 +1111,34 @@ BEGIN
 	END
 END Invariant;
 
+
+(* Hash function for ConnectionPool *)
+PROCEDURE HashPool(lport, fport: LONGINT; fip:AosIP.Adr): LONGINT;
+VAR
+	i: LONGINT;
+	hash: LONGINT;
+BEGIN
+	(* hash := (lport + fport + fip) MOD HashTableSize; *)
+	hash := lport + fport;
+	
+	CASE fip.usedProtocol OF
+		AosIP.IPv4:
+			INC(hash, fip.ipv4Adr);
+			
+		|AosIP.IPv6:
+			FOR i := 0 TO 15 DO
+				INC(hash, ORD(fip.ipv6Adr[i]));
+			END;
+			
+		ELSE
+		
+	END;
+	
+	RETURN hash MOD HashTableSize;
+	
+END HashPool;
+
+(*
 (* Hash function for ConnectionPool. *)
 
 PROCEDURE -HashPool(lport, fport: LONGINT; fip: AosIP.Adr): LONGINT;
@@ -1060,6 +1160,9 @@ CODE {SYSTEM.i386}
 	DIV EBX
 	MOV EAX, EDX
 END HashPool;
+*)
+
+
 
 (* Set x to val, but keep it between min and max. *)
 
@@ -1227,8 +1330,9 @@ VAR
 	idle, sendalot: BOOLEAN;
 	optLen, off, sum, win, len, adv, x, startseq, left: LONGINT;
 	pf: SET; buf: SendBuffer; data: SendData;
-	pseudoHdr: ARRAY PseudoHdrLen OF CHAR;
+	pseudoHdr: ARRAY MaxPseudoHdrLen OF CHAR;
 	hdr: ARRAY MaxTCPHdrLen OF CHAR;
+	pseudoHdrLen: LONGINT;
 BEGIN
 	idle := (p.sndmax = p.snduna);
 	IF idle & (p.idle >= p.rxtcur) THEN p.sndcwnd := p.maxseg END;
@@ -1363,6 +1467,7 @@ BEGIN
 			data := empty; off := 0
 		END;
 		IF (Fin IN pf) & (SentFin IN p.flags) & (p.sndnxt = p.sndmax) THEN DEC(p.sndnxt) END;
+		
 		IF (len # 0) OR (pf * {Syn,Fin} # {}) OR (p.timer[Persist] # 0) THEN
 			AosNet.PutNet4(hdr, 4, p.sndnxt)	(* sequence number *)
 		ELSE
@@ -1391,12 +1496,9 @@ BEGIN
 		
 		IF ~(AosNet.ChecksumTCP IN p.int.dev.calcChecksum) THEN
 			(* set pseudo header *)
-			AosNet.Put4(pseudoHdr, 0, p.int.localAdr); (* local IP address *)
-			AosNet.Put4(pseudoHdr, 4, p.fip); (* foreign IP address *)
-			AosNet.PutNet2(pseudoHdr, 8, IPTypeTCP); (* IP type code of TCP *)
-			AosNet.PutNet2(pseudoHdr, 10, MinTCPHdrLen+optLen+len); (* TCP length *)
-			
-			sum := AosIP.Checksum1(pseudoHdr, 0, PseudoHdrLen, 0);
+			pseudoHdrLen := p.int.WritePseudoHeader(pseudoHdr, p.int.localAdr, p.fip, IPTypeTCP, MinTCPHdrLen+optLen+len);
+
+			sum := AosIP.Checksum1(pseudoHdr, 0, pseudoHdrLen, 0);
 			sum := AosIP.Checksum1(hdr, 0, MinTCPHdrLen+optLen, sum);
 			sum := AosIP.Checksum2(data^, off, len, sum);
 			AosNet.Put2(hdr, 16, sum); (* checksum := sum *)
@@ -1424,7 +1526,7 @@ BEGIN
 		IF TraceProtocol THEN
 			TraceTCP("Output", p, hdr, data^, MinTCPHdrLen+optLen, off, len)
 		END;
-		
+
 		(* Send packet *)
 		p.int.Send(IPTypeTCP, p.fip, hdr, data^, MinTCPHdrLen+optLen, off, len, AosIP.MaxTTL);
 		
@@ -1454,8 +1556,10 @@ END Output;
 PROCEDURE Respond(p: Connection; ack, seq: LONGINT; rf: SET);
 VAR
 	win, sum: LONGINT;
-	pseudoHdr: ARRAY PseudoHdrLen OF CHAR;
+	pseudoHdr: ARRAY MaxPseudoHdrLen OF CHAR;
 	hdr: ARRAY MaxTCPHdrLen OF CHAR;
+	pseudoHdrLen: LONGINT;
+	
 BEGIN
 	win := ASH(p.rcvspace, -p.rcvscale);	(* zero in nilpcb *)
 	IF rf = {} THEN
@@ -1478,12 +1582,9 @@ BEGIN
 	
 	IF ~(AosNet.ChecksumTCP IN p.int.dev.calcChecksum) THEN
 		(* set pseudo header *)
-		AosNet.Put4(pseudoHdr, 0, p.int.localAdr); (* local IP address *)
-		AosNet.Put4(pseudoHdr, 4, p.fip); (* foreign IP address *)
-		AosNet.PutNet2(pseudoHdr, 8, IPTypeTCP); (* IP type code of TCP *)
-		AosNet.PutNet2(pseudoHdr, 10, MinTCPHdrLen); (* TCP length *)
-	
-		sum := AosIP.Checksum1(pseudoHdr, 0, PseudoHdrLen, 0);
+		pseudoHdrLen := p.int.WritePseudoHeader(pseudoHdr, p.int.localAdr, p.fip, IPTypeTCP, MinTCPHdrLen);
+		
+		sum := AosIP.Checksum1(pseudoHdr, 0, pseudoHdrLen, 0);
 		sum := AosIP.Checksum2(hdr, 0, MinTCPHdrLen, sum);
 		AosNet.Put2(hdr, 16, sum); (* checksum := sum; *)
 	END;
@@ -1533,7 +1634,8 @@ VAR delta: LONGINT;
 BEGIN
 	AosKernel.AtomicInc(NTCPRTTUpdated);
 	IF p.srtt # 0 THEN
-		delta := (rtt*4)  - ASH(p.srtt, -RTTShift);
+(*		delta := (rtt*4)  - ASH(p.srtt, -RTTShift);*)
+		delta := rtt - 1 - ASH(p.srtt, -RTTShift);
 		INC(p.srtt, delta);
 		IF p.srtt <= 0 THEN p.srtt := 1 END;
 		IF delta < 0 THEN delta := -delta END;
@@ -1544,13 +1646,15 @@ BEGIN
 		p.srtt := ASH(rtt, RTTShift); p.rttvar := ASH(rtt, RTTVarShift-1)
 	END;
 	p.rtt := 0; p.rxtshift := 0;
-	p.rxtcur:=((p.srtt DIV 8)+ p.rttvar) DIV 4;
-	IF p.rxtcur < (rtt+2) THEN p.rxtcur:=rtt; END;
+(*	p.rxtcur:=((p.srtt DIV 8)+ p.rttvar) DIV 4;
+	IF p.rxtcur < (rtt+2) THEN p.rxtcur:=rtt; END;*)
+	RangeSet(p.rxtcur, ASH(p.srtt, -RTTShift) + p.rttvar, MinTime, ReXmtMax);
+	
 	(*p.softerror := 0*)
 END XmitTimer;
 
-(* Drop len bytes from the front of the send buffer. *)
 
+(* Drop len bytes from the front of the send buffer. *)
 PROCEDURE SbDrop(p: Connection; len: LONGINT);
 VAR buf: SendBuffer;
 BEGIN
@@ -1569,10 +1673,12 @@ BEGIN
 	p.sndhead := buf
 END SbDrop;
 
-(* Close a connection (fig. 27.4-6). *)
 
+(* Close a connection (fig. 27.4-6). *)
 PROCEDURE CloseConnection(p: Connection);
-VAR buf: AosNet.Buffer;
+VAR 
+	buf: AosNet.Buffer;
+	
 BEGIN
 	IF FALSE (* we sent enough data to update rtt in route *) THEN
 	END;
@@ -1593,8 +1699,8 @@ BEGIN
 	AosKernel.AtomicInc(NTCPClosed);
 END CloseConnection;
 
-(* Drop a connection (fig. 27.2). *)
 
+(* Drop a connection (fig. 27.2). *)
 PROCEDURE Drop(p: Connection; err: LONGINT);
 BEGIN
 	IF p.state >= SynReceived THEN
@@ -1612,8 +1718,8 @@ BEGIN
 	(* Processing of received MSS option not necessary as long as sending is always done with MSS=536. *)
 END SetMSS;
 
-(* Process a received TCP segment. *)
 
+(* Process a received TCP segment. *)
 PROCEDURE Input(int: AosIP.Interface; type: LONGINT; fip, lip: AosIP.Adr; buffer: AosNet.Buffer);
 VAR
 	lport, fport, hdrLen: LONGINT;
@@ -1621,7 +1727,7 @@ VAR
 BEGIN
 	ASSERT(type = IPTypeTCP);
 	AosKernel.AtomicInc(NTCPRcvTotal);
-	IF int.localAdr = lip THEN
+	IF AosIP.AdrsEqual(int.localAdr, lip) THEN
 		IF buffer.len >= MinTCPHdrLen THEN
 			hdrLen := LONG(ORD(buffer.data[buffer.ofs+12])) DIV 10H * 4;
 			IF (hdrLen < MinTCPHdrLen) OR (hdrLen > buffer.len) THEN
@@ -1633,7 +1739,7 @@ BEGIN
 				p := lastpcb;
 				fport := AosNet.GetNet2(buffer.data, buffer.ofs);
 				lport := AosNet.GetNet2(buffer.data, buffer.ofs+2);
-				IF (p.fip # fip) OR (p.lport # lport) OR (p.fport # fport) THEN
+				IF (p = nilpcb) OR (~AosIP.AdrsEqual(p.fip, fip)) OR (p.lport # lport) OR (p.fport # fport) THEN
 					p := pool.Lookup(lport, fport, fip);
 					IF p = nilpcb THEN
 						(* look for listening connection *)
@@ -1654,15 +1760,19 @@ BEGIN
 	AosNet.ReturnBuffer(buffer);
 END Input;
 
-(* Process a received TCP segment for the specified Connection. *)
 
+(* Process a received TCP segment for the specified Connection. *)
 PROCEDURE ProcessInput(p: Connection; hdrLen: LONGINT; buffer: AosNet.Buffer; drop: BOOLEAN; VAR bufferQueued: BOOLEAN);
 CONST
 	Options = 0; TSPresent = 1; NeedOutput = 2;
+	
 VAR
 	win, sum, urp, seq, ack, tsval, tsecr, acked, discard, tlen, optLen: LONGINT;
-	pseudoHdr: ARRAY PseudoHdrLen OF CHAR;
+	pseudoHdr: ARRAY MaxPseudoHdrLen OF CHAR;
+	pseudoHdrLen: LONGINT;
 	pf, lf: SET;
+	reassembledLength: LONGINT;
+	fragmentBuffer: AosNet.Buffer;
 
 	PROCEDURE GotoDrop;	(* fig. 29.27 *)
 	BEGIN
@@ -1953,7 +2063,8 @@ VAR
 			ELSE (* skip *)
 			END;
 			IF ack = p.sndmax THEN p.timer[ReXmt] := 0; INCL(lf, NeedOutput)
-			ELSIF p.timer[Persist] = 0 THEN p.timer[ReXmt] := p.rxtcur
+			ELSIF p.timer[Persist] = 0 THEN
+				p.timer[ReXmt] := p.rxtcur;
 			ELSE (* skip *)
 			END;
 			cw := p.sndcwnd; incr := p.maxseg;
@@ -1991,8 +2102,11 @@ VAR
 		RETURN TRUE
 	END ProcessAck;
 
+
 	PROCEDURE GotoPresent;
-	VAR buf: AosNet.Buffer;
+	VAR 
+		buf: AosNet.Buffer;
+	
 	BEGIN
 		buf := p.rcvreasm;	(* first buffer on reassembly list *)
 		IF (p.state >= Established) & (buf # NIL) & (buf.int = p.rcvnxt) THEN
@@ -2008,10 +2122,12 @@ VAR
 		END;
 	END GotoPresent;
 	
+	
 	PROCEDURE Reasm;
 	VAR
 		pos, last: AosNet.Buffer;
 		lap: LONGINT;
+		
 	BEGIN
 		buffer.set := pf;
 		buffer.int := seq;
@@ -2169,11 +2285,14 @@ VAR
 		RETURN TRUE
 	END Step6;
 	
+	
 BEGIN
 	lf := {};
 	discard := 0; (* data from 0 to discard has to be thrown away. *)
 	tlen := buffer.len-hdrLen; (* length of user data. *)
 	optLen := hdrLen - MinTCPHdrLen; (* length of options *)
+	
+	pf := SYSTEM.VAL(SET, LONG(ORD(buffer.data[buffer.ofs+13])));	
 	
 	IF optLen > 0 THEN (* TCP options present *)
 		AosKernel.AtomicInc(NTCPRcvOptions);
@@ -2200,7 +2319,8 @@ BEGIN
 	(* initialize variables needed for GotoDropReset *)
 	seq := AosNet.GetNet4(buffer.data, buffer.ofs+4);
 	ack := AosNet.GetNet4(buffer.data, buffer.ofs+8);
-	pf := SYSTEM.VAL(SET, LONG(ORD(buffer.data[buffer.ofs+13])));
+
+(*	pf := SYSTEM.VAL(SET, LONG(ORD(buffer.data[buffer.ofs+13])));*)
 	IF p = nilpcb THEN
 		IF packetDumpListener # NIL THEN packetDumpListener(p.fip, buffer) END;
 		GotoDropReset; RETURN
@@ -2210,19 +2330,35 @@ BEGIN
 	IF ~(AosNet.ChecksumTCP IN buffer.calcChecksum) THEN
 		(* calculate checksum *)
 		(* set pseudo header *)
-		AosNet.Put4(pseudoHdr, 0, p.fip); (* foreign IP address *)
-		AosNet.Put4(pseudoHdr, 4, p.int.localAdr); (* local IP address *)
-		AosNet.PutNet2(pseudoHdr, 8, IPTypeTCP); (* IP type code of TCP *)
-		AosNet.PutNet2(pseudoHdr, 10, buffer.len); (* TCP length *)
-		sum := AosIP.Checksum1(pseudoHdr, 0, PseudoHdrLen, 0);
-		sum := AosIP.Checksum2(buffer.data, buffer.ofs, buffer.len, sum);
+		reassembledLength := 0;
+		fragmentBuffer := buffer;
+		WHILE fragmentBuffer # NIL DO
+			INC(reassembledLength, fragmentBuffer.len);
+			fragmentBuffer := fragmentBuffer.nextFragment;
+		END;	
+		
+		pseudoHdrLen := p.int.WritePseudoHeader(pseudoHdr, p.fip, p.int.localAdr, IPTypeTCP, reassembledLength);
+		sum := AosIP.Checksum1(pseudoHdr, 0, pseudoHdrLen, 0);
+		
+		IF buffer.nextFragment # NIL THEN
+			(* fragmented packets *)
+			fragmentBuffer := buffer;
+			WHILE fragmentBuffer.nextFragment # NIL DO
+				sum := AosIP.Checksum1(fragmentBuffer.data, fragmentBuffer.ofs, fragmentBuffer.len, sum);						
+				fragmentBuffer := fragmentBuffer.nextFragment;
+			END;					
+			sum := AosIP.Checksum2(fragmentBuffer.data, fragmentBuffer.ofs, fragmentBuffer.len, sum);
+		ELSE			
+			sum := AosIP.Checksum2(buffer.data, buffer.ofs, buffer.len, sum);
+		END;			
+
 		IF sum # 0 THEN
 			Error(BadChecksum, 0, p);
 			GotoDrop;
 			RETURN;
 		END;
 	END;
-	
+
 	win := AosNet.GetNet2(buffer.data, buffer.ofs+14);
 	urp := AosNet.GetNet2(buffer.data, buffer.ofs+18);
 	
@@ -2252,7 +2388,8 @@ BEGIN
 				SbDrop(p, acked);
 				p.snduna := ack;
 				IF ack = p.sndmax THEN p.timer[ReXmt] := 0
-				ELSIF p.timer[Persist] = 0 THEN p.timer[ReXmt] := p.rxtcur
+				ELSIF p.timer[Persist] = 0 THEN
+					p.timer[ReXmt] := p.rxtcur;
 				ELSE (* skip *)
 				END;
 				(*IF Notify IN p.flags THEN SoWakeup(p) END;*)
@@ -2291,16 +2428,18 @@ BEGIN
 			IF (Rst IN pf) & ~ProcessRst() THEN RETURN END;
 			IF Syn IN pf THEN Drop(p, ConnectionReset); GotoDropReset; RETURN END;
 			IF ~(Ack IN pf) THEN GotoDrop; RETURN END;
-			IF ~ProcessAck() THEN RETURN END
+			IF ~ProcessAck() THEN RETURN END;
 	END; (* CASE *)
 	IF ~Step6() THEN RETURN END;
-	DoData
+	DoData;
 END ProcessInput;
 
-(* Initialize a new Connection. *)
 
+(* Initialize a new Connection. *)
 PROCEDURE InitConnection(p: Connection);
-VAR buf: SendBuffer;
+VAR 
+	buf: SendBuffer;
+
 BEGIN
 	IF ~NewZeros THEN	(* clear all fields *)
 		CancelTimers(p);
@@ -2335,8 +2474,8 @@ BEGIN
 	p.rcvhead := NIL;
 END InitConnection;
 
-(* Move connection to next state in close process. *)
 
+(* Move connection to next state in close process. *)
 PROCEDURE UsrClosed(p: Connection);
 BEGIN
 	CASE p.state OF
@@ -2351,8 +2490,8 @@ BEGIN
 	(*IF p.state >= FinWait2 THEN SoIsDisconnected(p) END*)
 END UsrClosed;
 
-(* If t is not zero, decrement it. Return true if it has reached 0, false otherwise. *)
 
+(* If t is not zero, decrement it. Return true if it has reached 0, false otherwise. *)
 PROCEDURE Expired(VAR t: LONGINT): BOOLEAN;
 BEGIN
 	IF t # 0 THEN DEC(t); RETURN t = 0 ELSE RETURN FALSE END
@@ -2366,8 +2505,8 @@ BEGIN
 	RETURN id;
 END GetID;
 
-(** Aos command - display all errors *)
 
+(** Aos command - display all errors *)
 PROCEDURE DisplayErrors*(par: PTR):PTR;
 VAR i: LONGINT;
 BEGIN
@@ -2380,16 +2519,16 @@ BEGIN
 	RETURN NIL;
 END DisplayErrors;
 
-(** Aos command - discard and finalize all connections *)
 
+(** Aos command - discard and finalize all connections *)
 PROCEDURE DiscardAll*(par: PTR): PTR;
 BEGIN
 	pool.Finalize();
 	RETURN NIL;
 END DiscardAll;
 
-(** Temporary trace procedure. *)
 
+(** Temporary trace procedure. *)
 PROCEDURE ToggleTrace*;
 BEGIN
 	trace := ~trace;
@@ -2401,13 +2540,14 @@ END ToggleTrace;
 PROCEDURE Init;
 VAR i: LONGINT;
 BEGIN
-(* RP
+
 	FOR i := 0 TO MaxRxtShift DO
 		IF i < 6 THEN backoff[i] := ASH(1, i) ELSE backoff[i] := 64 END;
 		INC(totbackoff, backoff[i])
 	END;
-*)
-	backoff[0]:=1;
+
+(*	maxdiff := 0;*)
+(*	backoff[0]:=1;
 	backoff[1]:=1;
 	backoff[2]:=2;
 	backoff[3]:=3;
@@ -2419,7 +2559,7 @@ BEGIN
 	backoff[9]:=120;
 	backoff[10]:=240;
 	backoff[11]:=240;
-	backoff[12]:=240;
+	backoff[12]:=240;*)
 	ASSERT(MaxRxtShift=12);
 	totbackoff := 0;
 	FOR i:=0 TO MaxRxtShift DO
@@ -2480,6 +2620,7 @@ History:
 28.02.2004	mvt	Fixed early Fin sending bug in Output().
 04.03.2004	rp	  Fixed & (p.dupacks < ReXmtThresh) in Step6 according to ftp://ftp.cs.arizona.edu/xkernel/papers/tcp_problems.ps
 04.03.2004	rp 	 Fixed XmitTimer according to  ftp://ftp.cs.arizona.edu/xkernel/papers/tcp_problems.ps
+02.05.2005	eb	Supports IPv6 (WritePseudoHdr) and fragmented IP packets.
 *)
 
 (*

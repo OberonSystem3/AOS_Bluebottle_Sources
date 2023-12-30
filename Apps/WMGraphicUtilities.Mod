@@ -1,7 +1,7 @@
 MODULE WMGraphicUtilities;	(** AUTHOR "TF"; PURPOSE "Tools using WMGraphics"; *)
 
 IMPORT
-	WMGraphics, WMRectangles, Utilities;
+	WMGraphics, WMRectangles, Utilities, AosOut;
 	
 (* factor in 1/256, alpha remains unchanged *)
 PROCEDURE ScaleColor*(color : LONGINT; factor : LONGINT): LONGINT;	
@@ -130,8 +130,6 @@ BEGIN
 	canvas.Fill(WMRectangles.MakeRect(rect.l + i, rect.t + i, rect.l + i + 2, rect.t + i + w), ul, WMGraphics.ModeSrcOverDst);
 END RectGlassShade;
 
-
-
 PROCEDURE ExtRectGlassShade*(canvas : WMGraphics.Canvas; rect : WMRectangles.Rectangle; openSides : SET; borderWidth : LONGINT; down : BOOLEAN);
 VAR i, ul, dr, da, w, a, b, c, d : LONGINT;
 BEGIN
@@ -159,6 +157,38 @@ BEGIN
 (*	canvas.Fill(WMRectangles.MakeRect(rect.l + i , rect.t + i, rect.l + i + w, rect.t + i + 2), ul, WMGraphics.ModeSrcOverDst);
 	canvas.Fill(WMRectangles.MakeRect(rect.l + i, rect.t + i, rect.l + i + 2, rect.t + i + w), ul, WMGraphics.ModeSrcOverDst);
 *)
-END ExtRectGlassShade;	
+END ExtRectGlassShade;
+
+(** repeats img in x-direction and scales it in y-direction to fill the specified rectangle *)
+PROCEDURE RepeatImageHorizontal*(canvas : WMGraphics.Canvas; x, y, dx, dy : LONGINT; img : WMGraphics.Image);
+VAR i : LONGINT;
+BEGIN
+	i := dx DIV img.width + 1;
+	canvas.SetClipRect(WMRectangles.MakeRect(0, 0, x+dx, canvas.clipRect.b));
+	WHILE i > 0 DO
+		canvas.ScaleImage(img, 
+			WMRectangles.MakeRect(0, 0, img.width, img.height),
+			WMRectangles.MakeRect(x, y, x+img.width, y+dy),
+			WMGraphics.ModeSrcOverDst, 10);
+		INC(x, img.width);
+		DEC(i)
+	END;
+END RepeatImageHorizontal;
+
+(** repeats img as often as necessairy to fill an area with height dy starting at (x,y) *)
+PROCEDURE RepeatImageVertical*(canvas : WMGraphics.Canvas; x, y, dx, dy : LONGINT; img : WMGraphics.Image);
+VAR i : LONGINT;
+BEGIN
+	i := dy DIV img.height + 1;
+	canvas.SetClipRect(WMRectangles.MakeRect(0, 0, canvas.clipRect.r, y+dy));
+	WHILE i > 0 DO
+		canvas.ScaleImage(img, 
+			WMRectangles.MakeRect(0, 0, img.width, img.height),
+			WMRectangles.MakeRect(x, y, x+dx, y+img.height),
+			WMGraphics.ModeSrcOverDst, 10);
+		INC(y, img.height);
+		DEC(i)
+	END
+END RepeatImageVertical;
 
 END WMGraphicUtilities.

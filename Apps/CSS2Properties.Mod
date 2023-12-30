@@ -1,8 +1,8 @@
-MODULE CSS2Properties;	(** Stefan Walthert   *)
+MODULE CSS2Properties;	(** Stefan Walthert  *)
 (** AUTHOR "swalthert"; PURPOSE ""; *)
 
 IMPORT
-	DynamicStrings, XMLObjects, CSS2, WMWindowManager,
+	DynamicStrings, XMLObjects, CSS2, WMWindowManager, WMGraphics,
 	Raster, GfxImages := AosGfxImages, GfxFonts := AosGfxFonts, Gfx := AosGfx;
 
 CONST
@@ -170,7 +170,7 @@ TYPE
 	Font* = RECORD (Value) computed*: GfxFonts.Font END;
 	
 	ImgTerm = OBJECT (CSS2.Term)
-		VAR img: GfxImages.Image;
+		VAR img: GfxImages.Image
 	END ImgTerm;
 
 	AllMediaProperties* = OBJECT
@@ -605,8 +605,8 @@ TYPE
 						& ~SetNone(backgroundImage.specified, term1) THEN
 					IF term1.GetType() = CSS2.URI THEN
 						s := term1.GetStringVal();
-						NEW(imgTerm); NEW(imgTerm.img); Raster.Load(imgTerm.img, s^, done);
-						IF done THEN
+						NEW(imgTerm);  imgTerm.img := WMGraphics.LoadImage(s^, TRUE);
+						IF imgTerm.img # NIL THEN
 							backgroundImage.specified := imgTerm; declaration.RemoveTerm(term1); declaration.AddTerm(imgTerm)
 						END
 					ELSIF term1 IS ImgTerm THEN backgroundImage.specified := term1
@@ -2253,9 +2253,8 @@ VAR m : WMWindowManager.WindowManager;
 			ELSE
 				name := property.specified.GetStringVal();
 				IF name # NIL THEN 
-					NEW(property.computed);
-					Raster.Load(property.computed, name^, done);
-					IF done THEN
+					property.computed := WMGraphics.LoadImage(name^, TRUE);
+					IF property.computed # NIL THEN
 						NEW(imgTerm); imgTerm.img := property.computed; property.specified := imgTerm;
 					ELSE property.computed := NIL
 					END
@@ -2326,9 +2325,7 @@ VAR m : WMWindowManager.WindowManager;
 					s := term(CSS2.Term).GetStringVal();
 					IF s # NIL THEN
 						NEW(property.computed);
-						NEW(property.computed.img);
-						Raster.Load(property.computed.img, s^, done);
-						IF ~done THEN property.computed := NIL END
+						property.computed.img := WMGraphics.LoadImage( s^, TRUE);
 					END
 				UNTIL ~terms.HasMoreElements() OR (property.computed # NIL)
 			END

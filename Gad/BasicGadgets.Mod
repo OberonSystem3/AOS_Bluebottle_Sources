@@ -1,10 +1,10 @@
 (* ETH Oberon, Copyright 2001 ETH Zuerich Institut fuer Computersysteme, ETH Zentrum, CH-8092 Zuerich.
 Refer to the "General ETH Oberon System Source License" contract available at: http://www.oberon.ethz.ch/ *)
 
-MODULE BasicGadgets;	(** portable *) (* jm 18.1.95 *)
+MODULE BasicGadgets; (** portable *)	(* jm 18.1.95 *)
 
-(** Contains an implementation of the model gadgets Boolean, String, Integer, and Real, and of the visual gadgets Button, Checkbox and Slider. The buttons and checkboxes can also be used as radio-buttons by linking to them an Integer model gadget.
-*)
+ (** Contains an implementation of the model gadgets Boolean, String, Integer, and Real, and of the visual gadgets Button, Checkbox and Slider. The buttons and checkboxes can also be used as radio-buttons by linking to them an Integer model gadget. *)
+
 (*
 	JM 3.2.93 - New radio button look
 					- SetValues improved
@@ -25,17 +25,24 @@ MODULE BasicGadgets;	(** portable *) (* jm 18.1.95 *)
 	29.7.96 - fixed NIL-trap in SetValues (ps - 29.7.96)
 	20.11.96 - add 2 new button attributes (iw)
 	25.4.97 - fixed bug in ButtonAttr (YesVal)
+	ph 20.3.05 - fixed bug in coordinate computation of Look
+				- button passes nessages now also to look object-> dynamic Buttons possible (try Button with Sisiphus Look)
+				- If the button "Look" object has a "Constraints" field, the button look will zoom, when the button is zoomed
+				- button borders of colored buttons now take the shade of the button -> nicer GUI's possible
 *)
 
 IMPORT
-	Objects, Gadgets, Display, Display3, Effects, Oberon, Texts, Files, Printer, Printer3, Fonts, Strings;
+	Objects, Gadgets, Display, Display3, Effects, Oberon, Texts, Files, Printer, Printer3, Fonts, Strings, Colors;
 
 CONST
 	VersionNo = 2; VersionNewButton = 4; VersionAbstract = 4;
 	VersionNewCheckbox = 3;
+	outofboundsmodify = 4;
 	
 	MaxLen = 64;
+	CONST	DontCare = MAX(LONGINT); DontCareR = MAX(LONGREAL);
 
+	
 TYPE
 	(* --- Things --- *)
 	
@@ -71,6 +78,7 @@ TYPE
 		led*: BOOLEAN;	(** visibility of a led if Button is pressed *)
 		ledcol*: INTEGER;	(** Color of LED when Button is pressed *)
 		inM, outM: Display3.Mask;
+		topC, bottomC, upC, downC: INTEGER;
 	END;
 	
 	CheckBox* = POINTER TO CheckBoxDesc;
@@ -120,7 +128,7 @@ END ReadVersion;
 
 PROCEDURE CopyBoolean*(VAR M: Objects.CopyMsg; from, to: Boolean);
 BEGIN
-	Gadgets.CopyObject(M, from, to); to.val := from.val;  
+	Gadgets.CopyObject(M, from, to); to.val := from.val;
 END CopyBoolean;
 
 PROCEDURE BooleanHandler*(obj: Objects.Object; VAR M: Objects.ObjMsg);
@@ -200,7 +208,7 @@ BEGIN
 					END
 				ELSIF M.id = Objects.set THEN
 					IF M.name = "Value" THEN
-						IF M.class = Objects.String THEN COPY(M.s,  obj.val); M.res := 0
+						IF M.class = Objects.String THEN COPY(M.s, obj.val); M.res := 0
 						ELSIF M.class = Objects.Int THEN Strings.IntToStr(M.i, obj.val); M.res := 0
 						ELSIF M.class = Objects.Real THEN Strings.RealToStr(M.x, obj.val); M.res := 0
 						ELSIF M.class = Objects.LongReal THEN Strings.RealToStr(M.y, obj.val); M.res := 0
@@ -211,7 +219,7 @@ BEGIN
 					M.Enum("Value"); Gadgets.objecthandle(obj, M)
 				END
 			END
-		ELSIF M IS  Objects.FileMsg THEN
+		ELSIF M IS Objects.FileMsg THEN
 			WITH M: Objects.FileMsg DO
 				IF M.id = Objects.store THEN
 					Files.WriteNum(M.R, VersionAbstract); Files.WriteString(M.R, obj.val);
@@ -258,7 +266,7 @@ PROCEDURE IntegerHandler*(obj: Objects.Object; VAR M: Objects.ObjMsg);
 VAR obj2: Integer; ver: LONGINT;
 BEGIN
 	WITH obj: Integer DO
-		IF M IS  Objects.AttrMsg THEN
+		IF M IS Objects.AttrMsg THEN
 			WITH M: Objects.AttrMsg DO
 				IF M.id = Objects.get THEN
 					IF M.name = "Gen" THEN COPY("BasicGadgets.NewInteger", M.s); M.class := Objects.String; M.res := 0
@@ -278,7 +286,7 @@ BEGIN
 					M.Enum("Value"); Gadgets.objecthandle(obj, M)
 				END
 			END;
-		ELSIF M IS  Objects.FileMsg THEN
+		ELSIF M IS Objects.FileMsg THEN
 			WITH M: Objects.FileMsg DO
 				IF M.id = Objects.store THEN
 					Files.WriteNum(M.R, VersionAbstract); Files.WriteLInt(M.R, obj.val); Gadgets.objecthandle(obj, M)
@@ -347,7 +355,7 @@ BEGIN
 					M.Enum("Value"); Gadgets.objecthandle(obj, M)
 				END
 			END
-		ELSIF M IS  Objects.FileMsg THEN
+		ELSIF M IS Objects.FileMsg THEN
 			WITH M: Objects.FileMsg DO
 				IF M.id = Objects.store THEN
 					Files.WriteNum(M.R, VersionAbstract); Files.WriteLReal(M.R, obj.val); Gadgets.objecthandle(obj, M)
@@ -431,6 +439,15 @@ BEGIN
 	END
 END ButtonSetModel;
 
+PROCEDURE ComputeLookPos(B: Button);
+VAR L : Gadgets.Frame;
+BEGIN
+	IF B.look=NIL THEN RETURN END;
+	L := B.look(Gadgets.Frame);
+	L.X := B.W DIV 2 - L.W DIV 2;
+	L.Y := B.H DIV 2 -L.H DIV 2
+END ComputeLookPos;
+
 PROCEDURE ButtonSetLook(F: Button; f: Gadgets.Frame): BOOLEAN; (* ps - 8.5.96 *)
 VAR CM: Display.ControlMsg; B: Objects.BindMsg;
 BEGIN
@@ -443,7 +460,7 @@ BEGIN
 	ELSE
 		CM.id := Display.remove; CM.F := f; Display.Broadcast(CM); (* <<< remove *)
 		IF F.lib # NIL THEN B.lib:= F.lib; f.handle(f, B); END;
-		F.look := f; KillMasks(F);
+		F.look := f; ComputeLookPos(F); KillMasks(F);
 		RETURN TRUE
 	END;
 END ButtonSetLook;
@@ -458,10 +475,12 @@ BEGIN
 		b := M.obj; val := 0; 
 		WHILE b # NIL DO
 			IF b IS Button THEN
-				WITH b: Button DO IF (b.obj # NIL) & (b.obj IS Integer) THEN c := b.obj; b.setval := val; INC(val) END
+				WITH b: Button DO
+					IF (b.obj # NIL) & (b.obj IS Integer) THEN c := b.obj; b.setval := val; INC(val) END
 				END
 			ELSIF b IS CheckBox THEN
-				WITH b: CheckBox DO IF (b.obj # NIL) & (b.obj IS Integer) THEN c := b.obj; b.setval := val; INC(val) END
+				WITH b: CheckBox DO
+					IF (b.obj # NIL) & (b.obj IS Integer) THEN c := b.obj; b.setval := val; INC(val) END
 				END
 			END;
 			b := b.slink
@@ -476,6 +495,7 @@ END SetValues;
 	END ForceString;
 
 PROCEDURE ButtonAttr(F: Button; VAR M: Objects.AttrMsg);
+VAR r, g, b : REAL; col : LONGINT;
 BEGIN
 	IF M.id = Objects.get THEN
 		IF M.name = "Gen" THEN M.class := Objects.String; COPY("BasicGadgets.NewButton", M.s); M.res := 0
@@ -485,7 +505,8 @@ BEGIN
 		ELSIF M.name = "SetVal" THEN M.class := Objects.Int; M.i := F.setval; M.res := 0
 		ELSIF M.name = "LineupHY" THEN M.class := Objects.Int; M.i := F.H DIV 2 - 5; M.res := 0
 		ELSIF M.name = "YesVal" THEN
-			IF F.val THEN Gadgets.framehandle(F, M);
+			IF F.val THEN
+				Gadgets.framehandle(F, M);
 				IF M.res < 0 THEN M.class := Objects.String; M.s := "" END
 			ELSE M.class := Objects.String; M.s := ""
 			END;
@@ -502,9 +523,9 @@ BEGIN
 		ELSE Gadgets.framehandle(F, M) END
 	ELSIF M.id = Objects.set THEN
 		IF (M.name = "Caption") THEN
-			IF  (M.class = Objects.String) THEN COPY(M.s, F.caption); M.res := 0 END
+			IF (M.class = Objects.String) THEN COPY(M.s, F.caption); M.res := 0 END
 		ELSIF (M.name = "Value") THEN
-			IF  (M.class = Objects.Bool) THEN
+			IF (M.class = Objects.Bool) THEN
 				IF F.popout THEN M.b := FALSE END; (* small hack *)
 				F.val := M.b; M.res := 0;
 				IF F.obj # NIL THEN
@@ -529,6 +550,9 @@ BEGIN
 			IF (M.class = Objects.Bool) THEN F.led := M.b; M.res:= 0 END
 		ELSIF (M.name = "LedColor") THEN
 			IF (M.class = Objects.Int) THEN F.ledcol := SHORT(M.i); M.res:= 0 END
+		ELSIF (M.name = "Color") THEN
+			IF (M.class = Objects.Int) THEN ComputeColors(F,M.i); END;
+			Gadgets.framehandle(F,M);
 		ELSE Gadgets.framehandle(F, M)
 		END;
 	ELSIF M.id = Objects.enum THEN
@@ -541,16 +565,17 @@ BEGIN
 END ButtonAttr;
 
 PROCEDURE RestoreButton(R: Display3.Mask; F: Button; x, y, w, h, u, v, w1, h1: INTEGER; dlink: Objects.Object);
-VAR D: Display.DisplayMsg; L: Gadgets.Frame; O: Display3.OverlapMsg; A: Objects.AttrMsg; ll, lr, lb, lt: INTEGER; col: Display.Color;
+VAR D: Display.DisplayMsg; L: Gadgets.Frame; O: Display3.OverlapMsg; A: Objects.AttrMsg; ll, lr, lb, lt: INTEGER;
+	col: Display.Color;
 BEGIN
 	Oberon.RemoveMarks(x, y, w, h);
 	A.id := Objects.get; A.name := "Color"; A.class := Objects.Inval; A.i := Display3.upC; A.res := -1;
-	F.handle(F, A); IF A.class = Objects.Int THEN col := A.i ELSE col := Display3.upC END;
+	Gadgets.framehandle(F, A); IF A.class = Objects.Int THEN col := A.i ELSE col := Display3.upC END;
+	ComputeColors(F,col);
 	IF F.val THEN
-		Display3.Rect3D(R, Display3.bottomC, Display3.topC, x, y, w, h, 1, Display.replace);
-		Display3.Rect3D(R, Display3.downC, Display3.upC, x + 1, y + 1, w - 2, h - 2, 1, Display.replace);
+		Display3.Rect3D(R, F.bottomC, F.topC, x, y, w, h, 1, Display.replace);
+		Display3.Rect3D(R, F.downC, F.upC, x + 1, y + 1, w - 2, h - 2, 1, Display.replace);
 		Display3.ReplConst(R, col, x + 2, y + 2, w - 4, h - 4, Display.replace); (* inside *)
-		
 		IF F.caption # "" THEN
 			Display3.CenterString(R, Display3.textC, x + 3, y + 1, w - 4, h - 4, Fonts.Default, F.caption, Display3.textmode)
 		ELSIF (F.look # NIL) THEN
@@ -566,19 +591,19 @@ BEGIN
 			D.device := Display.screen; D.id := Display.area; D.F := L; D.dlink := dlink;
 			D.x := ll - L.X; D.y := lb - L.Y;
 			D.u := u - ll; D.v := v - lt; D.w := w1; D.h := h1;
-			D.res := -1;
+			D.res := -1; 
 			L.handle(L, D)
 		END;
 		IF F.led THEN
 			Display3.ReplConst(R, F.ledcol, x + 4, y + h - 7, 10, 3, Display.replace);
 			Display3.ReplConst(R, Display3.black, x + 4, y + h - 8, 10, 1, Display.replace);
 			Display3.ReplConst(R, Display3.black, x + 14, y + h - 8, 1, 4, Display.replace)
-   	END
-	ELSE   		
-		Display3.Rect3D(R, Display3.bottomC, Display3.topC, x, y, w, h, 1, Display.replace);
-		Display3.Rect3D(R, Display3.topC, Display3.bottomC, x + 1, y + 1, w - 2, h - 2, 1, Display.replace);
-   	 Display3.ReplConst(R, col, x + 2, y + 2, w - 4, h - 4, Display.replace); (* inside *)
-   	 IF F.caption # "" THEN
+		END
+	ELSE 		
+		Display3.Rect3D(R, F.bottomC, F.topC, x, y, w, h, 1, Display.replace);
+		Display3.Rect3D(R, F.topC, F.bottomC, x + 1, y + 1, w - 2, h - 2, 1, Display.replace);
+		Display3.ReplConst(R, col, x + 2, y + 2, w - 4, h - 4, Display.replace); (* inside *)
+		IF F.caption # "" THEN
 			Display3.CenterString(R, Display3.textC, x + 2, y + 2, w - 4, h - 4, Fonts.Default, F.caption, Display3.textmode)
 		ELSIF (F.look # NIL) THEN
 			L := F.look(Gadgets.Frame);
@@ -593,12 +618,15 @@ BEGIN
 			D.device := Display.screen; D.id := Display.area; D.F := L; D.dlink := dlink;
 			D.x := ll - L.X; D.y := lb - L.Y;
 			D.u := u - ll; D.v := v - lt; D.w := w1; D.h := h1;
-			D.res := -1;
+			D.res := -1; 
 			L.handle(L, D)
 		END
 	END;
-	IF Gadgets.selected IN F.state THEN Display3.FillPattern(R, Display3.white, Display3.selectpat, x, y, x, y, w, h, Display.paint) END
+	IF Gadgets.selected IN F.state THEN 
+		Display3.FillPattern(R, Display3.white, Display3.selectpat, x, y, x, y, w, h, Display.paint) 
+	END
 END RestoreButton;
+
 
 PROCEDURE PrintButton(F: Button; VAR M: Display.DisplayMsg);
 VAR R: Display3.Mask; x, y, w, h: INTEGER; D: Display.DisplayMsg; L: Gadgets.Frame; O: Display3.OverlapMsg;
@@ -611,15 +639,14 @@ BEGIN
 	Gadgets.MakePrinterMask(F, M.x, M.y, M.dlink, R);
 	x := M.x; y := M.y; w := P(F.W); h := P(F.H);
 	IF F.val THEN
-		Printer3.Rect3D(R, Display3.bottomC, Display3.topC, x, y, w, h, P(1), Display.replace);
-		Printer3.Rect3D(R, Display3.downC, Display3.upC, x + P(1), y + P(1), w - P(2), h - P(2), P(1), Display.replace);
-		Printer3.ReplConst(R, Display3.upC, x + P(2), y + P(2), w - P(4), h - P(4), Display.replace); (* inside *)
-		
+		Printer3.Rect3D(R, F.bottomC, F.topC, x, y, w, h, P(1), Display.replace);
+		Printer3.Rect3D(R, F.downC, F.upC, x + P(1), y + P(1), w - P(2), h - P(2), P(1), Display.replace);
+		Printer3.ReplConst(R, F.upC, x + P(2), y + P(2), w - P(4), h - P(4), Display.replace); (* inside *)
 		IF F.caption # "" THEN
 			Printer3.CenterString(R, Display3.textC, x + P(3), y + P(1), w - P(4), h - P(4), Fonts.Default, F.caption, Display3.textmode);
 		ELSIF (F.look # NIL) THEN
 			L := F.look(Gadgets.Frame);
-			O.res := -1; O.M := F.inM; O.x := 0; O.y := 0; O.dlink := NIL; L.handle(L, O);
+			O.res := -1; (*O.M := F.inM; *) O.M := F.outM; O.x := 0; O.y := 0; O.dlink := NIL; L.handle(L, O);
 			D.device := Display.printer; D.id := Display.full; D.F := NIL; D.dlink := M.dlink;
 			D.x := x + w DIV 2 - P(L.W DIV 2) + P(1); D.y := y + h DIV 2 - P(L.H DIV 2) - P(1);
 			D.res := -1;
@@ -631,10 +658,10 @@ BEGIN
 			Printer3.ReplConst(R, Display3.black, x + P(14), y + h - P(8), P(1), P(4), Display.replace)
 		END
 	ELSE
-		Printer3.Rect3D(R, Display3.bottomC, Display3.topC, x, y, w, h, P(1), Display.replace);
-		Printer3.Rect3D(R, Display3.topC, Display3.bottomC, x + P(1), y + P(1), w - P(2), h - P(2), P(1), Display.replace);
-   	 Printer3.ReplConst(R, Display3.upC, x + P(2), y + P(2), w - P(4), h - P(4), Display.replace); (* inside *)
-   	 IF F.caption # "" THEN
+		Printer3.Rect3D(R, F.bottomC, F.topC, x, y, w, h, P(1), Display.replace);
+		Printer3.Rect3D(R, F.topC, F.bottomC, x + P(1), y + P(1), w - P(2), h - P(2), P(1), Display.replace);
+		Printer3.ReplConst(R, F.upC, x + P(2), y + P(2), w - P(4), h - P(4), Display.replace); (* inside *)
+		IF F.caption # "" THEN
 			Printer3.CenterString(R, Display3.textC, x + P(2), y + P(2), w - P(4), h - P(4), Fonts.Default, F.caption, Display3.textmode);
 		ELSIF (F.look # NIL) THEN
 			L := F.look(Gadgets.Frame);
@@ -647,21 +674,100 @@ BEGIN
 	END
 END PrintButton;
 
-
 PROCEDURE CopyButton*(VAR M: Objects.CopyMsg; from, to: Button);
 BEGIN
 	Gadgets.CopyFrame(M, from, to); COPY(from.caption, to.caption); to.val := from.val; to.popout := from.popout;
-	to.look := Gadgets.CopyPtr(M, from.look); to.setval := from.setval;
-	to.led := from.led; to.ledcol := from.ledcol
+	to.look:=Gadgets.Clone(from.look,TRUE); (*to.look := Gadgets.CopyPtr(M, from.look);*) to.setval := from.setval;
+	to.led := from.led; to.ledcol := from.ledcol;
+	to.downC:=from.downC; to.upC:=from.upC; to.bottomC:=from.bottomC; to.topC:=from.topC;
 END CopyButton;
 
+PROCEDURE ParseConstraints(s: ARRAY OF CHAR; VAR l, t, r, b: LONGINT; VAR lrel,trel,rrel,brel:LONGREAL);
+VAR p: ARRAY 64 OF CHAR; i, j: INTEGER;
+	
+	PROCEDURE ReadNum(VAR x:LONGINT; VAR y:LONGREAL);
+	VAR isReal:BOOLEAN;
+	BEGIN
+		isReal:=FALSE;
+		x:=DontCare; y:=DontCareR;
+		WHILE (s[i] # 0X) & (s[i] <= " ") DO INC(i) END;
+		IF s[i] = 0X THEN x:=0;  RETURN 
+		ELSIF ((s[i] < "0") OR (s[i] > "9")) & (s[i] # "-") & (s[i] # ".") THEN INC(i); RETURN (*not a number*)
+		END;
+		j := 0; WHILE (s[i] # 0X) & (s[i] > " ") DO p[j] := s[i]; IF s[i]="." THEN isReal:=TRUE END; INC(i); INC(j); END;
+		p[j] := 0X; 
+		IF isReal THEN Strings.StrToReal(p, y);
+		ELSE Strings.StrToInt(p, x); 
+		END;
+	END ReadNum;
+	
+BEGIN
+	i := 0;
+	ReadNum(l,lrel); ReadNum(t,trel); ReadNum(r,rrel); ReadNum(b,brel);
+END ParseConstraints;
+
+PROCEDURE Constraints(f: Display.Frame; VAR l, t, r, b: LONGINT; VAR lrel,trel,rrel,brel:LONGREAL): BOOLEAN;
+VAR A: Objects.AttrMsg;
+BEGIN
+	A.id := Objects.get; A.name := "Constraints"; A.res := -1; Gadgets.framehandle(f, A);
+	IF (A.res >= 0) & (A.class = Objects.String) & (A.s # "") THEN 
+		ParseConstraints(A.s, l, t, r, b, lrel,trel,rrel,brel); 
+		RETURN TRUE
+	ELSE RETURN FALSE
+	END
+END Constraints;
+
+PROCEDURE Constrain(F:Button):BOOLEAN;
+VAR l,r,t,b:LONGINT; lrel,rrel,trel,brel:LONGREAL; 
+BEGIN
+	IF (F.look#NIL) &Constraints(F.look(Display.Frame),l,t,r,b,lrel,trel,rrel,brel) THEN (*constraints must be positive*)
+		IF (l#DontCare) & (r#DontCare) THEN 
+			F.look(Display.Frame).W:=SHORT(F.W-l-r); 
+			F.look(Display.Frame).X:=SHORT(l);
+		ELSIF (lrel#DontCareR) & (rrel#DontCareR) THEN 
+			F.look(Display.Frame).W:= SHORT(ENTIER(F.W * (1-lrel-rrel))); 
+			F.look(Display.Frame).X:=SHORT (ENTIER(lrel*F.W))
+		END;
+		IF (t#DontCare) & (b#DontCare) THEN 
+			F.look(Display.Frame).H:=SHORT(F.H-t-b);
+			 F.look(Display.Frame).Y:= SHORT(-F.H+b);
+		ELSIF (lrel#DontCareR) & (rrel#DontCareR) THEN 
+			F.look(Display.Frame).H:= SHORT(ENTIER(F.H * (1-trel-brel)));
+			 F.look(Display.Frame).Y:=SHORT(ENTIER(-1+brel)*F.H);
+		END;
+		RETURN TRUE
+	ELSE RETURN FALSE
+	END;
+END Constrain;
+
+PROCEDURE ComputeColors(F:Button; col:LONGINT);	(*adapt shade of button border to button color *)
+VAR r,g,b:REAL; f:INTEGER; r2,g2,b2:LONGINT;
+BEGIN
+	F.upC:=SHORT(col);
+	IF F.upC=Display3.upC THEN F.topC:=Display3.topC; F.downC:=Display3.downC; F.bottomC:=Display3.bottomC; (*default*)
+	ELSE
+		f:=254;
+		Colors.DisplayToRGB(col, r,g,b); 		
+		col:=Colors.Match(Colors.DisplayIndex,Colors.DisplayBits,SHORT(ENTIER(0.5+f*r/1.5)),
+																				SHORT(ENTIER(0.5+ f*g/1.5)), SHORT(ENTIER(0.5+f*b/1.5))); 
+		 F.downC:=SHORT(col); 
+		IF Display3.bottomC=Display.FG (*hardlook*) THEN F.bottomC:=Display.FG ELSE F.bottomC := F.downC END;
+		col := Colors.Match(Colors.DisplayIndex,Colors.DisplayBits, SHORT(ENTIER(0.5+f*(1-(1-r)/1.5))), 
+																		SHORT(ENTIER(0.5+f*(1-(1-g)/1.5))), SHORT(ENTIER(0.5+f*(1-(1-b)/1.5))));
+		F.topC := SHORT(col);
+	END;
+END ComputeColors;
+
 PROCEDURE ButtonHandler*(F: Objects.Object; VAR M: Objects.ObjMsg);
-VAR F2: Button; x, y, w, h: INTEGER;   
-	keysum: SET; ver: LONGINT; f: Gadgets.Frame; R: Display3.Mask;
+VAR F2: Button; x, y, w, h: INTEGER; x1,y1,w1,h1:INTEGER; 
+	keysum: SET; ver: LONGINT; f: Gadgets.Frame; R: Display3.Mask; 
+	A: Display.ModifyMsg;
 BEGIN
 	WITH F: Button DO
-		IF M IS  Objects.AttrMsg THEN
-			WITH M: Objects.AttrMsg DO ButtonAttr(F, M) END;
+		IF M IS Objects.AttrMsg THEN
+			WITH M: Objects.AttrMsg DO 
+				ButtonAttr(F, M);
+			END;
 		ELSIF M IS Objects.FileMsg THEN
 			WITH M: Objects.FileMsg DO
 				IF M.id = Objects.store THEN
@@ -738,18 +844,23 @@ BEGIN
 				IF M.res >= 0 THEN RETURN END;
 				x := M.x + F.X; y := M.y + F.Y; w := F.W; h := F.H;
 				IF M IS Display.DisplayMsg THEN
-					WITH M: Display.DisplayMsg  DO
+					WITH M: Display.DisplayMsg DO
 						IF M.device = Display.screen THEN
-							IF (M.F = NIL) OR ((M.id = Display.full) & (M.F = F)) THEN
+							IF (M.F=F) & Constrain(F) THEN 
+								Gadgets.MakeMask(F, x, y, M.dlink, R);
+								RestoreButton(R, F, x, y, w, h, 0, 1 - h, w, h, M.dlink)
+							ELSIF (M.F=NIL) OR  ((M.id =Display.full) & (M.F = F) ) THEN 
 								Gadgets.MakeMask(F, x, y, M.dlink, R);
 								RestoreButton(R, F, x, y, w, h, 0, 1 - h, w, h, M.dlink)
 							ELSIF (M.id = Display.area) & (M.F = F) THEN
 								Gadgets.MakeMask(F, x, y, M.dlink, R); 
 								Display3.AdjustMask(R, x + M.u, y + h - 1 + M.v, M.w, M.h);
 								RestoreButton(R, F, x, y, w, h, M.u, M.v, M.w, M.h, M.dlink)
-							END
+							ELSIF (F.look#NIL) & ((M.id=Display.contents) OR (M.F#F)) THEN 
+								F.look.handle(F.look,M);
+							END;
 						ELSIF M.device = Display.printer THEN PrintButton(F, M)
-						END
+						END;
 					END
 				ELSIF M IS Display.ConsumeMsg THEN
 					WITH M: Display.ConsumeMsg DO (* ps - 8.5.96 *)
@@ -784,7 +895,8 @@ BEGIN
 						END
 					END
 				ELSIF M IS Gadgets.UpdateMsg THEN
-					WITH M: Gadgets.UpdateMsg  DO
+					WITH M: Gadgets.UpdateMsg DO
+						IF F.look#NIL THEN F.look.handle(F.look,M) END;
 						IF F.obj # NIL THEN F.obj.handle(F.obj, M) END;
 						IF M.obj = F.obj THEN
 							IF M.stamp # F.stamp THEN F.stamp := M.stamp;
@@ -792,11 +904,19 @@ BEGIN
 							END;
 							Gadgets.MakeMask(F, x, y, M.dlink, R);
 							RestoreButton(R, F, x, y, w, h, 0, 1 - h, w, h, M.dlink)
-						ELSE Gadgets.framehandle(F, M)
-						END
+						ELSIF M.obj=F.look THEN
+							IF M.stamp # F.stamp THEN 
+								F.stamp := M.stamp;
+								Gadgets.MakeMask(F, x, y, M.dlink, R);
+								RestoreButton(R, F, x, y, w, h, 0, 1 - h, w, h, M.dlink)
+							END;
+						ELSE 
+							Gadgets.framehandle(F, M);
+						END;
 					END
 				ELSIF M IS Display.ControlMsg THEN (*!!! *)
 					WITH M: Display.ControlMsg DO
+						IF F.look#NIL THEN F.look.handle(F.look,M) END;
 						IF F.obj # NIL THEN F.obj.handle(F.obj, M) END;
 						IF (M.id = Display.restore) & (M.stamp # F.stamp) THEN F.stamp := M.stamp;
 							ButtonUpdateModel(F)
@@ -845,20 +965,40 @@ BEGIN
 							Gadgets.framehandle(F, M);
 						END; 
 					END;
+				ELSIF M IS Display.ModifyMsg THEN
+					WITH M: Display.ModifyMsg DO
+						IF M.F=F THEN F.W:=M.W; F.H:=M.H; END;
+						IF ((M.F=F) OR (M.F=NIL)) & Constrain(F) THEN 
+								A.id:=outofboundsmodify; A.mode:=Display.state; A.X:=F.X; A.Y:=F.Y; 
+								A.W:=F.look(Display.Frame).W; A.H:=F.look(Display.Frame).H; 
+								(*TO ADD: A.dx, A.dy, A.dh, A.dw, currently not consistent here...*)
+								A.res:=-1; A.F:=F.look(Display.Frame); A.dlink:=F; Objects.Stamp(A); 
+								F.look.handle(F.look,A);
+								KillMasks(F);
+								Gadgets.framehandle(F, M);
+						ELSE 
+							Gadgets.framehandle(F, M);
+							IF (M.F#F) & (F.look#NIL) THEN F.look.handle(F.look,M); END;
+							ComputeLookPos(F);
+						END;
+					END;
 				ELSE
 					Gadgets.framehandle(F, M);
+					IF F.look#NIL THEN F.look.handle(F.look,M);END;
 				END;
 			END;
 		ELSE
 			Gadgets.framehandle(F, M);
+			IF F.look#NIL THEN F.look.handle(F.look,M);	END;
 		END;
 	END;
 END ButtonHandler;
 
 PROCEDURE InitButton*(F: Button);
-BEGIN 
+BEGIN
 	F.handle := ButtonHandler; F.W := 40; F.H := 30;
 	F.popout := TRUE; F.led:= TRUE; F.ledcol:= Display3.red;
+	ComputeColors(F,Display3.upC);
 	COPY("Button", F.caption)
 END InitButton;
 
@@ -909,10 +1049,12 @@ BEGIN
 		ELSIF M.name = "SetVal" THEN M.class := Objects.Int; M.i := B.setval; M.res := 0
 		ELSIF M.name = "LineupHY" THEN M.class := Objects.Int; M.i := B.H DIV 2 - 5; M.res := 0
 		ELSIF M.name = "YesVal" THEN (* ps - 3.5.96 *)
-			IF B.val THEN 
+			IF B.val THEN
 				Gadgets.framehandle(B, M);
 				IF M.res < 0 THEN M.class := Objects.String; M.s := "" END
-			ELSE M.class := Objects.String; M.s := "" END; M.res := 0;
+			ELSE M.class := Objects.String; M.s := ""
+			END;
+			M.res := 0;
 		ELSIF M.name = "Field" THEN ForceString(B, M)
 		ELSIF M.name = "Cmd" THEN ForceString(B, M)
 		ELSIF M.name = "Color" THEN
@@ -937,7 +1079,8 @@ BEGIN
 		ELSE Gadgets.framehandle(B, M)
 		END;
 	ELSIF M.id = Objects.enum THEN
-		M.Enum("Value"); M.Enum("YesVal"); M.Enum("SetVal"); M.Enum("Field"); M.Enum("Cmd"); M.Enum("Color"); Gadgets.framehandle(B, M); 
+		M.Enum("Value"); M.Enum("YesVal"); M.Enum("SetVal"); M.Enum("Field"); M.Enum("Cmd"); M.Enum("Color");
+		Gadgets.framehandle(B, M); 
 	END;
 END CheckBoxAttr;
 
@@ -1042,7 +1185,7 @@ BEGIN
 				x := M.x + F.X; y := M.y + F.Y; w := F.W; h := F.H; (* calculate actual coordinates *)
 				u := M.x; v := M.y; (* store volatile info *)
 				IF M IS Display.DisplayMsg THEN
-					WITH M: Display.DisplayMsg  DO
+					WITH M: Display.DisplayMsg DO
 						IF M.device = Display.screen THEN 
 							IF (M.F = NIL) OR ((M.id = Display.full) & (M.F = F)) THEN
 								Gadgets.MakeMask(F, x, y, M.dlink, R);
@@ -1056,7 +1199,7 @@ BEGIN
 						END
 					END
 				ELSIF M IS Gadgets.UpdateMsg THEN
-					WITH M: Gadgets.UpdateMsg  DO
+					WITH M: Gadgets.UpdateMsg DO
 						IF F.obj # NIL THEN F.obj.handle(F.obj, M) END;
 						IF M.obj = F.obj THEN
 							IF M.stamp # F.stamp THEN F.stamp := M.stamp;
@@ -1159,7 +1302,7 @@ BEGIN
 		IF M.name = "Min" THEN
 			IF M.class = Objects.Int THEN F.min := M.i; M.res := 0 END
 		ELSIF M.name = "Max" THEN
-			IF M.class = Objects.Int  THEN F.max := M.i; M.res := 0 END
+			IF M.class = Objects.Int THEN F.max := M.i; M.res := 0 END
 		ELSIF M.name = "Value" THEN
 			IF M.class = Objects.Int THEN
 				F.val := M.i;
@@ -1221,11 +1364,11 @@ BEGIN
 END PrintSlider;
 
 PROCEDURE SliderHandler*(F: Objects.Object; VAR M: Objects.ObjMsg);
-VAR x, y, w, h: INTEGER; F2: Slider;  
+VAR x, y, w, h: INTEGER; F2: Slider;
 	R: Display3.Mask;
 BEGIN
 	WITH F: Slider DO
-		IF M IS  Objects.AttrMsg THEN
+		IF M IS Objects.AttrMsg THEN
 			WITH M: Objects.AttrMsg DO SliderAttr(F, M) END;
 		ELSIF M IS Objects.FileMsg THEN
 			WITH M: Objects.FileMsg DO
@@ -1250,10 +1393,10 @@ BEGIN
 				IF M.res >= 0 THEN RETURN END;
 				x := M.x + F.X; y := M.y + F.Y; w := F.W; h := F.H;
 				IF M IS Display.DisplayMsg THEN
-					WITH M: Display.DisplayMsg  DO
+					WITH M: Display.DisplayMsg DO
 						IF M.device = Display.screen THEN
 							IF (M.F = NIL) OR ((M.id = Display.full) & (M.F = F)) THEN
-								Gadgets.MakeMask(F, x, y,M.dlink,  R);
+								Gadgets.MakeMask(F, x, y,M.dlink, R);
 								RestoreSlider(R, F, x, y, w, h);
 							ELSIF (M.id = Display.area) & (M.F = F) THEN
 								Gadgets.MakeMask(F, x, y, M.dlink, R); 
@@ -1264,7 +1407,7 @@ BEGIN
 						END
 					END
 				ELSIF M IS Gadgets.UpdateMsg THEN
-					WITH M: Gadgets.UpdateMsg  DO
+					WITH M: Gadgets.UpdateMsg DO
 						IF F.obj # NIL THEN F.obj.handle(F.obj, M) END;
 						IF M.obj = F.obj THEN
 							IF F.stamp # M.stamp THEN F.stamp := M.stamp; SliderUpdateModel(F) END;
@@ -1324,7 +1467,7 @@ PROCEDURE SetValue*(obj: Objects.Object);
 BEGIN Gadgets.Update(obj)
 END SetValue;
 
-(*  --- *)
+(* --- *)
 
 (** Separate a button from its look (F.obj). The object is removed and inserted at the caret. Only functions when the button has a (consumed) gadget as a caption. *)
 PROCEDURE Break*;
@@ -1344,5 +1487,5 @@ BEGIN
 	END
 END Break;
 
-BEGIN Texts.OpenWriter(W) 
+BEGIN Texts.OpenWriter(W)
 END BasicGadgets.

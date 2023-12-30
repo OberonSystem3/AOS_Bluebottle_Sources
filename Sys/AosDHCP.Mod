@@ -23,7 +23,7 @@ MODULE AosDHCP; (** AUTHOR "pjm, mvt"; PURPOSE "DHCP client"; *)
 	236	--	vendor-specific area (64 bytes, optional)
 *)
 
-IMPORT SYSTEM, AosOut, AosKernel, AosNet, AosIP, AosUDP, AosDNS;
+IMPORT SYSTEM, AosOut, AosKernel, AosNet, AosIP, AosUDP, AosDNS, AosIPv6, AosIPv4;
 
 CONST
 	(** Error codes *)
@@ -58,17 +58,20 @@ BEGIN
 				CASE buf[i] OF
 					1X:	(* subnet mask *)
 						IF i+6 <= m THEN
-							maskAdr := AosNet.Get4(buf, i+2)
+							maskAdr.ipv4Adr := AosNet.Get4(buf, i+2);
+							maskAdr.usedProtocol := AosIP.IPv4;
 						END
 					|3X:	(* router *)
 						IF i+6 <= m THEN
-							gatewayAdr := AosNet.Get4(buf, i+2)
+							gatewayAdr.ipv4Adr := AosNet.Get4(buf, i+2);
+							gatewayAdr.usedProtocol := AosIP.IPv4;
 						END
 					|6X:	(* domain name server *)
 						IF i+2+len <= m THEN
 							j := 0;
 							WHILE (j+4 <= len) & (j DIV 4 # LEN(dns)) DO
-								dns[j DIV 4] := AosNet.Get4(buf, i+2+j);
+								dns[j DIV 4].ipv4Adr := AosNet.Get4(buf, i+2+j);
+								dns[j DIV 4].usedProtocol := AosIP.IPv4;
 								INC(j, 4)
 							END
 						END
@@ -78,7 +81,8 @@ BEGIN
 						END
 					|36X:	(* DHCP server identifier *)
 						IF i+6 <= m THEN
-							serverIP := AosNet.Get4(buf, i+2)
+							serverIP.ipv4Adr := AosNet.Get4(buf, i+2);
+							serverIP.usedProtocol := AosIP.IPv4;
 						END
 					|0FX:	(* domain name *)
 						IF i+2+len <= m THEN
@@ -123,7 +127,7 @@ BEGIN
 	buf[243] := 0FFX; (* options end *)
 	
 	(* return length *)
-	RETURN ((243 + 15) DIV 16) * 16	(* align to 16-byte boundary *)
+	RETURN ((243 + 1 + 15) DIV 16) * 16	(* align to 16-byte boundary *)
 END CreateDHCPDiscoverMsg;
 
 PROCEDURE CreateDHCPRequestMsg(hwAdr: AosNet.LinkAdr; xid, secondsElapsed:LONGINT; VAR buf:ARRAY OF CHAR; serverIP:AosIP.Adr; myNewIP :AosIP.Adr): LONGINT;
@@ -145,9 +149,9 @@ BEGIN
 	
 	buf[240] := 35X; buf[241] := 1X; buf[242] := 3X; (* DHCP message type: DHCP-REQUEST *)
 	
-	buf[244] := 36X; buf[245] := 4X; AosNet.Put4(buf,246, serverIP); (* server identifier option *)
+	buf[244] := 36X; buf[245] := 4X; AosNet.Put4(buf,246, serverIP.ipv4Adr); (* server identifier option *)
 	
-	buf[252] := 32X; buf[253] := 4X; AosNet.Put4(buf,254, myNewIP); (* requested IP option *)
+	buf[252] := 32X; buf[253] := 4X; AosNet.Put4(buf,254, myNewIP.ipv4Adr); (* requested IP option *)
 
 	buf[260] := 37X; buf[261] := 4X; (* "requested options" option *)
 	buf[262] := 1X; (* netmask *)
@@ -158,7 +162,7 @@ BEGIN
 	buf[268] := 0FFX; (* options end *)
 	
 	(* return length *)
-	RETURN (268 + 15) DIV 16 * 16	(* align to 16-byte boundary *)
+	RETURN (268 + 1 + 15) DIV 16 * 16	(* align to 16-byte boundary *)
 END CreateDHCPRequestMsg;
 
 (* Initiate the boot protocol. When successful, return res = 0 and set the parameters. *)
@@ -166,18 +170,30 @@ END CreateDHCPRequestMsg;
 PROCEDURE InitDHCP(int: AosIP.Interface; VAR localAdr, maskAdr, gatewayAdr: AosIP.Adr;
 		VAR dns: ARRAY OF AosIP.Adr; VAR domain: ARRAY OF CHAR; VAR res: LONGINT);
 VAR
-	p: AosUDP.Socket; fport, len, time, start, offerDelay, requestDelay, i: LONGINT; fip, serverIP: AosIP.Adr;
-	msgType: CHAR; xid, rxid, offerTries, requestTries: LONGINT; buf: ARRAY MaxDHCPMsgSize OF CHAR;
+	p: AosUDP.Socket; 
+	fport, len, time, start, offerDelay, requestDelay, i: LONGINT; 
+	fip, serverIP: AosIP.Adr;
+	msgType: CHAR; 
+	xid, rxid, offerTries, requestTries: LONGINT; 
+	buf: ARRAY MaxDHCPMsgSize OF CHAR;
 	msgLen: LONGINT; exit: BOOLEAN;
 	(* used to avoid busy waits *)
 	t: AosKernel.Timer;
 	sleep: LONGINT;
 BEGIN
 	NEW(t);
-	localAdr := AosIP.NilAdr; maskAdr := AosIP.NilAdr; gatewayAdr := AosIP.NilAdr;
+	localAdr := AosIP.NilAdr; 
+	localAdr.usedProtocol := AosIP.IPv4;
+	maskAdr := AosIP.NilAdr;
+	maskAdr.usedProtocol := AosIP.IPv4;
+	gatewayAdr := AosIP.NilAdr;
+	gatewayAdr.usedProtocol := AosIP.IPv4;
+	
 	domain[0] := 0X;
-	FOR i := 0 TO LEN(dns)-1 DO dns[i] := AosIP.NilAdr END;
-
+	FOR i := 0 TO LEN(dns)-1 DO 
+		dns[i] := AosIP.NilAdr 
+	END;
+	
 	(* DHCP client in INIT State *)
 	NEW(p, BootPClient, res);
 	IF res = AosUDP.Ok THEN
@@ -199,14 +215,15 @@ BEGIN
 			(* Send DHCP-DISCOVER Msg *)
 			msgLen := CreateDHCPDiscoverMsg(int.dev.local, xid, 0(*((time-start) DIV AosKernel.second)*), buf);
 			p.SendBroadcast(int, BootPServer, buf, 0, msgLen);
-			
 			(* Receive the DHCP-OFFER *)
 			p.Receive(buf, 0, LEN(buf), offerDelay, fip, fport, len, res);
-			
+
 			(* Is it a BOOTPReply from DHCP ServerPort? *)
 			IF (res = AosUDP.Ok) & (fport = BootPServer) & (len >= 28) & (buf[0] = 2X) & (xid = AosNet.Get4(buf, 4)) THEN
-				localAdr := AosNet.Get4(buf, 16);
-				AosOut.Enter; AosOut.String("AosDHCP: BootP reply from "); AosIP.OutAdr(AosNet.Get4(buf, 20)); 
+				localAdr.ipv4Adr := AosNet.Get4(buf, 16);
+				localAdr.usedProtocol := AosIP.IPv4;
+				
+				AosOut.Enter; AosOut.String("AosDHCP: BootP reply from "); (*AosIP.OutAdr(AosNet.Get4(buf, 20))*); 
 				AosOut.String("; IP offered: "); AosIP.OutAdr(localAdr); AosOut.Exit;
 				
 				IF len > 236 THEN
@@ -230,7 +247,7 @@ BEGIN
 							(* Receive the DHCP-ACK *)
 							p.Receive(buf, 0, LEN(buf), requestDelay, fip, fport, len, res);
 							IF (res = AosUDP.Ok) & (fport = BootPServer) & (len >= 28) & (buf[0] = 2X) THEN
-								IF (localAdr = AosNet.Get4(buf, 16)) THEN 
+								IF (localAdr.ipv4Adr = AosNet.Get4(buf, 16)) THEN
 									ParseOptions(buf, 236, len, maskAdr, gatewayAdr, dns, domain, serverIP, rxid, msgType);
 									AosOut.Enter; AosOut.String("AosDHCP: Ack - xid "); AosOut.Int(rxid,0);
 									AosOut.String( " msgType "); AosOut.Int(ORD(msgType), 0); AosOut.Ln;
@@ -299,29 +316,38 @@ VAR
 	dns: ARRAY AosIP.MaxNofDNS OF AosIP.Adr;
 	domain: AosIP.Name;
 	i: LONGINT;
+	intv4: AosIPv4.Interface;
+	
 BEGIN {EXCLUSIVE}
-	(* run DHCP protocol on this interface *)
-	AosOut.String("AosDHCP: Starting DHCP on interface '"); AosOut.String(int.name); AosOut.String("'..."); AosOut.Ln;
-	InitDHCP(int, localAdr, maskAdr, gatewayAdr, dns, domain, res);
-	IF res = Ok THEN
-		(* configure interface *)
-		int.SetAdrs(localAdr, maskAdr, gatewayAdr, res);
-		IF AosDNS.domain = "" THEN
-			COPY(domain, AosDNS.domain);
-			AosOut.String("AosDHCP: AosDNS.domain set to: "); AosOut.String(domain); AosOut.Ln;
-		ELSE
-			AosOut.String("AosDHCP: AosDNS.domain not set because it is alredy defined."); AosOut.Ln;
+	IF int IS AosIPv6.Interface THEN
+		AosOut.String("AosDHCP: DHCP for IPv6 interfaces not yet implemented"); AosOut.Ln;
+	ELSE
+		intv4 := int (AosIPv4.Interface);
+		intv4.doingDHCPRequest := TRUE;
+		(* run DHCP protocol on this interface *)
+		AosOut.String("AosDHCP: Starting DHCP on interface '"); AosOut.String(int.name); AosOut.String("'..."); AosOut.Ln;
+		InitDHCP(int, localAdr, maskAdr, gatewayAdr, dns, domain, res);
+		IF res = Ok THEN
+			(* configure interface *)
+			int.SetAdrs(localAdr, maskAdr, gatewayAdr, res);
+			IF AosDNS.domain = "" THEN
+				COPY(domain, AosDNS.domain);
+				AosOut.String("AosDHCP: AosDNS.domain set to: "); AosOut.String(domain); AosOut.Ln;
+			ELSE
+				AosOut.String("AosDHCP: AosDNS.domain not set because it is alredy defined."); AosOut.Ln;
+			END;
+			(* add DNS server *)
+			int.DNSRemoveAll();
+			i := 0;
+			WHILE (i < LEN(dns)) & (~AosIP.IsNilAdr(dns[i])) DO
+				int.DNSAdd(dns[i]);
+				INC(i);
+			END;
 		END;
-		(* add DNS server *)
-		int.DNSRemoveAll();
-		i := 0;
-		WHILE (i < LEN(dns)) & (dns[i] # AosIP.NilAdr) DO
-			int.DNSAdd(dns[i]);
-			INC(i);
-		END;
+		AosOut.String("AosDHCP: Finished DHCP on interface '"); AosOut.String(int.name);
+		AosOut.String("'. Error code: "); AosOut.Int(res, 0); AosOut.Ln;
+		intv4.doingDHCPRequest := FALSE;
 	END;
-	AosOut.String("AosDHCP: Finished DHCP on interface '"); AosOut.String(int.name);
-	AosOut.String("'. Error code: "); AosOut.Int(res, 0); AosOut.Ln;
 END RunDHCP;
 
 END AosDHCP.
@@ -331,6 +357,7 @@ History:
 02.11.2003	mvt	Moved interface configuration to AosInitNet.
 02.11.2003	mvt	Complete redesign for new interfaces of underlying modules.
 03.11.2003	mvt	Replaced busy waits by AosKernel.Timer.Sleep().
+02.05.2004	eb	DHCP client for IPv4. IPv6 DHCP client is not supported.
 
 ToDo (pjm):
 o correct state machine implementation?

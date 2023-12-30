@@ -1,12 +1,12 @@
 (* Aos, Copyright 2001, Pieter Muller, ETH Zurich *)
 
- MODULE AosLocks; (** AUTHOR "pjm"; PURPOSE "Fine-grained kernel locks"; *)
+MODULE AosLocks; (** AUTHOR "pjm"; PURPOSE "Fine-grained kernel locks"; *)
 
 IMPORT SYSTEM, AosBoot;
 
 CONST
 	StrongChecks = FALSE;	(* perform strong checks *)
-	Stats = FALSE;	(* acquire statistics *)
+	Stats* = FALSE;	(* acquire statistics *)
 	TimeCount = 0	(* 100000 *);	(* number of lock tries before checking timeout - 0 to disable *)
 	
 CONST
@@ -338,18 +338,22 @@ END BreakAll;
 
 PROCEDURE AcquireObject*(VAR locked: BOOLEAN);
 CODE {SYSTEM.i386}
+	PUSHFD
 	MOV EBX, locked[EBP]	; EBX := ADR(locked)
 	MOV AL, 1
 test:
 	CMP [EBX], AL	; locked? { AL = 1 }
 	JNE try
 	XOR ECX, ECX	; just in case some processor interprets REP this way
+	STI
 	REP NOP	; PAUSE instruction (* see AosBoot.SpinHint *)
+	CLI
 	JMP test
 try:
 	XCHG [EBX], AL	; set and read the lock atomically.  LOCK prefix implicit.
 	CMP AL, 1	; was locked?
 	JE test	; yes, try again
+	POPFD
 END AcquireObject;
 
 (** Release an active object lock. *)

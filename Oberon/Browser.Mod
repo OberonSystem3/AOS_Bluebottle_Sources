@@ -234,7 +234,8 @@ MODULE Browser;	(** portable, except where noted *)
 	END Append;
 	
 	PROCEDURE GetModule(name: OPS.Name): OPT.Object;
-	VAR  found: BOOLEAN; i, j: LONGINT; ch0, ch1: CHAR; iname: OPS.Name; F: Files.File; R: Files.Rider;
+	VAR  found: BOOLEAN; i, j: LONGINT; ch0, ch1: CHAR; F: Files.File; R: Files.Rider;
+			iname: ARRAY 256 OF CHAR;
 	BEGIN
 		COPY(Modules.extension, OPM.extension);
 		found:=FALSE; i:=0; ch0:=name[0];
@@ -243,10 +244,12 @@ MODULE Browser;	(** portable, except where noted *)
 		WHILE (OPM.extension[j] # 0X) & (i < 32) DO
 			iname[i] := OPM.extension[j];  INC(i);  INC(j)
 		END;
+		iname[i] := 0X;
 		IF OPM.extension[j] = 0X THEN
 			F := Files.Old(iname); Files.Set(R, F, 0); found := F # NIL;
 			IF	found	THEN	Files.Read(R, ch0); Files.Read(R, ch1);
-				found := (ch0=0BBX) & (ch1=0AFX)
+				IF ch1 = 0ADX THEN Files.Read(R, ch1) END;
+				found := (ch0=0BBX) & (ch1=OPM.OFnative)
 			END;
 			Files.Close(F);
 			

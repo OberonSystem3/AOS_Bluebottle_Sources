@@ -148,7 +148,7 @@ TYPE
 			fontCache.Enumerate(MatchExact);
 			IF ~found THEN
 				NEW(fi);
-				NEW(fi.name, LEN(name)); COPY(name, fi.name^); 
+				fi.name := Utilities.NewString(name); 
 				fi.size := size; fi.style := style;
 				(* search for exact matches *)
 				l := exactLoaders;
@@ -174,7 +174,8 @@ VAR fm : FontManager;
 
 PROCEDURE Install*(par : PTR) : PTR;
 BEGIN
-	fm.GetConfig()
+	fm.GetConfig();
+	RETURN NIL
 END Install;
 
 PROCEDURE Load;

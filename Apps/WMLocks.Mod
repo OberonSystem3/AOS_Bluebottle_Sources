@@ -128,18 +128,20 @@ TYPE
 		(** acquire a write-lock on the object *)
 		PROCEDURE AcquireWrite*;
 		VAR me : ANY;
-		BEGIN {EXCLUSIVE}
+		BEGIN
 			INC(nofWriteLocks);
 			me := AosActive.ActiveObject();
 			IF lockedBy = me THEN (* recursive use *)
 				INC(lockLevel);
 				ASSERT(lockLevel # -1)	(* overflow *)
 			ELSE
-				(* wait until no other writer and no reader has the lock *)
-				ASSERT(~(lockedBy = me) & ~InternalHasReadLock(), 3001);
-				AWAIT(DEADLOCK OR (lockedBy = NIL) & (nofReaders = 0));
-				IF DEADLOCK THEN HALT(123000) END;
-				lockedBy := me; lockLevel := 1
+				BEGIN {EXCLUSIVE}
+					(* wait until no other writer and no reader has the lock *)
+					ASSERT(~(lockedBy = me) & ~InternalHasReadLock(), 3001);
+					AWAIT(DEADLOCK OR (lockedBy = NIL) & (nofReaders = 0));
+					IF DEADLOCK THEN HALT(123000) END;
+					lockedBy := me; lockLevel := 1
+				END
 			END
 		END AcquireWrite;
 		

@@ -1,7 +1,8 @@
 MODULE WMGraphics;	(** AUTHOR "TF"; PURPOSE "Generic Graphic Support"; *)
 
 IMPORT
-	AosKernel, Rectangles := WMRectangles, Raster, AosOut, UTF8Strings, Utilities, RasterScale := WMRasterScale;
+	AosKernel, Rectangles := WMRectangles, Raster, AosOut, UTF8Strings, Utilities, RasterScale := WMRasterScale,
+	AosCodecs, AosFS, AosIO;
 
 CONST
 	(** Copy Modes *)
@@ -26,7 +27,7 @@ TYPE
 	Point2d* = RECORD x*, y* : LONGINT END;
 	Image* = OBJECT(Raster.Image)
 	VAR
-		key : POINTER TO ARRAY OF CHAR;
+		key* : POINTER TO ARRAY OF CHAR;
 	END Image;
 	
 	Rectangle* = Rectangles.Rectangle;
@@ -307,6 +308,17 @@ TYPE
 		PROCEDURE FillPolygonCB*(VAR points : ARRAY OF Point2d; nofPoints : LONGINT; callBack : FillLineCallBack);
 		BEGIN
 		END FillPolygonCB;
+		
+		PROCEDURE PolyLine*(VAR points : ARRAY OF Point2d; nofPoints : LONGINT; closed : BOOLEAN;  color : Color; mode : LONGINT);
+		VAR i : LONGINT;
+		BEGIN
+			FOR i := 1 TO nofPoints - 1 DO
+				Line(points[i-1].x, points[i-1].y, points[i].x, points[i].y, color, mode)
+			END;
+			IF closed THEN
+				Line(points[nofPoints-1].x, points[nofPoints-1].y, points[0].x, points[0].y, color, mode)
+			END
+		END PolyLine;
 		
 		(** draw an image within the current clipping rectangle *)
 		PROCEDURE DrawImage*(x, y: LONGINT; image: Raster.Image; mode : LONGINT);
@@ -593,7 +605,7 @@ BEGIN
 	RETURN r * 1000000H + g * 10000H + b * 100H + a
 END RGBAToColor;
 
-PROCEDURE CheckImage(obj: PTR; VAR cont: BOOLEAN);
+PROCEDURE CheckImage(obj: ANY; VAR cont: BOOLEAN);
 BEGIN
 	IF obj IS Image THEN
 		IF obj(Image).key # NIL THEN 
@@ -605,32 +617,93 @@ BEGIN
 	END
 END CheckImage;
 
+
+PROCEDURE GetExtension (VAR name, ext: ARRAY OF CHAR);
+VAR i, j: LONGINT; ch: CHAR;
+BEGIN
+	i := 0; j := 0;
+	WHILE name[i] # 0X DO
+		IF name[i] = "." THEN j := i+1 END;
+		INC(i)
+	END;
+	i := 0;
+	REPEAT
+		ch := name[j]; ext[i] := ch; INC(i); INC(j)
+	UNTIL (ch = 0X) OR (i = LEN(ext));
+	ext[i-1] := 0X
+END GetExtension;
+
 (** loads an image and returns a BGRA8888 bitmap if successful, NIL otherwise. 
 	If shared is TRUE, the image will not be reloaded if it is already in memory. 
 *)
 PROCEDURE LoadImage*(name : ARRAY OF CHAR; shared : BOOLEAN): Image;
-VAR img, fix : Image; done : BOOLEAN; mode : Raster.Mode;
-BEGIN {EXCLUSIVE}
-	IF shared THEN
-		foundImg := NIL; COPY(name, searchName);
-		imgCache.Enumerate(CheckImage);
-		IF foundImg # NIL THEN RETURN foundImg END
-	END;
+VAR img : Image; 
+	res, w, h, x : LONGINT;
+	decoder : AosCodecs.ImageDecoder;
+	in : AosIO.Reader;
+	ext : ARRAY 16 OF CHAR;
 
-	NEW(img); Raster.Load(img, name, done);
-	IF ~done THEN img := NIL 
-	ELSE
-		IF img.fmt.code # Raster.BGRA8888.code THEN 
-			NEW(fix); Raster.Create(fix, img.width, img.height, Raster.BGRA8888);
-			Raster.InitMode(mode, Raster.srcCopy);
-			Raster.Copy(img, fix, 0, 0, img.width, img.height, 0, 0, mode);
-			img := fix
+BEGIN 
+	IF name = "" THEN RETURN NIL END;
+	BEGIN {EXCLUSIVE}
+		IF shared THEN
+			foundImg := NIL; COPY(name, searchName);
+			imgCache.Enumerate(CheckImage);
+			IF foundImg # NIL THEN RETURN foundImg END
 		END;
-		NEW(img.key, LEN(name)); COPY(name, img.key^);
-		IF shared THEN imgCache.Add(img, NIL) END
+	END;
+		
+	GetExtension(name, ext);
+	Utilities.UpperCase(ext);
+	decoder := AosCodecs.GetImageDecoder(ext);
+	
+	IF decoder = NIL THEN 
+		AosOut.String("No decoder found for "); AosOut.String(ext); AosOut.Ln; 
+		RETURN NIL
+	END;	
+	in := AosCodecs.OpenInputStream(name);
+	IF in # NIL THEN 
+		decoder.Open(in, res);
+		IF res = 0 THEN
+			decoder.GetImageInfo(w, h, x, x);
+			NEW(img);
+			Raster.Create(img, w, h, Raster.BGRA8888);
+			decoder.Render(img);
+			NEW(img.key, LEN(name)); COPY(name, img.key^);
+			IF shared THEN imgCache.Add(img, NIL) END
+		END
 	END;
 	RETURN img
 END LoadImage;
+
+PROCEDURE StoreImage*(img : Raster.Image; name : ARRAY OF CHAR; VAR res : LONGINT);
+VAR encoder : AosCodecs.ImageEncoder;
+	f : AosFS.File;
+	w : AosFS.Writer;
+	ext : ARRAY 16 OF CHAR;
+BEGIN 
+	res := -1;
+	GetExtension(name, ext);
+	Utilities.UpperCase(ext);
+	encoder := AosCodecs.GetImageEncoder(ext);
+	
+	IF encoder = NIL THEN 
+		AosOut.String("No encoder found for "); AosOut.String(ext); AosOut.Ln; 
+		RETURN
+	END;
+	
+	f := AosFS.New(name);
+	IF f # NIL THEN 
+		AosFS.OpenWriter(w, f, 0);
+	END;
+	
+	IF w # NIL THEN 
+		encoder.Open(w);
+		encoder.WriteImage(img, res);
+		AosFS.Register(f);
+	END
+END StoreImage;
+
 
 (** Draw an UTF8 String in a rectangle *)
 PROCEDURE DrawStringInRect*(canvas : Canvas; rect : Rectangle; wrap : BOOLEAN; hAlign, vAlign : LONGINT; text : 
@@ -740,6 +813,13 @@ BEGIN
 	ELSE RETURN FALSE
 	END
 END IsBitmapHit;
+
+PROCEDURE ClearCache*(par : ANY) : ANY;
+BEGIN
+	imgCache.Clear;
+	RETURN NIL
+END ClearCache;
+
 
 BEGIN
  	nofFallbackFonts := 3;

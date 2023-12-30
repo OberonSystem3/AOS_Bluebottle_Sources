@@ -1,10 +1,10 @@
 (* ETH Oberon, Copyright 2001 ETH Zuerich Institut fuer Computersysteme, ETH Zentrum, CH-8092 Zuerich.
 Refer to the "General ETH Oberon System Source License" contract available at: http://www.oberon.ethz.ch/ *)
 
-MODULE AosZip;	(** Stefan Walthert   **)
+MODULE AosZip;	(** Stefan Walthert  **)
 
 IMPORT
-	AosIO, AosFS, Zlib, ZlibReaders := AosZlibReaders, ZlibWriters := AosZlibWriters;
+	AosIO, AosFS, Zlib, ZlibReaders := AosZlibReaders, ZlibWriters := AosZlibWriters, AosOut;
 
 CONST
 	
@@ -378,7 +378,10 @@ BEGIN
 			END;
 			IF (*Files.Pos(r)*)(pos + 22 + intDummy) # f.Length() THEN
 				res := NotZipArchiveError;
-				arc := NIL
+				arc := NIL;
+				AosOut.String("(pos + 22 + intDummy) # f.Length()"); 
+				AosOut.String("(pos + 22 + intDummy) = "); AosOut.Int((pos + 22 + intDummy), 0); 
+				AosOut.String("f.Length() = "); AosOut.Int(f.Length(), 0); AosOut.Ln; 
 			ELSE
 				AosFS.OpenReader(r, f, longDummy);	(* set r on position of first file header in central dir *)
 				arc.firstEntry := ReadEntry(r, f); arc.lastEntry := arc.firstEntry;
@@ -391,6 +394,9 @@ BEGIN
 					ent := ent.next
 				END;
 				IF intDummy # arc.nofEntries THEN
+					AosOut.String("intDummy # arc.nofEntries"); AosOut.Ln; 
+					AosOut.String("intDummy = "); AosOut.Int(intDummy, 0); 
+					 AosOut.String("arc.nofEntries = "); AosOut.Int(arc.nofEntries, 0); AosOut.Ln; 
 					res := NotZipArchiveError;
 					arc := NIL
 				END

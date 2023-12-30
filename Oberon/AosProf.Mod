@@ -4,8 +4,7 @@ MODULE AosProf;	(* pjm *)
 
 (* Aos statistical profiler *)
 
-IMPORT SYSTEM, AosOut, AosInterrupts, AosModules, AosProcessors, 
-	Modules, Texts, Oberon, In, AosKernel;
+IMPORT SYSTEM, AosOut, AosInterrupts, AosModules, AosProcessors, AosKernel;
 
 CONST
 	Divisor = 4;
@@ -26,7 +25,6 @@ TYPE
 VAR
 	size, outside, total: LONGINT;
 	range: ARRAY MaxRanges OF Range;
-	w: Texts.Writer;
 	running: BOOLEAN;
 	
 PROCEDURE HandleTimer(id: LONGINT; VAR state: AosInterrupts.State);
@@ -87,46 +85,33 @@ BEGIN
 	END
 END GetRanges;
 
-PROCEDURE Start*;
+PROCEDURE Start*(par: PTR): PTR;
+	VAR r: PTR;
 BEGIN
-	IF running THEN Stop END;
+	IF running THEN r := Stop(par) END;
 	GetRanges(size, range);
 	outside := 0; total := 0;
 	AosProcessors.InstallHandler(HandleTimer);
-	running := TRUE
+	running := TRUE;
+	RETURN NIL
 END Start;
 
-PROCEDURE Stop*;
+PROCEDURE Stop*(par: PTR): PTR;
 BEGIN
 	IF running THEN
 		AosProcessors.InstallHandler(NIL);
 		running := FALSE
-	END
+	END;
+	RETURN NIL
 END Stop;
 
-PROCEDURE Call*;	(* cmd pars *)
-VAR s: Texts.Scanner; res: INTEGER;
-BEGIN
-	Texts.OpenScanner(s, Oberon.Par.text, Oberon.Par.pos);
-	Texts.Scan(s);
-	IF s.class = Texts.Name THEN
-		Oberon.Par.pos := Texts.Pos(s);
-		Start;
-		Oberon.Call(s.s, Oberon.Par, FALSE, res);
-		Stop;
-		IF res # 0 THEN
-			Texts.WriteString(w, "Call error: "); Texts.WriteString(w, Modules.resMsg);
-			Texts.WriteLn(w); Texts.Append(Oberon.Log, w.buf)
-		END
-	END
-END Call;
-
-PROCEDURE Continue*;
+PROCEDURE Continue*(par: PTR): PTR;
 BEGIN
 	IF ~running & (size # 0) THEN
 		AosProcessors.InstallHandler(HandleTimer);
 		running := TRUE
-	END
+	END;
+	RETURN NIL
 END Continue;
 
 PROCEDURE GetNum(refs: Bytes;  VAR i, num: LONGINT);
@@ -214,17 +199,17 @@ BEGIN
 	FOR i := 0 TO size-1 DO
 		INC(sum, LEN(range[i].count)*SIZE(LONGINT))
 	END;
-	Texts.WriteInt(w, total, 1); Texts.WriteString(w, " samples, ");
-	Texts.WriteInt(w, outside, 1); Texts.WriteString(w, " unknown, ");
-	Texts.WriteInt(w, size, 1); Texts.WriteString(w, " ranges, ");
-	Texts.WriteInt(w, sum DIV 1024, 1); Texts.WriteString(w, "KB,");
-	IF ~running THEN Texts.WriteString(w, " not") END;
-	Texts.WriteString(w, " running");
-	Texts.WriteLn(w); Texts.WriteLn(w)
+	AosOut.Int(total, 1); AosOut.String(" samples, ");
+	AosOut.Int(outside, 1); AosOut.String(" unknown, ");
+	AosOut.Int(size, 1); AosOut.String(" ranges, ");
+	AosOut.Int(sum DIV 1024, 1); AosOut.String("KB,");
+	IF ~running THEN AosOut.String(" not") END;
+	AosOut.String(" running");
+	AosOut.Ln(); AosOut.Ln()
 END ShowStats;
 
-PROCEDURE ShowDetail*;
-VAR i, j, pc, per: LONGINT; t: Texts.Text; m: AosModules.Module; procname: ARRAY 64 OF CHAR;
+PROCEDURE ShowDetail*(par: PTR): PTR;
+VAR i, j, pc, per: LONGINT; m: AosModules.Module; procname: ARRAY 64 OF CHAR;
 BEGIN
 	ShowStats;
 	FOR i := 0 TO size-1 DO
@@ -234,25 +219,23 @@ BEGIN
 				m := AosModules.ThisModuleByAdr(pc);
 				IF m # NIL THEN
 					GetProc(m, pc, procname);
-					Texts.WriteString(w, m.name); Texts.Write(w, "."); Texts.WriteString(w, procname);
-					Texts.WriteString(w, " PC="); Texts.WriteInt(w, pc, 1)
+					AosOut.String(m.name); AosOut.Char("."); AosOut.String(procname);
+					AosOut.String(" PC="); AosOut.Int(pc, 1)
 				ELSE
-					Texts.WriteString(w, "EIP ="); Texts.WriteHex(w, pc)
+					AosOut.String("EIP ="); AosOut.Hex(pc, 0)
 				END;
-				Texts.Write(w, " "); Texts.WriteInt(w, range[i].count[j], 1);
+				AosOut.Char(" "); AosOut.Int(range[i].count[j], 1);
 				IF ~running & (total # 0) THEN
 					per := ENTIER(range[i].count[j]/total*100 + 0.5);
 					IF per # 0 THEN
-						Texts.Write(w, " "); Texts.WriteInt(w, per, 1); Texts.Write(w, "%")
+						AosOut.Char(" "); AosOut.Int(per, 1); AosOut.Char("%")
 					END
 				END;
-				Texts.WriteLn(w)
+				AosOut.Ln()
 			END
 		END
 	END;
-	NEW(t); Texts.Open(t, "");
-	Texts.Append(t, w.buf);
-	Oberon.OpenText("AosProf.ShowDetail", t, 400, 200)
+	RETURN NIL
 END ShowDetail;
 
 PROCEDURE Hex(x: LONGINT; VAR buf: ARRAY OF CHAR);
@@ -269,7 +252,7 @@ BEGIN
 	buf[j] := 0X
 END Hex;
 
-PROCEDURE ShowProcs*;
+PROCEDURE ShowProcs*(par: PTR): PTR;
 TYPE
 	List = POINTER TO RECORD
 		next: List;
@@ -279,7 +262,7 @@ TYPE
 	END;
 	
 VAR
-	i, j, pc, sum, per: LONGINT; t: Texts.Text; m, prev: AosModules.Module; root: List;
+	i, j, pc, sum, per: LONGINT; m, prev: AosModules.Module; root: List;
 	procname, prevname: ARRAY 64 OF CHAR;
 
 	PROCEDURE Output;
@@ -313,47 +296,36 @@ BEGIN
 	LOOP
 		root := root.next;
 		IF root = NIL THEN EXIT END;
-		Texts.WriteInt(w, root.count, 1); Texts.Write(w, " ");
-		IF root.m # NIL THEN Texts.WriteString(w, root.m.name) ELSE Texts.WriteString(w, "Unknown") END;
-		Texts.Write(w, "."); Texts.WriteString(w, root.procname);
+		AosOut.Int(root.count, 1); AosOut.Char(" ");
+		IF root.m # NIL THEN AosOut.String(root.m.name) ELSE AosOut.String("Unknown") END;
+		AosOut.Char("."); AosOut.String(root.procname);
 		IF ~running & (total # 0) THEN
 			per := ENTIER(root.count/total*100 + 0.5);
 			IF per # 0 THEN
-				Texts.Write(w, " "); Texts.WriteInt(w, per, 1); Texts.Write(w, "%")
+				AosOut.Char(" "); AosOut.Int(per, 1); AosOut.Char("%")
 			END
 		END;
-		Texts.WriteLn(w)
+		AosOut.Ln()
 	END;
-	NEW(t); Texts.Open(t, "");
-	Texts.Append(t, w.buf);
-	Oberon.OpenText("AosProf.ShowProcs", t, 400, 200)
+	RETURN NIL
 END ShowProcs;
 
-PROCEDURE Delay*;	(* ms *)
-VAR ms: LONGINT; t: AosKernel.Timer;
-BEGIN
-	In.Open; In.LongInt(ms);
-	IF In.Done & (ms > 0) THEN
-		NEW(t); t.Sleep(ms)
-	END
-END Delay;
-
 PROCEDURE Cleanup;
-VAR t: AosKernel.MilliTimer;
+VAR t: AosKernel.MilliTimer; r: PTR;
 BEGIN
 	IF running THEN
-		Stop;
+		r := Stop(NIL);
 		AosKernel.SetTimer(t, WaitTime);
 		REPEAT UNTIL AosKernel.Expired(t)	(* wait for all handlers to terminate *)
 	END
 END Cleanup;
 
 BEGIN
-	Texts.OpenWriter(w);
 	running := FALSE;
 	AosModules.InstallTermHandler(Cleanup)
 END AosProf.
 
+AosProf.Oba
 AosProf.Start
 AosProf.Stop
 AosProf.Continue

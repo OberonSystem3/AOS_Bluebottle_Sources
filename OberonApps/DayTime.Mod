@@ -5,7 +5,7 @@ MODULE DayTime;	(* pjm *)
 
 (* daytime client to request current date and time from a daytime server. *)
 
-IMPORT Input, Texts, Oberon, NetSystem, In;
+IMPORT Input, Texts, Oberon, NetSystem, In, AosIP;
 
 CONST
 	DayTimePort = 13;
@@ -22,7 +22,7 @@ BEGIN
 	NetSystem.OpenSocket(s, NetSystem.anyport, res);
 	IF res = NetSystem.done THEN
 		NetSystem.GetIP(server, adr);
-		IF adr # NetSystem.anyIP THEN
+		IF ~AosIP.IsNilAdr(adr) THEN
 			try := 0;
 			LOOP
 				time[0] := 0X;

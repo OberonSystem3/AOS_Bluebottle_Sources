@@ -64,6 +64,7 @@ MODULE Decoder;	(** non-portable *) (* NM 2.3.93 / 26.10.93 *)
 		constSizeStr = "  conSize:         ";
 		codeSizeStr = "  codeSize:        ";
 		refSizeStr = "  refSize:         ";
+		exTableSizeStr ="  exTableSize:      ";
 		
 		
 		(*Targets*)
@@ -2010,11 +2011,11 @@ MODULE Decoder;	(** non-portable *) (* NM 2.3.93 / 26.10.93 *)
 			IF (pe # nofPE) & (pc >= PE[pe].point) THEN
 				WriteLn; Texts.SetFont(W, titleFont);
 				WriteString("PROCEDURE "); WriteString(PE[pe].name); 
-				IF pc # PE[pe].point THEN WriteString(" adr = "); WriteWHex(PE[pe].point) END;	(* should not happen *)
+				IF pc # PE[pe].point THEN WriteString(" adr = "); WriteDWHex(PE[pe].point) END;	(* should not happen *)
 				WriteLn; Texts.SetFont(W, defaultFont); INC(pe)
 			END;
 			suppressOut := compilable OR noOutput;
-			Tab(PCpos); WriteWHex(pc); Write("H"); Write(":"); Tab(HexPos);
+			Tab(PCpos); WriteDWHex(pc); Write("H"); Write(":"); Tab(HexPos);
 			decoder(pc, R, W)
 		END;
 		IF target # {} THEN
@@ -2144,10 +2145,10 @@ MODULE Decoder;	(** non-portable *) (* NM 2.3.93 / 26.10.93 *)
 	PROCEDURE ReadExport;
 		VAR count: LONGINT; name: ARRAY 64 OF CHAR;
 		PROCEDURE LoadScope (level: LONGINT);
-			VAR	adr, fp, off, i, len: LONGINT; exp: INTEGER; check: POINTER TO ARRAY OF LONGINT;
+			VAR	adr, fp, off, i, len: LONGINT; exp: LONGINT; check: POINTER TO ARRAY OF LONGINT;
 		BEGIN
-			Files.ReadBytes (R, exp, 2);  WriteString(" cnt = ");  WriteDisp(exp);
-			Files.ReadNum (R, fp);
+			GetDWord ( exp ); (*fof*)  WriteString(" cnt = ");  WriteDisp(exp);
+			GetNum ( fp);
 			len := 0;
 			IF fp # 0 THEN NEW(check, exp) END;
 			WHILE fp # 0 DO
@@ -2229,7 +2230,7 @@ MODULE Decoder;	(** non-portable *) (* NM 2.3.93 / 26.10.93 *)
 							Files.ReadNum (R, link);
 							Tab(16);
 							IF link >= 0 THEN Write("V") ELSE Write("P") END;
-							Tab(18); WriteWHex(link)
+							Tab(18); WriteDWHex(link)
 						END;
 					END;
 					Tab(24); WriteString(name);
@@ -2260,13 +2261,14 @@ MODULE Decoder;	(** non-portable *) (* NM 2.3.93 / 26.10.93 *)
 			f: Files.File;
 			byte, version, i, tag: INTEGER;
 			word, dword, nofVarEntries, nofEntries, nofCmds, nofPtrs, notTypes, nofImports,
-			nofVarConsLinks, nofLinks, conssize, codesize, nofTypes, refSize, j, ptrs, newMths, refPos: LONGINT;
+			nofVarConsLinks, nofLinks, conssize, codesize, exTableLen, nofTypes, refSize, j, ptrs, newMths, refPos: LONGINT;
 			symSize: LONGINT;
 			name: ARRAY 32 OF CHAR;
 			ch: CHAR;
 			pos, filepos: LONGINT;
 			data: ARRAY 16 OF CHAR;
 			entry: EntryArray;
+			noProcs,tmp,codeoffset,beginOffset,endOffset,nofptrs,p: LONGINT;   (* fof *) 
 	BEGIN
 		T := NIL; f := Files.Old(objName);
 		IF f # NIL THEN
@@ -2290,8 +2292,14 @@ MODULE Decoder;	(** non-portable *) (* NM 2.3.93 / 26.10.93 *)
 				IF T # NIL THEN Texts.Append (T, W.buf) END;
 				RETURN
 			END;
-			GetDWord(refSize); GetWord(nofEntries); GetWord(nofCmds); GetWord(nofPtrs); GetWord(nofTypes); GetWord(nofImports); 
-			GetWord(nofVarConsLinks); GetWord(nofLinks); GetDWord(dword);  GetWord(conssize); GetWord(codesize); 
+			GetDWord(refSize); GetDWord(nofEntries); GetDWord(nofCmds); GetDWord(nofPtrs); GetDWord(nofTypes); GetDWord(nofImports); 
+			GetDWord(nofVarConsLinks); GetDWord(nofLinks); GetDWord(dword);  GetDWord(conssize); GetDWord(codesize); (* fof *) 
+
+			GetDWord(exTableLen);			
+			
+				GetDWord(noProcs);(* fof *) 
+				GetDWord(tmp); (* skip *)(* fof *) 
+
 			IF (headerCallback # NIL) THEN headerCallback(dword, conssize, codesize); END;
 			WriteString(refSizeStr); WriteDWHex(refSize); WriteLn;
 			WriteString(nofEntriesStr); WriteWHex(nofEntries); WriteLn;
@@ -2304,6 +2312,8 @@ MODULE Decoder;	(** non-portable *) (* NM 2.3.93 / 26.10.93 *)
 			WriteString(dataSizeStr); WriteDWHex(dword); WriteLn;
 			WriteString(constSizeStr); WriteWHex(conssize); WriteLn;
 			WriteString(codeSizeStr); WriteWHex(codesize); WriteLn;
+			WriteString("  exTableLen       "); WriteDWHex(exTableLen); WriteLn;
+			WriteString("  pointers in procs       "); WriteDWHex(noProcs); WriteLn;
 			WriteString("  Modulename:      ");
 			i := 0;
 			REPEAT
@@ -2324,9 +2334,9 @@ MODULE Decoder;	(** non-portable *) (* NM 2.3.93 / 26.10.93 *)
 			Check(82X, EntriesStr);
 			i:= 0; NEW(entry, nofEntries);
 			WHILE i < nofEntries DO
-				Tab(Pos1); GetWord(word); 
+				Tab(Pos1); GetNum(word); (* fof *) 
 				word := word*addressFactor;
-				WriteWHex(word); 
+				WriteDWHex(word); 
 				WriteString(" "); WriteProc(word); WriteLn;
 				entry[i] := word; INC(i)
 			END;
@@ -2340,7 +2350,7 @@ MODULE Decoder;	(** non-portable *) (* NM 2.3.93 / 26.10.93 *)
 					name[j] := ch; INC(j); Next(ch)
 				END;
 				name[j] := 0X;
-				Tab(Pos1); GetWord(word); WriteWHex(word*addressFactor); 
+				Tab(Pos1); GetNum(word);(* fof *)  WriteWHex(word*addressFactor); 
 				WriteString(" "); WriteString(name); WriteLn;
 				INC(i)
 			END;
@@ -2349,7 +2359,7 @@ MODULE Decoder;	(** non-portable *) (* NM 2.3.93 / 26.10.93 *)
 			Check(84X, PointersStr);
 			i:= 0;
 			WHILE i < nofPtrs DO
-				Tab(Pos1); GetDWord(dword); WriteDWHex(dword); WriteInt(dword); WriteLn;
+				Tab(Pos1); GetNum(dword); (* fof *) WriteDWHex(dword); WriteInt(dword); WriteLn;
 				INC(i)
 			END;
 			WriteLn;
@@ -2371,15 +2381,15 @@ MODULE Decoder;	(** non-portable *) (* NM 2.3.93 / 26.10.93 *)
 			i:= 0;
 			WHILE i < nofVarConsLinks DO
 				WriteString("  modNr: "); GetByte(byte); WriteByte(byte);
-				WriteString("  entryNr: "); GetWord(word); WriteWHex(word);
-				WriteString("  noffixups: "); GetWord(word); WriteWHex(word); 
+				WriteString("  entryNr: "); GetNum(word); (* fof *) WriteWHex(word);
+				WriteString("  noffixups: "); GetDWord(word); (* fof *) WriteWHex(word); 
 				WriteLn; Tab(Pos1);
 				j:= SHORT(word);
 				WHILE j > 0 DO
 					IF j MOD 8 = 0 THEN 
 						WriteLn; Tab(Pos1)
 					END;
-					GetWord(word); WriteWHex(word); Tab(column + 2);
+					GetNum(word);(* fof *) WriteWHex(word); Tab(column + 2);
 					DEC(j)
 				END;
 				WriteLn; 
@@ -2392,9 +2402,14 @@ MODULE Decoder;	(** non-portable *) (* NM 2.3.93 / 26.10.93 *)
 			WHILE i < nofLinks DO
 				Tab(Pos1); GetByte(byte); WriteByte(byte); Tab(column + 2);
 				GetByte(byte); WriteByte(byte); Tab(column + 2);
-				GetWord(word); WriteWHex(word); WriteLn;
+				GetNum(word); (* fof *)WriteWHex(word); WriteLn;
 				INC(i)
 			END;
+			FOR i := 0 TO nofEntries-1 DO(* fof *)
+				 GetNum(word)
+			END;
+			GetNum(word); 
+
 			WriteLn;
 		(* Data block *)
 			Check(87X, ConstStr);
@@ -2421,15 +2436,15 @@ MODULE Decoder;	(** non-portable *) (* NM 2.3.93 / 26.10.93 *)
 			Check(8BX, "Type:");
 			i:= 0;
 			WHILE i < nofTypes DO
-				WriteString("  recsize: "); GetDWord(dword); WriteDWHex(dword);
-				WriteString("  entry: "); GetWord(word); WriteWHex(word);
-				WriteString("  basetypMod: "); GetWord(word); WriteWHex(word);
-				WriteString("  basetypEntry: "); GetDWord(dword); WriteDWHex(dword);
+				WriteString("  recsize: "); GetNum(dword); (* fof *)WriteDWHex(dword);
+				WriteString("  entry: "); GetNum(word); (* fof *)WriteWHex(word);
+				WriteString("  basetypMod: "); GetNum(word); (* fof *)WriteWHex(word);
+				WriteString("  basetypEntry: "); GetNum(dword); (* fof *)WriteDWHex(dword);
 				WriteLn;
-				WriteString("  nofMths: "); GetWord(word); WriteWHex(word); 
-				WriteString("  nofInhMths: "); GetWord(word); WriteWHex(word);
-				WriteString("  nofnewMths: "); GetWord(newMths); WriteWHex(newMths);
-				WriteString("  nofPtrs: "); GetWord(ptrs); WriteWHex(ptrs);
+				WriteString("  nofMths: "); GetNum(word); (* fof *)WriteWHex(word); 
+				WriteString("  nofInhMths: "); GetNum(word); (* fof *)WriteWHex(word);
+				WriteString("  nofnewMths: ");GetNum(newMths); (* fof *)WriteWHex(newMths);
+				WriteString("  nofPtrs: "); GetDWord(ptrs); (* fof *)WriteWHex(ptrs);
 				WriteLn; WriteString("  ");
 				Next(ch);
 				WHILE ch # 0X DO
@@ -2438,8 +2453,8 @@ MODULE Decoder;	(** non-portable *) (* NM 2.3.93 / 26.10.93 *)
 				j:= 0;
 				WHILE j < newMths DO
 					WriteLn; WriteString("  mthNr: ");
-					GetWord(word); WriteWHex(word); WriteString("  entryNr: ");
-					GetWord(word); WriteWHex(word);
+					GetNum(word); (* fof *)WriteWHex(word); WriteString("  entryNr: ");
+					GetNum(word); (* fof *)WriteWHex(word);
 					WriteString(" "); WriteProc(entry[word]);
 					INC(j)
 				END;
@@ -2447,12 +2462,45 @@ MODULE Decoder;	(** non-portable *) (* NM 2.3.93 / 26.10.93 *)
 				j:= 0;
 				WHILE j < ptrs DO
 					IF j MOD 8 = 0 THEN WriteLn END;
-					GetDWord(dword); WriteDWHex(dword); WriteString("  ");
+					GetNum(dword); (* fof *)WriteDWHex(dword); WriteString("  ");
 					INC(j)
 				END;
 				WriteLn;
 				INC(i)
 			END;
+			WriteLn;
+			Check(8EX, "Exception Table:");			
+			FOR i := 0 TO exTableLen - 1 DO
+				WriteInt(i); WriteString(": ");
+				GetByte(tag);
+				IF tag = 0FEH THEN				      
+					(* pcFrom *) WriteString("pcFrom= "); GetNum(word); WriteDWHex(word);			
+					(* pcTo *) WriteString(" pcTo="); GetNum(word); WriteDWHex(word);			
+					(* pcHandler *) WriteString(" pcHandler="); GetNum(word); WriteDWHex(word);			
+					WriteLn
+				ELSE 
+					WriteString("Error"); WriteLn
+				END
+			END;			
+			
+			WriteLn;(* fof *)
+			Check(8EX, "PointerInProc Table:");			
+			FOR i := 0 TO noProcs - 1 DO
+				WriteInt(i); WriteString(": ");
+				GetByte(tag);
+				IF tag = 08FH THEN				      
+					GetNum(codeoffset); WriteString("codeoffs= ");WriteDWHex(codeoffset);
+					GetNum(beginOffset);WriteString("beginOffset= ");WriteDWHex(beginOffset);
+					GetNum(endOffset);WriteString("endOffset= ");WriteDWHex(endOffset);
+					GetDWord(nofptrs);WriteString("nofptrs"); WriteDWHex(nofptrs); 
+				FOR j := 0 TO nofptrs - 1 DO
+					GetNum(p)
+				END				
+				ELSE 
+					WriteString("Error"); WriteLn
+				END
+			END;			
+			
 			WriteLn;
 			(* output *)
 			IF T # NIL THEN Texts.Insert(T, pos, W.buf) END;
@@ -2697,7 +2745,7 @@ MODULE Decoder;	(** non-portable *) (* NM 2.3.93 / 26.10.93 *)
 			name[i] := 0X;
 			IF ~memory THEN
 				Strings.GetSuffix (S.s, suf);
-				IF (suf = "Obj") OR (suf = "Obf") OR (suf = "Obx") THEN
+				IF (suf = "Obj") OR (suf = "Obf") OR (suf = "Obx") OR (suf = "Obz") OR (suf = "Obw") (* fof *)  THEN
 					Strings.AppendCh (name, "."); Strings.Append (name, suf)
 				ELSE
 					Strings.Append (name, objSuffix)

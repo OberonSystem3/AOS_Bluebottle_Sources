@@ -59,13 +59,15 @@ Scaffolding for an extensible text editor. Extension is best attempted when the 
 	7.5.97 - scrolling to caret position when copy over / consume text strech
 	22.5.97 - fixed invertC (thanks mad)
 	17.5.01 - ctrl-left/right without selection goes to previous/next word (be)
+	19.6.2004 - variable linespacing, variable box descenders (ph)
+	18.5.05 - MouseWheel Support, fof
 *)
 
 IMPORT
 	Display, Display3, Printer3, Effects, Objects, Gadgets, Oberon, Input, Texts, Fonts, Modules, Files, Printer, Strings;
 
 CONST
-	Version = 4;
+	Version = 5;
 	eolW* = 5;		(** width of a carriage return *)
 	LArrow* = 0C4X; RArrow* = 0C3X;		(** keyboard codes for left/right arrow *)
 	(* Printer Page coordinates *)
@@ -166,6 +168,7 @@ TYPE
 		text*: Texts.Text;
 		org*, time*, frametime: LONGINT;
 		left*, right*, top*, bottom*: INTEGER;
+		linespacing*,asr*,dsr*,h*,boxdsr*:INTEGER;	(**used for formatting of lines in frame*)
 		trailer*: Line;
 		do*: Methods;
 		
@@ -1144,10 +1147,33 @@ BEGIN
 	RETURN loc.pos
 END Pos;
 
+PROCEDURE Lines(F: Frame;lines: LONGINT);
+VAR pos: LONGINT; text: Objects.Object; line: INTEGER; R: Texts.Reader; ch: CHAR; 
+BEGIN
+			pos := F.org; 
+			
+			IF lines > 0 THEN 
+				Texts.OpenReader(R,F.text,pos); 
+				line := 0; 
+				WHILE(line < lines) & (~R.eot) DO
+					Texts.Read(R,ch); 
+					IF ch = Strings.CR THEN INC(line) END;
+				END; 
+				pos:= Texts.Pos(R);
+				IF ~R.eot THEN
+					ScrollTo(F,pos);
+				END;
+			ELSE
+				lines := -lines; 
+				pos := LinesUp(F.text,pos,SHORT(lines));
+				ScrollTo(F,pos);
+			END; 
+END Lines;
+
 PROCEDURE Edit*(F: Frame; R: Display3.Mask; x, y, w, h: INTEGER; VAR M: Oberon.InputMsg);
 VAR keysum: SET; text: Texts.Text; tbeg, tend, time, objtime, pos: LONGINT; C: Oberon.ConsumeMsg;
 	RR: Texts.Reader; chr: CHAR; g: Gadgets.Frame; S: Display.SelectMsg;
-	b: Box; L: Line; I: Oberon.InputMsg; obj, obj0: Objects.Object; PM: Gadgets.PriorityMsg;
+	b: Box; L: Line; I: Oberon.InputMsg; obj, obj0: Objects.Object; PM: Gadgets.PriorityMsg;car : BOOLEAN;
 BEGIN
 	IF (F.left > sliderW) & (M.X < x + sliderW) & (mayscroll IN F.state0) THEN
 		EditSlider(F, R, M, x, y, w, h);
@@ -1158,11 +1184,22 @@ BEGIN
 	b := LocateBox(F, M.X, M.Y, x, y, w, h, L);
 	IF (b # NIL) & (maydelegate IN F.state0) THEN
 		b.f.X := 0; b.f.Y := 0; I.dlink := M.dlink;
-		I.id := M.id; I.keys := M.keys; I.X := M.X; I.Y := M.Y; I.x := x + b.x; I.y := y + h - 1 + L.base + b.voff; I.F := NIL; I.res := M.res;
+		I.id := M.id; I.keys := M.keys; I.X := M.X; I.Y := M.Y; I.x := x + b.x; I.y := y + h - 1 + L.base + b.voff; I.F := NIL; I.res := M.res;I.ch := M.ch;
 		Gadgets.Send(F, x, y, b.f, I);
 		M.res := I.res;
 		IF M.res >= 0 THEN RETURN END
-	END;
+	END;	
+	IF M.keys= {31} THEN 
+		car := F.car;  
+		IF M.ch = 0C1X THEN  (* up *) 
+			Lines(F, -1); M.res := 0; 
+		ELSIF M.ch = 0C2X THEN (* down *) 
+			Lines(F, 1); M.res := 0; 
+		 END; 
+		 IF car THEN  SetCaret(F, F.carpos.pos) END; 
+		 RETURN 
+	END; 
+
 	IF (M.keys = {2}) & (mayfocus IN F.state0) & ~(Oberon.New & (locked IN F.state0)) THEN (* left *)
 		IF Oberon.New & F.car & (Pos(F, x, y, M.X, M.Y) = F.carpos.pos) THEN (*click on caret*)
 			Oberon.Defocus; RestoreCaret; TrackWord(F, R, keysum, x, y, w, h, pos); M.res := 0;
@@ -1319,6 +1356,30 @@ BEGIN
 	IF F.selbeg.org <beg THEN beg := beg - nbr + nr END;
 	IF beg < end THEN SetSelection(F, beg, end) ELSE F.sel := FALSE END
 END Left;
+
+PROCEDURE Copy(F: Frame; VAR pos: LONGINT; cut: BOOLEAN);
+	VAR S: Oberon.SelectMsg;
+BEGIN
+	S.F := NIL; S.id := Oberon.get; S.sel := NIL; S.text := NIL; S.time := -1;
+	Display.Broadcast(S);
+	IF (S.text # NIL) & (S.time # -1) THEN
+		NEW(clipboard); Texts.OpenBuf(clipboard);
+		Texts.Save(S.text, S.beg, S.end, clipboard);
+		IF cut THEN
+			IF S.sel = F THEN
+				RemoveCaret(F); RemoveSelection(F)
+			END;
+			Texts.Delete(S.text, S.beg, S.end);
+			IF S.sel = F THEN
+				IF (pos >= S.beg) & (pos <= S.end) THEN
+					pos := S.beg
+				ELSIF pos > S.end THEN
+					DEC(pos, S.end-S.beg)
+				END
+			END
+		END
+	END
+END Copy;
 
 PROCEDURE Write(F: Frame; dlink: Objects.Object; x, y: INTEGER; ch: CHAR; fnt: Objects.Library; col, voff: INTEGER);
 VAR pos, hpos, flushpos, len: LONGINT; loc: Loc; L: Line; carX: INTEGER; setCarX, ctrl: BOOLEAN; buf: Texts.Buffer;
@@ -1500,16 +1561,10 @@ BEGIN
 				RemoveCaret(F); RemoveSelection(F);
 				InsertChar(F, ch, fnt, col, voff);
 				INC(pos)
-			ELSIF ctrl & F.sel & (ch = CHR(ORD("C")-ORD("A")+1)) THEN (* CTRL-C: copy *)
-				NEW(clipboard); Texts.OpenBuf(clipboard);
-				Texts.Save(F.text, F.selbeg.pos, F.selend.pos, clipboard)
-			ELSIF ctrl & F.sel & (ch = CHR(ORD("X")-ORD("A")+1)) THEN (* CTRL-X: cut *)
-				NEW(clipboard); Texts.OpenBuf(clipboard);
-				RemoveCaret(F); RemoveSelection(F);
-				Texts.Save(F.text, F.selbeg.pos, F.selend.pos, clipboard);
-				Texts.Delete(F.text, F.selbeg.pos, F.selend.pos);
-				IF pos >= F.text.len THEN pos := F.text.len-1 END;
-				IF pos < 0 THEN pos := 0 END
+			ELSIF ctrl & (ch = CHR(ORD("C")-ORD("A")+1)) THEN (* CTRL-C: copy *)
+				Copy(F, pos, FALSE)
+			ELSIF ctrl & (ch = CHR(ORD("X")-ORD("A")+1)) THEN (* CTRL-X: cut *)
+				Copy(F, pos, TRUE)
 			ELSIF ctrl & (clipboard.len > 0) & (ch = CHR(ORD("V")-ORD("A")+1)) THEN (* CTRL-V: paste *)
 				pos := F.carpos.pos + clipboard.len;
 				NEW(buf); Texts.OpenBuf(buf);
@@ -1575,13 +1630,14 @@ BEGIN
 		END;
 		d.Y0 := -F.top + 1; d.L0 := F.trailer.next; d.org0 := F.org; prevL := NIL;
 		(* find the line that changes *)
-		WHILE (d.L0 # F.trailer) & (beg >= d.org0 + d.L0.len) DO
+		WHILE (d.L0#NIL) & (d.L0 # F.trailer) & (beg >= d.org0 + d.L0.len) DO
 			prevL := d.L0; prevorg := d.org0; prevY := d.Y0;
 			DEC(d.Y0, d.L0.h); INC(d.org0, d.L0.len);
 			d.L0 := d.L0.next
 		END;
 		
 		IF d.L0 = F.trailer THEN d.L0 := NIL; d.Y4 := MIN(INTEGER);
+		ELSIF d.L0 = NIL THEN
 		ELSE
 			(* [org0, Y0, L0] = update starts *)
 			d.org3 := d.org0 + d.L0.len; d.Y3 := d.Y0 - d.L0.h; d.L3 := d.L0.next; (* [org3, Y3, L3] = sync point *)
@@ -1984,6 +2040,7 @@ BEGIN Gadgets.CopyFrame(M, from, to); to.state0 := from.state0;
 	to.do := from.do; to.text := from.text; to.org := from.org; to.invertC := from.invertC;
 	to.left := from.left; to.right := from.right; to.top := from.top; to.bottom := from.bottom;
 	to.border := from.border; to.col := from.col;
+	to.linespacing := from.linespacing; to.asr := from.asr; to.dsr := from.dsr; to.h := from.h; to.boxdsr := from.boxdsr; 
 	IF (deepcopy IN from.state0) OR (M.id = Objects.deep) THEN
 		NEW(to.text); Texts.Open(to.text, "");
 		IF from.text.len > 0 THEN
@@ -2000,6 +2057,7 @@ BEGIN
 	Files.WriteInt(M.R, F.left); Files.WriteInt(M.R, F.right); Files.WriteInt(M.R, F.bottom); Files.WriteInt(M.R, F.top);
 	Gadgets.WriteRef(M.R, F.lib, F.text);
 	Files.WriteInt(M.R, F.col);
+	Files.WriteInt(M.R,F.linespacing); Files.WriteInt(M.R,F.asr); Files.WriteInt(M.R,F.dsr); Files.WriteInt(M.R,F.h); Files.WriteInt(M.R,F.boxdsr); 
 	Gadgets.framehandle(F, M)
 END StoreFrame;
 
@@ -2007,7 +2065,7 @@ PROCEDURE LoadFrame(F: Frame; VAR M: Objects.FileMsg);
 VAR ver: LONGINT; obj: Objects.Object;
 BEGIN
 	Files.ReadNum(M.R, ver);
-	IF (ver # 3) & (ver # 4) THEN HALT(99) END;
+	IF (ver # 3) & (ver # 4) & (ver # 5) THEN HALT(99) END;
 	Files.ReadSet(M.R, F.state0); Files.ReadLInt(M.R, F.org);
 	Files.ReadInt(M.R, F.left); Files.ReadInt(M.R, F.right); Files.ReadInt(M.R, F.bottom); Files.ReadInt(M.R, F.top);
 	Gadgets.ReadRef(M.R, F.lib, obj);
@@ -2015,7 +2073,10 @@ BEGIN
 		F.text := obj(Texts.Text);
 		IF F.org > F.text.len THEN F.org := 0 END
 	END;
-	IF ver = 4 THEN Files.ReadInt(M.R, F.col) END;
+	IF ver IN {4,5} THEN Files.ReadInt(M.R, F.col) END;
+	IF ver = 5 THEN Files.ReadInt(M.R,F.linespacing); Files.ReadInt(M.R,F.asr); Files.ReadInt(M.R,F.dsr); Files.ReadInt(M.R,F.h);  Files.ReadInt(M.R,F.boxdsr);
+	ELSE F.linespacing:=120; F.asr:=10; F.dsr:=3; F.h:=13; F.boxdsr:=3;  (*old default values*)
+	END;
 	IF F.col < 0 THEN F.col := Display3.textbackC END;
 	Gadgets.framehandle(F, M)
 END LoadFrame;
@@ -2564,6 +2625,7 @@ END FrameHandler;
 PROCEDURE InitFrame*(F: Frame; T: Texts.Text);
 BEGIN
 	F.W := 100; F.H := 100; F.border := 2; F.left := 20; F.top := 4; F.right := 2; F.bottom := 4;
+	F.linespacing:=120; F.boxdsr:=3; F.asr:=10; F.dsr:=3; F.h:=13; F.boxdsr:=3; 	(*defaults*)
 	IF Display.Depth(0) = 1 THEN F.col := 0 ELSE F.col := Display3.textbackC END;
 	F.invertC := SHORT(Max(0, 15 - F.col));
 	IF (F.invertC = 0) OR (Display.TrueColor(0)) THEN F.invertC := Display3.invertC END;

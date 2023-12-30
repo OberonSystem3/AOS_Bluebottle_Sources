@@ -73,7 +73,7 @@ BEGIN
 	END;
 END GetFile;
 
-PROCEDURE Open*(par : ANY) : ANY;
+PROCEDURE  Open*(par : ANY) : ANY;
 VAR s: AosCommands.Parameters;
 	sr : AosIO.StringReader;
 	host, user, password : ARRAY 256 OF CHAR;
@@ -224,6 +224,27 @@ BEGIN
 	RETURN NIL
 END GetFiles;
 
+PROCEDURE MakeDir*(par : ANY) : ANY;
+VAR s: AosCommands.Parameters;
+	sr : AosIO.StringReader;
+	path : ARRAY 256 OF CHAR;
+	res : LONGINT;
+BEGIN
+	IF ftp = NIL THEN 
+		AosOut.String("not open"); AosOut.Ln; 
+		RETURN NIL
+	END;
+	s := par(AosCommands.Parameters);
+	NEW(sr, LEN(s.str^)); sr.Set(s.str^);
+	sr.String(path);
+	ftp.MakeDir(path, res);
+	IF res = 0 THEN AosOut.String("Directory created."); AosOut.Ln 
+	ELSE AosOut.String("Failed creating directory."); AosOut.Ln
+	END;
+	RETURN NIL
+END MakeDir;
+
+
 PROCEDURE ChangeDir*(par : ANY) : ANY;
 VAR s: AosCommands.Parameters;
 	sr : AosIO.StringReader;
@@ -248,13 +269,16 @@ BEGIN
 END ChangeDir;
 
 PROCEDURE Directory*(par : ANY) : ANY;
+VAR i : LONGINT;
 BEGIN
 	IF ftp = NIL THEN 
 		AosOut.String("not open"); AosOut.Ln; 
 		RETURN NIL
 	END;
-	ftp.EnumerateDir();
-
+	ftp.EnumerateDir("");
+	FOR i := 0 TO ftp.nofEntries-1 DO
+		AosOut.String(ftp.listing[i].full); AosOut.Ln;
+	END;
 	RETURN NIL
 END Directory;
 
@@ -294,7 +318,7 @@ AosFTP.GetFiles WMGraphics.Mod CharacterLineup.Mod HobbesTool.Mod
 
 
 
-S.Free AosFTP AosFTPClient 
+S.Free AosFTP  AosFTPClient ~
 AosFTP.Open "bluebottle.ethz.ch" temp temp  ~
 AosFTP.Open "phobos.ethz.ch" "uhbs" "hello"  ~ 
 AosFTP.Directory 

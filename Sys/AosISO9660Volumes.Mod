@@ -17,12 +17,12 @@ MODULE AosISO9660Volumes;	(* AUTHOR "?/be"; PURPOSE "ISO 9660 volume (ported fro
 	TYPE
 		Volume* = OBJECT (AosFS.Volume)
 		VAR
-			dev: AosDisks.Device;
+			dev-: AosDisks.Device;
 			bpc: LONGINT;	(* bytes per sector *)
 			spc: LONGINT;	(* sectors per cluster *)
 			
-			PROCEDURE Finalize;
-			VAR res: LONGINT;
+			PROCEDURE Finalize*;
+			VAR res: LONGINT; ptable : AosDisks.PartitionTable;
 			BEGIN {EXCLUSIVE}
 				IF debug THEN LogString("Entering OFSISO9660Volumes.Finalize"); LogLn END;
 				EXCL(dev.flags, AosDisks.Mounted);
@@ -125,7 +125,9 @@ BEGIN
 					ELSE LogString(" already mounted")
 					END;
 						
-					IF (p.vol = NIL) THEN dev.Close(res) END	(* close again - ignore res *)
+					IF (p.vol = NIL) THEN 
+						dev.Close(res) (* close again - ignore res *)
+					END	
 				ELSE LogString(" cannot open device")
 				END
 			ELSE LogString(" not found")

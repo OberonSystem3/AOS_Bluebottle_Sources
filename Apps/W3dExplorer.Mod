@@ -31,7 +31,8 @@ TYPE
 			res : BOOLEAN;
 		BEGIN
 			x := world.CreateObject();
-			NEW(timg); Raster.Load(timg, "Clown.Pict", res);
+		(*	NEW(timg); Raster.Load(timg, "Clown.Pict", res); *)
+			timg := WMGraphics.LoadImage("BluebottlePic0.png", TRUE);
 			NEW(img); Raster.Create(img, timg.width, timg.height, Raster.BGR565);
 			Raster.InitMode(mode, Raster.srcCopy);
 			Raster.Copy(timg, img, 0, 0, timg.width, timg.height, 0, 0, mode);

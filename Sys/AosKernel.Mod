@@ -1,8 +1,8 @@
 (* Aos, Copyright 2001, Pieter Muller, ETH Zurich *)
 
- MODULE AosKernel; (** AUTHOR "pjm"; PURPOSE "Implementation-independent kernel interface"; *)
+MODULE AosKernel; (** AUTHOR "pjm"; PURPOSE "Implementation-independent kernel interface"; *)
 
-IMPORT SYSTEM, AosOut, AosHeap, AosMemory, AosActive, AosProcessors;
+IMPORT SYSTEM, AosBoot, AosOut, AosHeap, AosMemory, AosActive, AosProcessors, AosLocks;
 
 CONST
 	TraceFin = TRUE;	(* show memory stats when finalizing *)
@@ -116,6 +116,28 @@ TYPE
 				IF cont THEN fn := next ELSE fn := NIL END
 			END
 		END Enumerate;
+		(** Enumerate all objects in the collection not being finalized (Enumerator may not call Remove, Add, Enumerate or Clear). *)
+		
+		PROCEDURE EnumerateN*( enum: Enumerator );
+		VAR fn, next: FinalizerNode;  cont: BOOLEAN;  obj: PTR;
+		BEGIN {EXCLUSIVE}
+			fn := root.nextObj;  cont := TRUE;
+			WHILE fn # NIL DO
+				next := fn.nextObj;   (* current (or other) object may be removed by enum call *)
+				obj := NIL;
+				
+				AosLocks.Acquire( AosLocks.AosProcessors );   (* prevent GC from running *)
+				
+				IF (fn.objWeak # NIL ) & (fn.objStrong = NIL ) THEN  (* object is not yet on the finalizers list  *)
+					obj := fn.objWeak;   (* now object is locally referenced, will therefore not be GCed *)
+				END;
+				
+				AosLocks.Release(AosLocks.AosProcessors);
+				
+				IF obj # NIL THEN enum( obj, cont );  END;
+				IF cont THEN fn := next ELSE fn := NIL END
+			END
+		END EnumerateN;
 		
 		(** Initialize new collection.  May also be called to clear an existing collection. *)
 		
@@ -193,7 +215,11 @@ END Watch;
 PROCEDURE GC*;
 BEGIN
 	AosProcessors.GlobalGC;
-	finalizer.Activate	(* finalizers will be called by seperate process *)
+	IF ~AosMemory.WorkingOnKernelStack() THEN (* exclusive lock of Activate can only be performed with a user stack *)
+		finalizer.Activate	(* finalizers will be called by seperate process *)
+	ELSE
+		 AosOut.String("GC working on kernel stack"); AosOut.Ln
+	END
 END GC;
 
 (** -- Timers -- *)

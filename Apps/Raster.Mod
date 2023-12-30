@@ -1,4 +1,4 @@
-MODULE Raster; (** non-portable *)	(* eos  **)
+MODULE Raster; (** non-portable *)	(* eos, TF  **)
 (** AUTHOR "eos"; PURPOSE "Raster operations"; *)
 
 	(**
@@ -12,13 +12,14 @@ MODULE Raster; (** non-portable *)	(* eos  **)
 		19.11.1999 - fixed missing alpha component in computed palettes
 		16.05.2000 - module Raster as Oberon-independent part of Images
 		19.06.2000 - replaced DisplayFormat and InitDisplay by DisplayFormat()
+		25.02.2006 - raster operations with SSE2 added (student project by Myrto Zehnder)
 		
 		To do:
 		- store in compressed format
 	*)
 	
 	IMPORT
-		SYSTEM, AosOut, AosBoot, AosIO, AosFS, AosModules, AosCLUTs, AosPlugins, AosDisplays, AosConfig;
+		SYSTEM, AosOut, AosBoot, AosIO, AosFS, AosModules, AosCLUTs, AosDisplays, AosConfig;
 		
 	
 	(*
@@ -93,7 +94,7 @@ MODULE Raster; (** non-portable *)	(* eos  **)
 		(** transfer mode **)
 		Mode0* = RECORD
 			src*, dst*: Format;	(** source and destination format **)
-			op*: SHORTINT;	(** compositing operation **)
+			op*: LONGINT;	(** compositing operation **)
 			col*: Pixel;	(** substitute color used when transfering from pure alpha formats to colored ones **)
 			buf: Pixel;	(* constant area for special-case moving *)
 			map: ARRAY 256 OF CHAR;	(* color map for transfer between indexed formats *)
@@ -117,17 +118,14 @@ MODULE Raster; (** non-portable *)	(* eos  **)
 	
 		Clamp*: ARRAY 500H OF CHAR;	(** Clamp[200H+i] = CHR(min(max(i, 0), 0FFH)) **)
 		
-(*		LoadProc*: PROCEDURE (img: Image; VAR fname: ARRAY OF CHAR; VAR done: BOOLEAN);
-		StoreProc*: PROCEDURE (img: Image; VAR fname: ARRAY OF CHAR; VAR done: BOOLEAN); *)
-		
 		Zero: Pixel;	(* pixel with all components cleared *)
 		Bit: ARRAY 100H, 8 OF BOOLEAN;	(* Bit[b, i] means bit i in byte b is set *)
 		Set, Clr: ARRAY 100H, 8 OF CHAR;	(* Set/Clr[b, i] is byte b with bit i set/cleared *)
 		
-		d8display: AosDisplays.Display;	(* only one system-wide D8 display supported *)
-		plugin: AosPlugins.Plugin;
+(*		d8display: AosDisplays.Display;	(* only one system-wide D8 display supported *)
+		plugin: AosPlugins.Plugin; *)
 		
-		MMXenabled* : BOOLEAN;
+		MMXenabled*,SSE2enabled*  : BOOLEAN;
 	
 	(**--- Color/Pixel conversions ---**)
 	
@@ -384,14 +382,14 @@ MODULE Raster; (** non-portable *)	(* eos  **)
 	PROCEDURE PackD8 (VAR fmt: Format0; adr, bit: LONGINT; VAR pix: Pixel);
 	BEGIN
 		IF pix[a] # 0X THEN	(* model alpha as brightness *)
-			SYSTEM.PUT(adr, CHR(d8display.ColorToIndex(ORD(pix[b]) + ASH(ORD(pix[g]), 8) + ASH(ORD(pix[r]), 16))))
+			SYSTEM.PUT(adr, CHR(ColorToIndex(ORD(pix[b]) + ASH(ORD(pix[g]), 8) + ASH(ORD(pix[r]), 16))))
 		END
 	END PackD8;
 	
 	PROCEDURE UnpackD8 (VAR fmt: Format0; adr, bit: LONGINT; VAR pix: Pixel);
 		VAR idx: CHAR; col: LONGINT;
 	BEGIN
-		SYSTEM.GET(adr, idx); col := d8display.IndexToColor(ORD(idx));
+		SYSTEM.GET(adr, idx); col := IndexToColor(ORD(idx));
 		pix[b] := CHR(col MOD 100H); pix[g] := CHR(ASH(col, -8) MOD 100H); pix[r] := CHR(ASH(col, -16) MOD 100H)
 	END UnpackD8;
 	
@@ -590,7 +588,7 @@ MODULE Raster; (** non-portable *)	(* eos  **)
 	END SetModeColor;
 	
 	(** blend source pixel into destination pixel according to compositing operation **)
-	PROCEDURE Blend* (op: SHORTINT; VAR src, dst: Pixel);
+	PROCEDURE Blend* (op: LONGINT; VAR src, dst: Pixel);
 		VAR fs, fd, i: LONGINT;
 	BEGIN
 		CASE op OF
@@ -1133,7 +1131,7 @@ MODULE Raster; (** non-portable *)	(* eos  **)
 		WHILE len > 0 DO
 			pix := mode.buf;
 			mode.src.unpack(mode.src, sadr, sbit, pix);
-			SYSTEM.PUT(dadr, CHR(d8display.ColorToIndex(ORD(pix[b]) + ASH(ORD(pix[g]), 8) + ASH(ORD(pix[r]), 16))));
+			SYSTEM.PUT(dadr, CHR(ColorToIndex(ORD(pix[b]) + ASH(ORD(pix[g]), 8) + ASH(ORD(pix[r]), 16))));
 			INC(dadr); sbit := sbit + mode.src.bpp; INC(sadr, sbit DIV 8); sbit := sbit MOD 8; DEC(len)
 		END
 	END AnyCopyD8;
@@ -1143,7 +1141,7 @@ MODULE Raster; (** non-portable *)	(* eos  **)
 	BEGIN
 		WHILE len > 0 DO
 			mode.src.unpack(mode.src, sadr, 0, pix);
-			SYSTEM.PUT(dadr, CHR(d8display.ColorToIndex(ORD(pix[b]) + ASH(ORD(pix[g]), 8) + ASH(ORD(pix[r]), 16))));
+			SYSTEM.PUT(dadr, CHR(ColorToIndex(ORD(pix[b]) + ASH(ORD(pix[g]), 8) + ASH(ORD(pix[r]), 16))));
 			INC(sadr, 2); INC(dadr); DEC(len)
 		END
 	END Any16CopyD8;
@@ -1153,7 +1151,7 @@ MODULE Raster; (** non-portable *)	(* eos  **)
 	BEGIN
 		WHILE len > 0 DO
 			SYSTEM.MOVE(sadr, SYSTEM.ADR(pix[0]), 3);
-			SYSTEM.PUT(dadr, CHR(d8display.ColorToIndex(ORD(pix[b]) + ASH(ORD(pix[g]), 8) + ASH(ORD(pix[r]), 16))));
+			SYSTEM.PUT(dadr, CHR(ColorToIndex(ORD(pix[b]) + ASH(ORD(pix[g]), 8) + ASH(ORD(pix[r]), 16))));
 			INC(sadr, 3); INC(dadr); DEC(len)
 		END
 	END BGR888CopyD8;
@@ -1163,7 +1161,7 @@ MODULE Raster; (** non-portable *)	(* eos  **)
 	BEGIN
 		WHILE len > 0 DO
 			SYSTEM.MOVE(sadr, SYSTEM.ADR(pix[0]), 4);
-			SYSTEM.PUT(dadr, CHR(d8display.ColorToIndex(ORD(pix[b]) + ASH(ORD(pix[g]), 8) + ASH(ORD(pix[r]), 16))));
+			SYSTEM.PUT(dadr, CHR(ColorToIndex(ORD(pix[b]) + ASH(ORD(pix[g]), 8) + ASH(ORD(pix[r]), 16))));
 			INC(sadr, 4); INC(dadr); DEC(len)
 		END
 	END BGRA8888CopyD8;
@@ -1173,7 +1171,7 @@ MODULE Raster; (** non-portable *)	(* eos  **)
 	BEGIN
 		pix[a] := 0FFX;
 		WHILE len > 0 DO
-			SYSTEM.GET(sadr, byte); col := d8display.IndexToColor(ORD(byte));
+			SYSTEM.GET(sadr, byte); col := IndexToColor(ORD(byte));
 			pix[b] := CHR(col MOD 100H); pix[g] := CHR(ASH(col, -8) MOD 100H); pix[r] := CHR(ASH(col, -16) MOD 100H);
 			mode.dst.pack(mode.dst, dadr, dbit, pix);
 			INC(sadr); dbit := dbit + mode.dst.bpp; INC(dadr, dbit DIV 8); dbit := dbit MOD 8; DEC(len)
@@ -1185,7 +1183,7 @@ MODULE Raster; (** non-portable *)	(* eos  **)
 	BEGIN
 		pix[a] := 0FFX;
 		WHILE len > 0 DO
-			SYSTEM.GET(sadr, byte); col := d8display.IndexToColor(ORD(byte));
+			SYSTEM.GET(sadr, byte); col := IndexToColor(ORD(byte));
 			pix[b] := CHR(col MOD 100H); pix[g] := CHR(ASH(col, -8) MOD 100H); pix[r] := CHR(ASH(col, -16) MOD 100H);
 			mode.dst.pack(mode.dst, dadr, 0, pix);
 			INC(sadr); INC(dadr, 2); DEC(len)
@@ -1196,7 +1194,7 @@ MODULE Raster; (** non-portable *)	(* eos  **)
 		VAR byte: CHAR; col: LONGINT; pix: Pixel;
 	BEGIN
 		WHILE len > 0 DO
-			SYSTEM.GET(sadr, byte); col := d8display.IndexToColor(ORD(byte));
+			SYSTEM.GET(sadr, byte); col := IndexToColor(ORD(byte));
 			pix[b] := CHR(col MOD 100H); pix[g] := CHR(ASH(col, -8) MOD 100H); pix[r] := CHR(ASH(col, -16) MOD 100H);
 			SYSTEM.MOVE(SYSTEM.ADR(pix[0]), dadr, 3);
 			INC(sadr); INC(dadr, 3); DEC(len)
@@ -1208,7 +1206,7 @@ MODULE Raster; (** non-portable *)	(* eos  **)
 	BEGIN
 		pix[a] := 0FFX;
 		WHILE len > 0 DO
-			SYSTEM.GET(sadr, byte); col := d8display.IndexToColor(ORD(byte));
+			SYSTEM.GET(sadr, byte); col := IndexToColor(ORD(byte));
 			pix[b] := CHR(col MOD 100H); pix[g] := CHR(ASH(col, -8) MOD 100H); pix[r] := CHR(ASH(col, -16) MOD 100H);
 			SYSTEM.MOVE(SYSTEM.ADR(pix[0]), dadr, 4);
 			INC(sadr); INC(dadr, 4); DEC(len)
@@ -1310,6 +1308,74 @@ MODULE Raster; (** non-portable *)	(* eos  **)
 		END
 	END BGRA8888CopyBGR888;
 	
+	PROCEDURE SSE2BGRA8888CopyBGR888 (VAR mode: Mode0; sadr, sbit, dadr, dbit, len: LONGINT);
+	CODE {SYSTEM.i386, SYSTEM.MMX, SYSTEM.SSE, SYSTEM.SSE2}	
+		PUSHFD
+		PUSH 		EBX
+	(*	CLI *)
+	
+		MOV		ESI, sadr[EBP]	(* source adr *)
+		MOV 		EDI, dadr[EBP]  (* source adr *)
+	
+		MOV		ECX, len[EBP]
+		
+	loop:
+		CMP		ECX, 0
+		JLE			end
+   		CMP 		ECX, 4
+		 JL			singlepixel
+	
+	fourpixel:
+		(* 4pixels at the time *)
+		MOV 		EAX,      [ESI] (* pixel 0*)
+		MOV 		EBX,    4[ESI] (* pixel 1 *)	
+	
+		AND 		EAX, 0FFFFFFH
+		AND 		EBX, 0FFFFFFH
+		MOV 		EDX, EBX
+		SHL			EDX, 24
+		OR			EAX, EDX (* 1000 *)
+		MOV		[EDI], EAX (* write back to mem *)
+	
+		MOV 		EAX,    8[ESI] (* pixel 2 *)
+		AND 		EAX, 0FFFFFFH
+		SHR		EBX,8 
+		MOV		EDX, EAX
+		SHL			EDX, 16
+		OR			EBX, EDX (* 2211 *)
+		MOV		4[EDI], EBX
+	
+		MOV 		EDX, 12[ESI] (* pixel 3 *)
+		SHL			EDX, 8
+		SHR		EAX, 16
+		OR			EAX, EDX (* 3332 *)	
+	
+		MOV		[EDI], EAX
+	
+		ADD 		ESI, 16
+		ADD 		EDI, 12
+		SUB 		ECX, 4
+		JG			loop
+		JMP 		end
+	
+	singlepixel:	
+		MOV 		EAX, [ESI]
+	
+		MOV		[EDI], AX
+		SHR		EAX, 16
+		MOV		2[EDI], AL
+
+		ADD 		ESI, 4
+		ADD		EDI, 3
+		SUB 		ECX, 1
+		JG			loop
+
+	end:	
+		EMMS (* declare FPU registers free *)
+		POP 		EBX
+		POPFD ;	
+	END SSE2BGRA8888CopyBGR888; 
+	
 	PROCEDURE BGR888CopyAny (VAR mode: Mode0; sadr, sbit, dadr, dbit, len: LONGINT);
 		VAR pix: Pixel;
 	BEGIN
@@ -1321,15 +1387,89 @@ MODULE Raster; (** non-portable *)	(* eos  **)
 		END
 	END BGR888CopyAny;
 	
-	PROCEDURE BGR888CopyBGRA8888 (VAR mode: Mode0; sadr, sbit, dadr, dbit, len: LONGINT);
+	PROCEDURE BGR888CopyBGRA8888(VAR mode: Mode0; sadr, sbit, dadr, dbit, len: LONGINT);
 	BEGIN
 		WHILE len > 0 DO
 			SYSTEM.MOVE(sadr, dadr, 3); SYSTEM.PUT(dadr+3, 0FFX);
 			INC(sadr, 3); INC(dadr, 4); DEC(len)
 		END
+		
 	END BGR888CopyBGRA8888;
 	
+	PROCEDURE SSE2BGR888CopyBGRA8888(VAR mode: Mode0; sadr, sbit, dadr, dbit, len: LONGINT);
+	CODE {SYSTEM.i386, SYSTEM.MMX, SYSTEM.SSE, SYSTEM.SSE2}
+		PUSHFD
+		PUSH 		EBX
+	(*	CLI	*)
 	
+		PXOR 		XMM0, XMM0
+		
+		MOV 		EAX, 0FF00H
+		PINSRW 	XMM0, EAX, 1
+		PINSRW 	XMM0, EAX, 3
+		PINSRW 	XMM0, EAX, 5
+		PINSRW 	XMM0, EAX, 7 (* prepare for fourpixel *)
+	
+		SHL 		EAX, 16 (* prepare for singlepixel *)
+				
+		MOV		ESI, sadr[EBP]	(* source adr *)
+		MOV 		EDI, dadr[EBP]  (* source adr *)
+	
+		MOV		ECX, len[EBP]
+		
+	loop:
+		CMP		ECX, 0
+		JLE			end
+   		CMP 		ECX, 4
+		 JL			singlepixel
+
+	fourpixel:	 
+	(* 4pixels at the time *)	
+		PXOR 		XMM2,XMM2
+		PXOR 		XMM1,XMM1
+	
+		MOV		EBX, 9[ESI] (* read 1st source pixel *)
+		MOVD 		XMM2, EBX
+		
+		PSLLDQ		XMM2, 4 
+		MOV		EBX, 6[ESI] (* read 2nd source pixel *)
+		MOVD 		XMM1, EBX
+		POR 		XMM2, XMM1
+		
+		PSLLDQ		XMM2, 4 
+		MOV		EBX, 3[ESI] (* read 3rd source pixel *)
+		MOVD 		XMM1, EBX
+		POR 		XMM2, XMM1	
+	
+		PSLLDQ		XMM2, 4 
+		MOV		EBX, [ESI] (* read 4th source pixel *)
+		MOVD 		XMM1, EBX
+		POR 		XMM2, XMM1
+		ADD 		ESI, 12
+	
+		POR 		XMM2, XMM0
+		
+		MOVDQU 	[EDI], XMM2 (* set the pixels *)
+		ADD		EDI, 16	(* inc adr *)
+		SUB 		ECX, 4
+		JG			loop
+		JMP 		end
+	
+	singlepixel:	
+		MOV		EBX, [ESI] (* read source pixel *)
+		OR 			EBX, EAX
+		ADD 		ESI, 3
+		MOV 		[EDI], EBX
+	
+		ADD		EDI, 4	(* inc adr *)
+		SUB 		ECX, 1
+		JG			loop
+	end:	
+		EMMS (* declare FPU registers free *)
+		POP 		EBX
+		POPFD 
+	END SSE2BGR888CopyBGRA8888;
+
 	(* BGRA8888 *)
 	PROCEDURE AnyCopyBGRA8888 (VAR mode: Mode0; sadr, sbit, dadr, dbit, len: LONGINT);
 		VAR pix: Pixel;
@@ -1629,7 +1769,7 @@ MODULE Raster; (** non-portable *)	(* eos  **)
 		END
 	END BGRA8888OverAny16;
 	
-	PROCEDURE BGRA8888Over565 (VAR mode: Mode0; sadr, sbit, dadr, dbit, len: LONGINT);
+	PROCEDURE BGRA8888Over565* (VAR mode: Mode0; sadr, sbit, dadr, dbit, len: LONGINT);
 		VAR src, dst: Pixel; fd, t: LONGINT;
 	BEGIN
 		WHILE len > 0 DO
@@ -1656,80 +1796,80 @@ MODULE Raster; (** non-portable *)	(* eos  **)
 		END
 	END BGRA8888Over565;
 	
-	PROCEDURE MMXBGRA8888Over565 (VAR mode: Mode0; sadr, sbit, dadr, dbit, len: LONGINT);
+	
+	PROCEDURE MMXBGRA8888Over565(VAR mode: Mode0; sadr, sbit, dadr, dbit, len: LONGINT);	
 	CODE {SYSTEM.i386, SYSTEM.MMX}
 		PUSHFD
-		CLI
-		MOV ESI, sadr[EBP]
-		MOV EDI, dadr[EBP]  
-		PXOR MM0, MM0
+	(*	CLI  *)
+		MOV 		ESI, sadr[EBP]
+		MOV 		EDI, dadr[EBP]  
+		PXOR 		MM0, MM0
+		PXOR 		MM1, MM1
 		
-		MOV	 EAX, 0FFFFFFFFH
-		MOVD	MM7, EAX 
-		PUNPCKLBW	MM7, MM0  (* 00FF00FF00FF00FF *)
+		MOV		EAX, 0FFFFFFFFH
+		MOVD		MM7, EAX 
+		PUNPCKLBW MM7, MM0  (* 00FF00FF00FF00FF *)
 		
-		MOV	ECX, len[EBP]
+		MOV		ECX, len[EBP]
 	loop:	
-		CMP	ECX, 0
-		JE end
+		CMP		ECX, 0
+		JE 			end
 		
-			MOV	EAX, [ESI]
-			XOR	EBX, EBX
-			MOV	BX, [EDI]
+		MOV		EAX, [ESI]
+		XOR		EBX, EBX
+		MOV		BX, [EDI]
 	
-			(* 255 - alpha *)
-			MOV	EDX, EAX
-			SHR	EDX, 24
-			CMP	EDX, 0 
-			JE	empty
-			CMP	EDX, 255
-			JE	full
+		(* 255 - alpha *)
+		MOV		EDX, EAX
+		SHR		EDX, 24
+		CMP		EDX, 0 
+		JE			empty
+		CMP		EDX, 255
+		JE			full
 			
-		alpha:	
-			NEG	EDX
-			ADD	EDX, 255
-			MOVD MM6, EDX
-			PUNPCKLWD MM6, MM6
-			PUNPCKLDQ MM6, MM6
+	alpha:	
+		NEG		EDX
+		ADD		EDX, 255
+		MOVD 		MM6, EDX
+		PUNPCKLWD MM6, MM6
+		PUNPCKLDQ MM6, MM6
 			
-			MOVD MM1, EAX
+		MOVD 		MM1, EAX
 			
-			(* unpack dst *)
-			MOV	EDX, EBX (* b *)
-			SHL	EDX, 3
-			AND	EDX, 0F8H
-			MOV	EAX, EDX
+		(* unpack dst *)
+		MOV		EDX, EBX (* b *)
+		SHL			EDX, 3
+		AND		EDX, 0F8H
+		MOV		EAX, EDX
 			
-			MOV	EDX, EBX (* g *)
-			SHL	EDX, 5
-			AND	EDX, 0FC00H
-			OR	EAX, EDX
+		MOV		EDX, EBX (* g *)
+		SHL			EDX, 5
+		AND		EDX, 0FC00H
+		OR			EAX, EDX
 			
-			MOV	EDX, EBX (* r *)
-			SHL	EDX, 8
-			AND	EDX, 0F80000H
-			OR	EAX, EDX
+		MOV		EDX, EBX (* r *)
+		SHL			EDX, 8
+		AND		EDX, 0F80000H
+		OR			EAX, EDX
 
-
-			MOVD	MM2, EAX 
+		MOVD		MM2, EAX 
 		
-			PUNPCKLBW	MM1, MM0  (* 0000ARGB --> 0A0R0G0B *)
-			PMULLW MM1, MM7
+		PUNPCKLBW  MM1, MM0  (* 0000ARGB --> 0A0R0G0B *)
+		PMULLW  	MM1, MM7
 			
-			PUNPCKLBW	MM2, MM0  (* 0000ARGB --> 0A0R0G0B *)
-			PMULLW MM2, MM6
+		PUNPCKLBW  MM2, MM0  (* 0000ARGB --> 0A0R0G0B *)
+		PMULLW 	MM2, MM6		
 			
-			
-			PADDUSW MM1, MM2 
+		PADDUSW 	MM1, MM2 
 			
 		(*	PSRLW	MM1, 8 (* normalize *) *)
-			DB 0FH, 71H, 0D1H, 08H 
-			PACKUSWB MM1, MM0
+		DB 			0FH, 71H, 0D1H, 08H 
+		PACKUSWB MM1, MM0
 			
-			(* HUGA BIMBO Muell *)
-			MOVD	EAX, MM1
+		(* HUGA BIMBO Muell *)
+		MOVD		EAX, MM1
 			
-		full:	  
+	full:	  
 (*			XOR EDX, EDX
 			SHR EAX, 3
 			MOV EDX, EAX
@@ -1749,67 +1889,458 @@ MODULE Raster; (** non-portable *)	(* eos  **)
 			SHR EAX, 3
 			AND EAX, 01F0000H
 			OR EDX, EAX
-			AND EDX, 01F3F1FH *)
-			
+			AND EDX, 01F3F1FH *)			
 			
 		
-			MOV	EBX, EAX 
-			AND	EBX, 0FFH
-			SHR	EBX, 3
-			MOV	EDX, EBX
+		MOV		EBX, EAX 
+		AND		EBX, 0FFH
+		SHR		EBX, 3
+		MOV		EDX, EBX
 			
-			MOV	EBX, EAX
-			SHR	EBX, 8
-			AND	EBX, 0FFH
-			SHR	EBX, 2
-			SHL	EBX, 5
-			OR	EDX, EBX
+		MOV		EBX, EAX
+		SHR		EBX, 8
+		AND		EBX, 0FFH
+		SHR		EBX, 2
+		SHL			EBX, 5
+		OR			EDX, EBX
 			
-			MOV	EBX, EAX
-			SHR	EBX, 16
-			AND	EBX, 0FFH
-			SHR	EBX, 3
-			SHL	EBX, 11
-			OR	EDX, EBX
+		MOV		EBX, EAX
+		SHR		EBX, 16
+		AND		EBX, 0FFH
+		SHR		EBX, 3
+		SHL			EBX, 11
+		OR			EDX, EBX
 			  
-			MOV [EDI], DX
-		empty:	
-			ADD ESI, 4;
-			ADD EDI, 2;
-			DEC	ECX
-		JMP loop
+		MOV 		[EDI], DX
+	empty:	
+		ADD 		ESI, 4;
+		ADD 		EDI, 2;
+		DEC		ECX
+		JMP 		loop
 	end:	
 		EMMS (* declare FPU registers free *)
 		POPFD
 	END MMXBGRA8888Over565;
 	
-(*		WHILE len > 0 DO
-			src := SYSTEM.VAL(Pixel, SYSTEM.GET32(sadr));
-			IF src[a] = 0FFX THEN
-				SYSTEM.PUT16(dadr, ASH(ORD(src[b]), -3) + ASH(ASH(ORD(src[g]), -2), 5) + ASH(ASH(ORD(src[r]), -3), 11));
-			ELSIF src[a] # 0X THEN
-				t := SYSTEM.GET16(dadr);
-				dst[b] := CHR((t MOD 32) * 8); dst[g] := CHR((t DIV 32 MOD 64) * 4); dst[r] := CHR((t DIV 2048 MOD 32) * 8);
-				
-				fd := 256-ORD(src[a]);
-				t := (256 * ORD(src[0]) + fd * ORD(dst[0])) DIV 256;
-				IF t < 255 THEN dst[0] := CHR(t) ELSE dst[0] := CHR(255) END;
-				
-				t := (256 * ORD(src[1]) + fd * ORD(dst[1])) DIV 256;
-				IF t < 255 THEN dst[1] := CHR(t) ELSE dst[1] := CHR(255) END;
-				t := (256 * ORD(src[2]) + fd * ORD(dst[2])) DIV 256;
-				IF t < 255 THEN dst[2] := CHR(t) ELSE dst[2] := CHR(255) END;
-				t := (256 * ORD(src[3]) + fd * ORD(dst[3])) DIV 256;
-				IF t < 255 THEN dst[3] := CHR(t) ELSE dst[3] := CHR(255) END;
-				SYSTEM.PUT16(dadr, ASH(ORD(dst[b]), -3) + ASH(ASH(ORD(dst[g]), -2), 5) + ASH(ASH(ORD(dst[r]), -3), 11));
-			END;	
-			INC(dadr, 2); INC(sadr, 4); DEC(len)
-		END
-	END MMXBGRA8888Over565; *)
+	
+	PROCEDURE SSE2BGRA8888Over565(VAR mode: Mode0; sadr, sbit, dadr, dbit, len: LONGINT);	
+	CODE {SYSTEM.i386, SYSTEM.MMX, SYSTEM.SSE, SYSTEM.SSE2}	
+		PUSHFD
+		PUSH 		EBX
+	(*	CLI	*)	
+
+		PXOR 		MM0, MM0
+		PXOR 		MM1, MM1
+		PXOR 		MM2, MM2
+		PXOR 		MM3, MM3
+		PXOR 		MM4, MM4
+		PXOR 		MM5, MM5
+		PXOR 		MM6, MM6
+		PXOR 		MM7, MM7
+		
+		PXOR 		XMM3, XMM3
+		PXOR 		XMM4, XMM4
+		
+		MOV 		ESI, sadr[EBP]
+		MOV 		EDI, dadr[EBP]  
+		MOV 		ECX, len[EBP]		
+			
+		(*  create masks *)
+		
+		(* src only FF which is rotated -> MM3 *)		
+		MOV		EAX, 0000000FFH
+		MOVD		MM3, EAX
+		
+		(* dest red -> MM4 *)
+		MOV		EAX, 0F800F800H
+		MOVD		MM4, EAX 
+		
+		(* dest green -> MM5 *)
+		MOV		EAX, 07E007E0H
+		MOVD		MM5, EAX 
+		
+		(* dest blue -> MM6 *) (* moved as MM6 is used in singlepixel *)
+		(*MOV	 	EAX, 001F001FH
+		MOVD		MM6, EAX *) 				
+		
+		(* BEGIN*)
+		(* 		WHILE len > 0 DO*)
+
+	loop:	
+		CMP 		ECX,0
+		JE 			end (* jump to end if ECX = 0 *)		
+		
+		(* if len < 8 then do one pixel at the time*)
+		CMP		ECX, 8
+		JL 			singlepixel
+		(* else *)
+		(* take 8 at the time*)
+		
+		MOV		EBX, ESI
+		AND 		EBX, 0FH
+		CMP		EBX, 0
+		JNE 		singlepixel			
+		
+	alleightpixels:
+		(* dest blue -> MM6 *)
+		MOV		EAX, 001F001FH
+		MOVD		MM6, EAX 
+		
+		(* src := SYSTEM.VAL(Pixel, SYSTEM.GET32(sadr));*)
+		(* Load data into memory	*)
+		(*MOV 	XMM4, 0FF000000FF000000FF000000FF000000H *)
+		
+		MOVDQA 	XMM2, [ESI] (*src 5-8*)
+		MOVQ2DQ	XMM4,  MM3     (* 000000000000000000000000000000FFH *)
+		MOVDQA 	XMM1, 16[ESI]  (*src 1-4*)		
+		PREFETCHNTA		32[ESI] (* prepare src 9-15 *)		
+		
+		(* get alphas*)
+		MOVDQU 	XMM6, XMM2
+		PSHUFD		XMM4, XMM4, 0	 
+		MOVDQU 	XMM5, XMM1
+		PSLLD 		XMM4, 24
+		PAND 		XMM6, XMM4 (* alpha 5-8 in XMM6*)
+		PAND 		XMM5, XMM4  (* alpha 1-4 in XMM5*)
+		PSRLD 		XMM5, 24
+		PSHUFHW 	XMM5, XMM5, 85H
+		PSRLD 		XMM6, 24		
+		
+		(* put both alphas into 1 register*)
+		PSHUFHW 	XMM6, XMM6, 85H
+		PSHUFLW 	XMM5, XMM5, 85H
+		PSHUFLW 	XMM6, XMM6, 58H
+		PSHUFD		XMM5, XMM5, 0D0H  (* 0102030400000000*)
+		PSHUFD 	XMM6, XMM6, 5CH (* 0000000005060708*)
+		PXOR 		XMM0,XMM0
+		POR		XMM5, XMM6            (* XMM5 = alphas 0102030405060708*)			
+		
+		PCMPEQD 	XMM0, XMM5
+		PMOVMSKB EAX, XMM0
+		CMP 		EAX, 0FFFFH (* all alphas = zero *)(* TEST not possible, because only 8 bits compared *)
+		JE      		endloop
+		
+		(* mask out alpha = zero *)		
+		
+		(* fd := 255-ORD(src[a]); fd = XMM4*)
+		(* MOV 	XMM4, 00FF00FF00FF00FF00FF00FF00FF00FFH *)
+		PXOR 		XMM4, XMM4
+		MOV	 	EAX, 00FFH
+		PINSRW	XMM4, EAX ,0
+		PSHUFLW 	XMM4, XMM4, 0
+		PSHUFD 	XMM4, XMM4, 0 
+		PSUBW 		XMM4, XMM5                 
+		MOV 		EAX,1H
+		PINSRW	XMM3, EAX ,0
+		PSHUFLW 	XMM3, XMM3, 0
+		PSHUFD 	XMM3, XMM3, 0
+		PADDUSW 	XMM4, XMM3 		
+		
+		(* new red *)
+		(* calculate red 2 *)
+
+		(* get source *)
+
+		(* sred14 = src14 && (srcMask <<16) *)
+		(* srcMask << 16*)
+		MOVQ2DQ 	XMM3, MM3
+		PSHUFD 	XMM3, XMM3, 0 
+		MOVDQU 	XMM5, XMM1 
+		MOVDQU 	XMM6, XMM2 
+		PSLLD 		XMM3, 16
+		
+		(* sred14 = src14 && (srcMask << 24) *)
+		(* src14 must be copied because it mustn't be changed *)
+		PAND 		XMM5, XMM3 (* sred14 *)
+		PSRLD 		XMM5, 16	
+	
+		(* sred14s = shuffled sred14 *)
+		PSHUFHW 	XMM5, XMM5,85H
+		PAND 		XMM6, XMM3 (* sred58 *)
+		PSRLD 		XMM6, 16
+	
+		PSHUFLW 	XMM5, XMM5,85H
+		PSHUFHW 	XMM6, XMM6,85H
+		PSHUFD  	XMM5, XMM5,0D0H (* sred14s *)
+		PSHUFLW 	XMM6, XMM6,58H
+		PSHUFD  	XMM6, XMM6,5CH (* sred58s *)
+		POR 		XMM5, XMM6 (* sred18 *) 	
+		
+		(* sred18255 = sred18 * 256- sred18 *)
+		MOVDQU 	XMM7, XMM5
+		PSLLW 		XMM5, 8
+		PSUBUSW 	XMM5, XMM7 (* sred18255 *)
+	
+		(* src is now ready *)
+	
+		(* destination *)	
+		(* dest18 must be copied because it mustn't be changed *)
+		(* Load data into memory	*)
+		MOVDQU 	XMM3, [EDI]  (*dest 1-8*)
+		MOVQ2DQ 	XMM6, MM4
+		PSHUFD 	XMM6, XMM6, 0
+		MOVDQU 	XMM7, XMM3
+	
+		PAND 		XMM7, XMM6 (* dred18 *)
+		PSRLW 		XMM7, 8
+		(*  dred18alpha = dred18 * negalpha *)
+		PMULLW XMM7, XMM4 (* dred18alpha *)
+
+		(* dest is prepared *)
+		(* combining dest and src *)
+
+		(* dred18big = sred18255 + dred18alpha *)	
+		PADDUSW 	XMM7, XMM5 (* dred18big *)
+		(* dred18f = dred18big && destMaskred128  because >> 11 and << 11 is && mask*)
+		PAND 		XMM7, XMM6 (* dred18f *)	
+  		
+ 		(* dest18nr0 = dest18 && (~destMaskred128) *)   
+ 		PANDN 	XMM6, XMM3  (* dest18nr0 *)
+  	
+ 		(* dest18nrf = dest18nr0 || dred18f *)
+ 		POR 		XMM6, XMM7
+
+		MOVDQU 	XMM3, XMM6
+
+		(* red is calculated *)
+
+		(* calculate green: *)
+		(* get source *)
+
+		(* sgreen14 = src14 && (srcMask <<8) *)
+		(* srcMask << 8*)
+		MOVQ2DQ 	XMM7, MM3		
+	
+		PSHUFD 	XMM7, XMM7, 0 
+		MOVDQU 	XMM5, XMM1 
+		PSLLD 		XMM7, 8
+		PAND 		XMM5, XMM7 (* sgreen14 *)
+		PSRLD 		XMM5, 8	
+	
+		(* sgreen14s = shuffled sgreen14 *)
+		PSHUFHW 	XMM5, XMM5,85H
+		MOVDQU 	XMM6, XMM2 
+		PSHUFLW 	XMM5, XMM5,85H
+		PAND 		XMM6, XMM7 (* sgreen58 *)
+		PSRLD 		XMM6, 8
+		PSHUFD  	XMM5, XMM5,0D0H (* sgreen14s *)
+	
+		(* sgreen58 = src58&& (srcMask << 8) *)
+		(* src58 must be copied because it mustn't be changed *)
+	
+		(* sgreen58s = shuffled sgreen58 *)
+		PSHUFHW 	XMM6, XMM6,85H
+		PSHUFLW 	XMM6, XMM6,58H
+		PSHUFD  	XMM6, XMM6,5CH (* sgreen58s *)
+	
+		(* sgreen18 = sgreen14s || sgreen58s *) 
+		POR 		XMM5, XMM6 (* sgreen18 *)
+	
+		(* sgreen18255 = sgreen18 * 256- sgreen18 *)
+		MOVDQU 	XMM7, XMM5
+		MOVQ2DQ	XMM6, MM5
+		
+		PSLLW 		XMM5, 8
+		PSUBUSW 	XMM5, XMM7 (* sgreen18255 *)
+		PSHUFD 	XMM6, XMM6, 0
+
+		MOVDQU 	XMM7, XMM3
+		
+		PAND 		XMM7, XMM6 (* dgreen18 *)
+		PSRLW 		XMM7,3
+		(*  dgreen18alpha = dgreen18 * negalpha *)
+		PMULLW 	XMM7, XMM4 (* dgreen18alpha *)
+	
+		(* dest is prepared *)
+		(* combining dest and src *)
+
+		(* dgreen18big = sgreen18255 + dgreen18alpha *)
+	
+	 	PADDUSW 	XMM7, XMM5 (* dgreen18big *)
+		PANDN 	XMM6, XMM3  (* dest18ng0 *)
+ 
+		(* dgreen18f = (dgreen18big >> 11) <<5 *)
+	
+		PSRLW 		XMM7, 10 (* dgreen18f *)
+		PSLLW 		XMM7, 5
+	 	
+ 		(* dest18ng0 = dest18 && (~destMaskgreen128) *)
+  	  	
+  		(* dest18ngf = dest18ng0 || dred18f *)
+ 		POR 		XMM6, XMM7
+		MOVDQU 	XMM3, XMM6 
+
+		(* green is calculated *)
+
+		(* calculate blue *)
+		(* get source *)
+
+		(* sblue14 = src14 && (srcMask) *)
+		(* srcMask *)
+		MOVQ2DQ 	XMM7, MM3
+		MOVDQU 	XMM5, XMM1 
+	
+		PSHUFD 	XMM7, XMM7, 0 
+		MOVDQU 	XMM6, XMM2 	
+	
+		(* sblue14 = src14 && (srcMask) *)
+		(* src14 must be copied because it mustn't be changed *)
+		PAND 		XMM5, XMM7 (* sblue14 *)	
+	
+		(* sblue14s = shuffled sblue14 *)
+		PSHUFHW 	XMM5, XMM5,85H
+		PAND 		XMM6, XMM7 (* sblue58 *)
+		PSHUFHW 	XMM6, XMM6,85H
+	
+		PSHUFLW 	XMM5, XMM5,85H
+		PSHUFLW 	XMM6, XMM6,58H
+	
+		PSHUFD  	XMM5, XMM5,0D0H (* sblue14s *)
+		PSHUFD  	XMM6, XMM6,5CH (* sblue58s *)
+	
+		POR 		XMM5, XMM6 (* sblue18 *)
+	
+		(* sblue18255 = sblue18 * 256- sblue18 *)
+		MOVDQU 	XMM7, XMM5
+		PSLLW 		XMM5, 8
+		PSUBUSW 	XMM5, XMM7 (* sblue18255 *)
+		MOVQ2DQ	XMM6, MM6
+		PSHUFD 	XMM6, XMM6, 0
+		MOVDQU 	XMM7, XMM3
+		PAND 		XMM7, XMM6 (* dblue18 *)
+		PSLLW 		XMM7, 3
+		
+		PMULLW 	XMM7, XMM4 (* dblue18alpha *)
+
+		(* dest is prepared *)
+		(* combining dest and src *)
+
+		(* dblue18big = sblue18255 + dblue18alpha *)
+	
+	 	PADDUSW 	XMM7, XMM5 (* dblue18big *)
+		(* dblue18f = (dblue18big >> 11)  *)
+		PANDN 	XMM6, XMM3  (* dest18nr0 *)
+ 		PSRLW 		XMM7, 11 (* dblue18f *)
+		 	
+  		(* dest18nr0 = dest18 && (~destMaskblue128) *)
+   	
+  		(* dest18nbf = dest18nb0 || dblue18f *)
+ 		POR 		XMM6, XMM7
+		MOVDQU 	XMM3, XMM6
+	  
+		(* blue is calculated *)		
+
+		(* now dest is calculated, store it *)
+		(* get 0 stuff *)	
+		MOVDQU	XMM5, [EDI]
+		PAND		XMM5,XMM0
+		PANDN		XMM0, XMM3
+		POR		XMM0, XMM5
+		
+		MOVDQU 	[EDI],XMM0
+		PREFETCHNTA		16[EDI] (* prepare dest 9-15 *)
+	endloop:
+		ADD 		ESI, 32 (* num of bytes *)
+		ADD 		EDI, 16
+		SUB 		ECX, 8
+		JMP 		loop			
+		
+	singlepixel: (* original code from MMXBGRA8888Over565, adjusted to fit this procedure *)				
+		MOV	 	EAX, 0FFFFFFFFH
+		MOVD		MM7, EAX 
+		PUNPCKLBW  MM7, MM0  (* 00FF00FF00FF00FF *)
+		
+		MOV 		EAX,[ESI]	
+		XOR		EBX, EBX
+		MOV 		BX,	[EDI]
+
+		(* 255 - alpha *)
+		MOV		EDX, EAX
+		SHR		EDX, 24
+		
+		CMP		EDX, 0 
+		JE			empty
+		CMP		EDX, 255
+		JE			full
+		
+	alpha:	
+		NEG		EDX
+		ADD		EDX, 255
+		
+		MOVD 		MM6, EDX
+		PUNPCKLWD MM6, MM6
+		PUNPCKLDQ MM6, MM6		
+		
+		MOVD 		MM1, EAX
+		(* unpack dst *)
+		MOV		EDX, EBX (* b *)			
+		SHL			EDX, 3			
+		AND		EDX, 0F8H
+		MOV		EAX, EDX
+		
+		MOV		EDX, EBX (* g *)
+		SHL			EDX, 5
+		AND		EDX, 0FC00H
+		OR			EAX, EDX
+		
+		MOV		EDX, EBX (* r *)
+		SHL			EDX, 8
+		AND		EDX, 0F80000H
+		OR			EAX, EDX
+
+		MOVD		MM2, EAX 		
+		PUNPCKLBW MM1, MM0  (* 0000ARGB --> 0A0R0G0B *)
+		PMULLW 	MM1, MM7		
+		PUNPCKLBW MM2, MM0  (* 0000ARGB --> 0A0R0G0B *)
+		PMULLW 	MM2, MM6
+		PADDUSW 	MM1, MM2 
+		
+	(*	PSRLW	MM1, 8 (* normalize *) *)
+		DB 			0FH, 71H, 0D1H, 08H 
+		PACKUSWB 	MM1, MM0
+		
+		(* HUGA BIMBO Muell *)
+		MOVD		EAX, MM1
+		
+	full:	  
+		MOV		EBX, EAX 
+		AND		EBX, 0FFH
+		SHR		EBX, 3
+		MOV		EDX, EBX
+		
+		MOV		EBX, EAX
+		SHR		EBX, 8
+		AND		EBX, 0FFH
+		SHR		EBX, 2
+		SHL			EBX, 5
+		OR			EDX, EBX
+		
+		MOV		EBX, EAX
+		SHR		EBX, 16
+		AND		EBX, 0FFH
+		SHR		EBX, 3
+		SHL			EBX, 11
+		OR			EDX, EBX
+		
+		MOV 		[EDI], DX
+
+	empty:	
+		ADD 		ESI, 4;
+		ADD 		EDI, 2;
+		DEC		ECX
+		JMP 		loop	
+	
+	end:	
+		EMMS (* declare FPU registers free *)
+		POP 		EBX
+		POPFD
+		
+	END SSE2BGRA8888Over565;
+	
 	
 	(** find (optimized) pixel transfer procedure for transfer mode and given source and destination formats **)
 	PROCEDURE Bind* (VAR mode: Mode; VAR src, dst: Format);
-		VAR op: SHORTINT; i: LONGINT;
+		VAR op: LONGINT; i: LONGINT;
 	BEGIN
 		IF Same(src, mode.src) & Same(dst, mode.dst) THEN
 			ASSERT(mode.transfer # NIL, 120);
@@ -1863,7 +2394,7 @@ MODULE Raster; (** non-portable *)	(* eos  **)
 				ELSE mode.transfer := ConstCopy8
 				END
 			| d8:
-				mode.buf[0] := CHR(d8display.ColorToIndex(0));
+				mode.buf[0] := CHR(ColorToIndex(0));
 				IF mode.buf[0] = 0X THEN mode.transfer := ClearBytes
 				ELSE mode.transfer := ConstCopy8
 				END
@@ -1909,7 +2440,7 @@ MODULE Raster; (** non-portable *)	(* eos  **)
 					END
 				| d8:
 					FOR i := 0 TO 255 DO
-						mode.map[i] := CHR(AosCLUTs.Match(dst.pal.clut, d8display.IndexToColor(i) MOD 1000000H))
+						mode.map[i] := CHR(AosCLUTs.Match(dst.pal.clut, IndexToColor(i) MOD 1000000H))
 					END;
 					mode.transfer := I8CopyI8
 				| bgr555, bgr565, bgr466: mode.transfer := Any16CopyP8
@@ -1920,12 +2451,12 @@ MODULE Raster; (** non-portable *)	(* eos  **)
 			| d8:
 				CASE src.code OF
 				| a1, a8:
-					mode.buf[0] := CHR(d8display.ColorToIndex(
+					mode.buf[0] := CHR(ColorToIndex(
 						ORD(mode.col[b]) + ASH(ORD(mode.col[g]), 8) + ASH(ORD(mode.col[r]), 16)));
 					mode.transfer := ConstCopy8
 				| p8:
 					FOR i := 0 TO src.pal.used-1 DO
-						mode.map[i] := CHR(d8display.ColorToIndex(
+						mode.map[i] := CHR(ColorToIndex(
 							ORD(src.pal.col[i, b]) + ASH(ORD(src.pal.col[i, g]), 8) + ASH(ORD(src.pal.col[i, r]), 16)))
 					END;
 					mode.transfer := I8CopyI8
@@ -1955,7 +2486,9 @@ MODULE Raster; (** non-portable *)	(* eos  **)
 				| d8: mode.transfer := D8CopyBGR888
 				| bgr555, bgr565, bgr466: mode.transfer := Any16CopyBGR888
 				| bgr888: mode.transfer := Copy24
-				| bgra8888: mode.transfer := BGRA8888CopyBGR888
+				| bgra8888: IF SSE2enabled THEN mode.transfer := SSE2BGRA8888CopyBGR888
+							ELSE mode.transfer := BGRA8888CopyBGR888 
+							END; 
 				ELSE mode.transfer := AnyCopyBGR888
 				END
 			| bgra8888:
@@ -1965,7 +2498,9 @@ MODULE Raster; (** non-portable *)	(* eos  **)
 				| p8: mode.transfer := P8CopyBGRA8888
 				| d8: mode.transfer := D8CopyBGRA8888
 				| bgr555, bgr565, bgr466: mode.transfer := Any16CopyBGRA8888
-				| bgr888: mode.transfer := BGR888CopyBGRA8888
+				| bgr888:  	IF SSE2enabled THEN mode.transfer := SSE2BGR888CopyBGRA8888 
+							ELSE mode.transfer :=BGR888CopyBGRA8888; 
+							END;
 				| bgra8888: mode.transfer := Copy32
 				ELSE mode.transfer := AnyCopyBGRA8888
 				END
@@ -2018,7 +2553,7 @@ MODULE Raster; (** non-portable *)	(* eos  **)
 							ASH(ORD(mode.col[r]), 16)));
 						mode.transfer := A1OverConst8
 					| d8:
-						mode.buf[0] := CHR(d8display.ColorToIndex(ORD(mode.col[b]) + ASH(ORD(mode.col[g]), 8) +
+						mode.buf[0] := CHR(ColorToIndex(ORD(mode.col[b]) + ASH(ORD(mode.col[g]), 8) +
 							ASH(ORD(mode.col[r]), 16)));
 						mode.transfer := A1OverConst8
 					| bgr555, bgr565, bgr466: dst.pack(dst, SYSTEM.ADR(mode.buf[0]), 0, mode.col); mode.transfer := A1OverConst16
@@ -2030,7 +2565,8 @@ MODULE Raster; (** non-portable *)	(* eos  **)
 					CASE dst.code OF
 					| bgr555, bgr466: mode.transfer := BGRA8888OverAny16
 					| bgr565 : IF MMXenabled THEN 
-							mode.transfer := MMXBGRA8888Over565 
+							mode.transfer := MMXBGRA8888Over565; 
+							IF SSE2enabled THEN mode.transfer := SSE2BGRA8888Over565; END; 
 						ELSE mode.transfer := BGRA8888Over565 
 						END
 					ELSE mode.transfer := BGRA8888OverAny
@@ -2072,48 +2608,68 @@ MODULE Raster; (** non-portable *)	(* eos  **)
 	
 	(** fill rectangular area **)
 	PROCEDURE Fill* (img: Image; llx, lly, urx, ury: LONGINT; pix: Pixel; VAR mode: Mode);
-		VAR bit, adr, bb, aa, x: LONGINT; m: Mode;
+		VAR bit, adr, bb, aa, x, c, t: LONGINT; m: Mode;
+		PROCEDURE Fill16(destAdr, size, filler: LONGINT);
+		CODE {SYSTEM.i386}
+			MOV EDI, destAdr[EBP]
+			MOV ECX, size[EBP]
+			MOV EAX, filler[EBP]
+			CLD
+			REP STOSW
+		END Fill16;
+		
 	BEGIN
 		ASSERT((0 <= llx) & (llx < urx) & (urx <= img.width) & (0 <= lly) & (lly < ury) & (ury <= img.height), 100);
 		bit := llx * img.fmt.bpp; adr := img.adr + lly * img.bpr + bit DIV 8; bit := bit MOD 8;
-		Bind(mode, PixelFormat, img.fmt);
-		IF (mode.op IN {clear, srcCopy}) OR (pix[a] = 0FFX) & (mode.op IN {srcOverDst, dstWithoutSrc}) THEN	(* dst is replaced *)
-			(* copy one pixel to lower left corner of rect *)
-			mode.transfer(mode, SYSTEM.ADR(pix[0]), 0, adr, bit, 1);
-			
-			(* copy pixel to rest of bottom row *)
-			InitMode(m, srcCopy); Bind(m, img.fmt, img.fmt);
-			IF (bit = 0) & (img.fmt.bpp MOD 8 = 0) THEN	(* use simple address calculation *)
-				bb := img.fmt.bpp DIV 8; aa := adr + bb; x := llx+1;
-				WHILE x < urx DO
-					m.transfer(m, adr, 0, aa, 0, 1);
-					INC(aa, bb); INC(x)
-				END
-			ELSE
-				bb := bit + img.fmt.bpp; aa := adr + bb DIV 8; bb := bb MOD 8; x := llx+1;
-				WHILE x < urx DO
-					m.transfer(m, adr, bit, aa, bb, 1);
-					bb := bb + img.fmt.bpp; aa := aa + bb DIV 8; bb := bb MOD 8; INC(x)
-				END
-			END;
-			
-			(* now copy bottom row to others *)
-			INC(lly); aa := adr + img.bpr;
-			WHILE lly < ury DO
-				m.transfer(m, adr, bit, aa, bit, urx - llx);
-				INC(lly); INC(aa, img.bpr)
-			END
 		
-		ELSE	(* fill pixel by pixel *)
+		IF (mode.op = srcCopy) & (img.fmt.code IN {bgr565}) THEN (* shortcut for speed in important cases *)
+			c := ASH(ORD(pix[b]), -3) + ASH(ASH(ORD(pix[g]), -2), 5) + ASH(ASH(ORD(pix[r]), -3), 11);
+			t := urx - llx;
 			WHILE lly < ury DO
-				x := llx; aa := adr; bb := bit;
-				WHILE x < urx DO
-					mode.transfer(mode, SYSTEM.ADR(pix[0]), 0, aa, bb, 1);
-					bb := bb + img.fmt.bpp; aa := aa + bb DIV 8; bb := bb MOD 8; INC(x)
-				END;
+				Fill16(adr, t, c);
 				INC(lly); INC(adr, img.bpr)
 			END
-		END
+		ELSE
+		
+			Bind(mode, PixelFormat, img.fmt);
+			IF (mode.op IN {clear, srcCopy}) OR (pix[a] = 0FFX) & (mode.op IN {srcOverDst, dstWithoutSrc}) THEN	(* dst is replaced *)
+				(* copy one pixel to lower left corner of rect *)
+				mode.transfer(mode, SYSTEM.ADR(pix[0]), 0, adr, bit, 1);
+				
+				(* copy pixel to rest of bottom row *)
+				InitMode(m, srcCopy); Bind(m, img.fmt, img.fmt);
+				IF (bit = 0) & (img.fmt.bpp MOD 8 = 0) THEN	(* use simple address calculation *)
+					bb := img.fmt.bpp DIV 8; aa := adr + bb; x := llx+1;
+					WHILE x < urx DO
+						m.transfer(m, adr, 0, aa, 0, 1);
+						INC(aa, bb); INC(x)
+					END
+				ELSE
+					bb := bit + img.fmt.bpp; aa := adr + bb DIV 8; bb := bb MOD 8; x := llx+1;
+					WHILE x < urx DO
+						m.transfer(m, adr, bit, aa, bb, 1);
+						bb := bb + img.fmt.bpp; aa := aa + bb DIV 8; bb := bb MOD 8; INC(x)
+					END
+				END;
+				
+				(* now copy bottom row to others *)
+				INC(lly); aa := adr + img.bpr;
+				WHILE lly < ury DO
+					m.transfer(m, adr, bit, aa, bit, urx - llx);
+					INC(lly); INC(aa, img.bpr)
+				END
+			
+			ELSE	(* fill pixel by pixel *)
+				WHILE lly < ury DO
+					x := llx; aa := adr; bb := bit;
+					WHILE x < urx DO
+						mode.transfer(mode, SYSTEM.ADR(pix[0]), 0, aa, bb, 1);
+						bb := bb + img.fmt.bpp; aa := aa + bb DIV 8; bb := bb MOD 8; INC(x)
+					END;
+					INC(lly); INC(adr, img.bpr)
+				END
+			END
+		END	
 	END Fill;
 	
 	(** clear image **)
@@ -2515,86 +3071,6 @@ MODULE Raster; (** non-portable *)	(* eos  **)
 		END
 	END Read;
 	
-	PROCEDURE GetExtension (VAR name, ext: ARRAY OF CHAR);
-		VAR i, j: LONGINT; ch: CHAR;
-	BEGIN
-		i := 0; j := 0;
-		WHILE name[i] # 0X DO
-			IF name[i] = "." THEN j := i+1 END;
-			INC(i)
-		END;
-		i := 0;
-		REPEAT
-			ch := name[j]; ext[i] := ch; INC(i); INC(j)
-		UNTIL ch = 0X
-	END GetExtension;
-	
-	PROCEDURE GetCommandProc (VAR ext : ARRAY OF CHAR; function: ARRAY OF CHAR): AosModules.CommandParProc;
-		VAR
-			i, n, res: LONGINT; ch: CHAR; key, cmd, msg: ARRAY 64 OF CHAR;
-			mod: AosModules.Module; proc: AosModules.CommandParProc;
-			s:  AosIO.StringWriter;
-	BEGIN
-		NEW(s, 64);
-		s.String("ImageFormats."); s.String(function); s.String("."); s.String(ext);
-		s.Get(key);
-		
-		AosConfig.Get(key, cmd);
-		i := 0; WHILE (cmd[i] # 0X) & (cmd[i] # ".") DO INC(i) END;
-		IF cmd[i] = "." THEN
-			cmd[i] := 0X;
-			mod := AosModules.ThisModule(cmd, res, msg);
-			IF mod # NIL THEN
-				INC(i); n := i; WHILE cmd[i] # 0X DO cmd[i-n] := cmd[i]; INC(i) END;
-				cmd[i-n] := 0X; 
-				RETURN AosModules.ThisCommandPar(mod, cmd);
-			ELSE
-				AosOut.String("Raster: Module not found "); AosOut.String(cmd); AosOut.Ln;
-				RETURN NIL
-			END
-		END;
-		RETURN NIL
-	END GetCommandProc;
-	
-	(** initialize image from file (see comment for LoadProc and StoreProc) **)
-	PROCEDURE Load* (img: Image; name: ARRAY OF CHAR; VAR done: BOOLEAN);
-	VAR file: AosFS.File; ext: ARRAY 64 OF CHAR; par : PictureTransferParameters;
-		proc :  AosModules.CommandParProc;
-	BEGIN
-		done := FALSE; file := AosFS.Old(name);
-		IF file # NIL THEN
-			GetExtension(name, ext);
-			IF ext # "" THEN
-				proc := GetCommandProc(ext, "Load");
-				IF proc # NIL THEN 
-					NEW(par);
-					COPY(name, par.name); par.img := img;
-					IF proc(par) = NIL THEN END;
-					done := par.done
-				END
-			END
-		END
-	END Load;
-	
-	(** store image in file (see comment for LoadProc and StoreProc) **)
-	PROCEDURE Store* (img: Image; name: ARRAY OF CHAR; VAR done: BOOLEAN);
-	VAR ext: ARRAY 64 OF CHAR;
-		proc :  AosModules.CommandParProc; par : PictureTransferParameters;
-	BEGIN
-		done := FALSE;
-		GetExtension(name, ext);
-		IF ext # "" THEN
-			proc := GetCommandProc(ext, "Store");
-			IF proc # NIL THEN
-				NEW(par);
-				COPY(name, par.name); par.img := img;
-				IF proc(par) = NIL THEN END;
-				done := par.done
-			END
-		END
-	END Store;
-	
-	
 	(*--- Initialization ---*)
 	
 	PROCEDURE InitBitTables;
@@ -2624,10 +3100,38 @@ MODULE Raster; (** non-portable *)	(* eos  **)
 		MMXenabled := ~MMXenabled
 	END ToggleMMX;
 	
+	PROCEDURE ToggleSSE2*(par: ANY):ANY;
+	BEGIN
+		SSE2enabled := ~SSE2enabled;
+		AosOut.String("SSE2 toggled! Is now: ");  AosOut.Boolean(SSE2enabled);AosOut.Ln;
+		RETURN NIL;
+	END ToggleSSE2;
+	
+	(** Map a color value to an 8-bit CLUT index.  Only used if format = index8. *)
+	PROCEDURE ColorToIndex*(col: LONGINT): LONGINT;
+	BEGIN
+			(* default implementation is not very useful and should be overridden. *)
+		RETURN SYSTEM.VAL(LONGINT, 
+				SYSTEM.VAL(SET, ASH(col, 7-23)) * {5..7} +
+				SYSTEM.VAL(SET, ASH(col, 4-15)) * {2..4} +
+				SYSTEM.VAL(SET, ASH(col, 1-7)) * {0..1})
+	END ColorToIndex;
+	
+	(** Map an 8-bit CLUT index to a color value.  Only used if format = index8. *)
+	PROCEDURE IndexToColor*(index: LONGINT): LONGINT;
+	BEGIN
+			(* default implementation is not very useful and should be overridden. *)
+		RETURN
+				ASH(SYSTEM.VAL(LONGINT, SYSTEM.VAL(SET, index) * {5..7}), 23-7) +
+				ASH(SYSTEM.VAL(LONGINT, SYSTEM.VAL(SET, index) * {2..4}), 15-4) +
+				ASH(SYSTEM.VAL(LONGINT, SYSTEM.VAL(SET, index) * {0..1}), 7-1)
+	END IndexToColor;	
+	
 BEGIN
 	MMXenabled := 23 IN AosBoot.features;
-	plugin := AosDisplays.registry.Await("");	(* assume only one system-wide D8 display driver *)
-	d8display := plugin(AosDisplays.Display);
+	SSE2enabled := AosBoot.SSE2Support;
+(*	plugin := AosDisplays.registry.Await("");	(* assume only one system-wide D8 display driver *)
+	d8display := plugin(AosDisplays.Display); *)
 	InitFormat(A1, a1, 1, 1, {alpha}, NIL, PackA1, UnpackA1);
 	InitFormat(A8, a8, 8, 1, {alpha}, NIL, PackA8, UnpackA8);
 	InitFormat(D8, d8, 8, 1, {index}, NIL, PackD8, UnpackD8);
@@ -2699,6 +3203,3 @@ A transfer mode is initialized with a compositing operation and optionally with 
 Images can be loaded from file and stored to file using one of many popular image file formats. The Load() and Store() procedures rely on a section 'ImageFormats' in the Aos registry. This section contains a list of file types that are associated with command procedures. When one of these commands is called, it should initialize the global 'LoadProc' and 'StoreProc' variables. These, when called, should read an image from or write an image to the file and set 'done' to TRUE if successful.
 **)
 
-(* to do:
-o perhaps remove D8 mode, so that Raster no longer needs to know display
-*)

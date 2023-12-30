@@ -2,10 +2,11 @@ MODULE WebHTTP; (** AUTHOR "tf/be"; PURPOSE "HTTP parsing"; *)
 (* 02.04.2003 es, additional result codes, WebDAV methods. *)
 (* 12.04.2003 es, WebDAV result codes. *)
 
-IMPORT AosIP, TFLog, AosIO, Utilities;
+IMPORT AosIP, TFLog, AosIO, Utilities, AosOut;
 
 CONST
 	HTTPPort* = 80;
+	HTTPSPort*= 443;
 	
 	(** HTTP Result Codes *)
 	(*     Informational      *)
@@ -188,12 +189,13 @@ TYPE
 			eof : BOOLEAN;
 			(* Chunked mode vars: *)
 			chunkSize: LONGINT;
+			first : BOOLEAN;
 		
 		PROCEDURE &Init(VAR inR, outR: AosIO.Reader);
 		BEGIN
 			SELF.inR := inR;
 			AosIO.OpenReader(outR, Receiver);
-			eof := FALSE
+			eof := FALSE; first := TRUE;
 		END Init;	
 		
 		PROCEDURE Receiver(VAR buf: ARRAY OF CHAR; ofs, size, min: LONGINT; VAR len, res: LONGINT);
@@ -205,10 +207,10 @@ TYPE
 				WHILE (chunkSize # 0) & (res = AosIO.Ok) & (len < size) DO
 					(* Read the chunk size *)
 					IF remain = 0 THEN
-						inR.SkipSpaces(); 
+						IF ~first THEN inR.SkipLn  END; first := FALSE;
 						inR.Token(token);
+						inR.SkipLn;
 						Utilities.HexStrToInt(token, chunkSize, res);
-						inR.SkipLn(); 
 						remain := chunkSize
 					END;
 					(* Fill data into out buffer *)
@@ -218,9 +220,6 @@ TYPE
 						buf[i] := ch;
 						INC(len); INC(i); DEC(remain)
 					END;
-					IF (remain = 0) & (chunkSize > 0) THEN
-						inR.SkipLn()
-					END
 				END;
 				IF chunkSize = 0 THEN eof := TRUE END
 			ELSE
@@ -415,6 +414,8 @@ BEGIN
 	GetToken(in, s); GetMethod(s, header.method);
 	GetToken(in, header.uri);	
 	GetToken(in, s); GetVersion(s, header.maj, header.min);
+	header.host := ""; header.referer := ""; header.useragent := ""; header.accept := ""; header.transferencoding := "";
+	header.additionalFields := NIL;
 	IF EOL(in) & (header.method # UnknownM) & (header.uri # "") THEN
 		in.SkipLn();
 		IF header.maj >= 1 THEN
@@ -444,20 +445,30 @@ BEGIN
 END ParseRequest;
 
 PROCEDURE ParseReply*(VAR in: AosIO.Reader; VAR header: ResponseHeader; VAR res: LONGINT; log : TFLog.Log);
-VAR s: ARRAY 32 OF CHAR; af: AdditionalField;
+VAR s, sLow: ARRAY 32 OF CHAR; af: AdditionalField;
 	i :LONGINT; ch :CHAR;
 BEGIN
 	GetToken(in, s); GetVersion(s, header.maj, header.min);
 	GetToken(in, s); i := 0; GetInt(i, s, header.statuscode); in.Ln(header.reasonphrase);
+	header.server := ""; header.date := ""; header.contenttype := ""; 
+	header.contentlength := -1; 
+	header.transferencoding := ""; header.additionalFields := NIL;
+	header.contentlocation := "";
 	IF header.maj >= 1 THEN
 		REPEAT
 			GetToken(in, s);
 			Utilities.TrimRight(s, ":");
-			IF s = "Server" THEN in.Char(ch); in.Ln(header.server) 
-			ELSIF s = "Date"THEN in.Char(ch);in.Ln(header.date) 
-			ELSIF s = "Content-Type"THEN in.Char(ch); in.Ln(header.contenttype) 
-			ELSIF s = "Content-Length"THEN in.Char(ch); in.Ln(s); Utilities.StrToInt(s, header.contentlength)
-			ELSIF s = "Transfer-Encoding"THEN in.Char(ch); in.Ln(header.transferencoding)
+			(* to understand the Micros**t IIS replies *)
+			Utilities.Copy(s, 0, 32, sLow);
+			Utilities.LowerCase(sLow);
+			IF sLow = "server" THEN in.Char(ch); in.Ln(header.server) 
+			ELSIF sLow = "date" THEN in.Char(ch);in.Ln(header.date)
+			ELSIF sLow = "location" THEN in.Char(ch);in.Ln(header.location)
+			ELSIF sLow = "content-type" THEN in.Char(ch); in.Ln(header.contenttype) 
+			ELSIF sLow = "content-length" THEN in.Char(ch); in.Ln(s); Utilities.StrToInt(s, header.contentlength)
+			ELSIF sLow = "content-location" THEN in.Char(ch);in.Ln(header.contentlocation)
+			ELSIF sLow = "transfer-encoding" THEN in.Char(ch); in.Ln(header.transferencoding)
+			ELSIF sLow = "last-modified" THEN in.Char(ch);in.Ln(header.lastmodified)
 			ELSE 
 				NEW(af); COPY(s, af.key); in.Char(ch); in.Ln(af.value);
 				af.next := header.additionalFields; header.additionalFields := af
@@ -620,6 +631,27 @@ BEGIN
 	END;
 	dst.Ln()
 END SendResponseHeader;
+
+PROCEDURE GetPath*(VAR url, path : ARRAY OF CHAR);
+VAR i, j : LONGINT;
+	protocol : ARRAY 8 OF CHAR;
+BEGIN
+	IF Utilities.Length(url) < 7 THEN COPY(url, path)
+	ELSE
+		Utilities.Copy(url, 0, 7, protocol); Utilities.UpperCase(protocol);
+		i := 0;
+		IF protocol = "HTTP://" THEN i := 7
+		ELSIF protocol = "HTTPS:/" THEN i := 8
+		END;
+		IF i > 0 THEN 
+			WHILE  (url[i] # "/") & (url[i] # 0X) DO INC(i) END;
+			IF url[i] # 0X THEN j := 0; REPEAT path[j] := url[i]; INC(i); INC(j) UNTIL url[i] = 0X
+			ELSE path := "/"
+			END
+		ELSE COPY(url, path)
+		END
+	END
+END GetPath;
 
 PROCEDURE SplitHTTPAdr*(url : ARRAY OF CHAR; VAR host, path: ARRAY OF CHAR; VAR port: LONGINT): BOOLEAN;
 VAR i, j : LONGINT;

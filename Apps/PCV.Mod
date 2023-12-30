@@ -2,15 +2,14 @@
 
 MODULE PCV; (** AUTHOR "prk / be"; PURPOSE "Parallel Compiler: symbol allocation"; *)
 
-
 IMPORT
-		StringPool, AosOut,
-		PCM, PCT, PCBT, PCLIR;
-
+	StringPool, AosOut,
+	PCM, PCT, PCBT, PCLIR;
 
 CONST
 	Trace = FALSE;
 
+(*
 		(*procedure parameters*)
 	RecVarParSize = 8;
 	VarParSize = 4;
@@ -18,6 +17,7 @@ CONST
 		(* Procedure Parameter Offsets *)
 	ProcOff = 8;
 	ProcOffSL = 12;
+*)
 	
 		(* back-end types *)
 	Signed = TRUE; Unsigned = FALSE;
@@ -40,19 +40,26 @@ BEGIN
 	varOffset := -offset
 END VarOffset;
 
-PROCEDURE ParOffset(VAR offset, varOffset: LONGINT;  par: PCT.Parameter);
+PROCEDURE ParOffset(VAR offset, varOffset: LONGINT; type: PCT.Struct; isRef: BOOLEAN; flags: SET);  (* ug *)
 VAR size: LONGINT; open: BOOLEAN;
 BEGIN
-	size := par.type.size(PCBT.Size).size;
-	open := (par.type IS PCT.Array) & (par.type(PCT.Array).mode = PCT.open);
-	IF par.ref & ~open THEN
-		IF par.type IS PCT.Record THEN  size := RecVarParSize
-		ELSE  size := VarParSize
-		END
-	END;
+	IF (type IS PCT.Array) & (PCT.CParam IN flags) THEN DEC(type.size(PCBT.Size).size, PCLIR.CG.ParamAlign) END; (* Notag *)
+	size := type.size(PCBT.Size).size;
+	open := (type IS PCT.Array) & (type(PCT.Array).mode = PCT.open);
+	IF isRef & ~open THEN
+       	IF type IS PCT.Record THEN (* fof start*)
+          		 IF PCT.CParam IN flags THEN
+               		size := PCLIR.CG.ParamAlign
+          		 ELSE
+               		size := PCLIR.CG.ParamAlign * 2
+           		END
+			(* fof end *)
+       	ELSE  size := PCLIR.CG.ParamAlign
+       	END
+    	END;
 	INC(offset, size);
-	INC(offset, (-offset) MOD 4);
-	varOffset := offset;
+	INC(offset, (-offset) MOD PCLIR.CG.ParamAlign);
+	varOffset := offset
 END ParOffset;
 
 PROCEDURE FieldOffset(VAR offset: LONGINT;  size, align: LONGINT;  p: PCT.Symbol);
@@ -92,7 +99,7 @@ BEGIN
 		ELSIF type IS PCT.Pointer THEN
 			WITH type: PCT.Pointer DO
 				NEW(size); type.size := size;
-				size.size := 4; size.align := 4; size.type := PCLIR.Address;
+				size.size := ptrsize.size; size.align := 4; size.type := PCLIR.Address;
 				size.containPtrs := TRUE;
 				IF type.baseR # NIL  (* IS PCT.Record *) THEN s := type.baseR.scope END;
 				IF (s = NIL) OR ~(PCT.CanSkipAllocation IN s.flags) THEN
@@ -161,8 +168,8 @@ PCM.LogWNum(recsize.size);
 			WITH type: PCT.Array DO
 				NEW(size); size.type := PCLIR.Address;
 				IF type.mode = PCT.open THEN
-					size.size := type.opendim * 4 + 4;
-					size.align := 4;
+					size.size := type.opendim * PCLIR.CG.ParamAlign + PCLIR.CG.ParamAlign;
+					size.align := PCLIR.CG.ParamAlign;
 					size.containPtrs := FALSE;
 					type.size := size;
 					TypeSize(type.base);
@@ -216,11 +223,15 @@ BEGIN
 		IF par.type.size = NIL THEN  TypeSize(par.type); INC(AAllocParSize) END;
 		ASSERT(par.type.size # NIL);	(* p.scope.parent >= allocated *)
 		NEW(adr); par.adr := adr;
-		ParOffset(offset, adr.offset , par);
+		ParOffset(offset, adr.offset , par.type, par.ref, par.flags);
 		par := par.nextPar
 	END;
-	INC(offset, ProcOff);
-	IF p.level # 0 THEN  INC(offset, ProcOffSL-ProcOff)  END;
+(*	INC(offset, ProcOff);
+	IF p.level # 0 THEN  INC(offset, ProcOffSL-ProcOff)  END; *)
+	
+	INC (offset, PCLIR.CG.ParamAlign * 2);
+	IF p.level # 0 THEN  INC (offset, PCLIR.CG.ParamAlign)  END;
+		
 	par := p.scope.firstPar;
 	WHILE (par # NIL) DO
 		par.adr(PCBT.Variable).offset := offset - par.adr(PCBT.Variable).offset;
@@ -242,21 +253,21 @@ END AllocateTypes;
 PROCEDURE AllocateLocals(var: PCT.Variable; VAR size: LONGINT);
 	VAR offset: LONGINT; ladr: PCBT.Variable;
 BEGIN
-	offset := 0;
+	offset := size;
 	WHILE var # NIL DO
 		TypeSize(var.type);
 		NEW(ladr); var.adr := ladr;
 		VarOffset(offset, ladr.offset , var);
 		var := var.nextVar
 	END;
-	INC(offset, (-offset) MOD 4);
+	INC(offset, (-offset) MOD PCLIR.CG.ParamAlign);
 	size := offset;
 END AllocateLocals;
 
 PROCEDURE AllocateGlobals(var: PCT.Variable; mod: PCBT.Module; setOffset: BOOLEAN; VAR size: LONGINT);
 	VAR offset: LONGINT; gadr: PCBT.GlobalVariable;
 BEGIN
-	offset := 0;
+	offset := size;
 	WHILE var # NIL DO
 		TypeSize(var.type);
 		NEW(gadr, mod); var.adr := gadr;
@@ -271,7 +282,7 @@ END AllocateGlobals;
 
 PROCEDURE PreAllocate*(context, scope: PCT.Scope);
 VAR proc: PCT.Proc; adr: PCBT.Procedure; madr: PCBT.Method; 
-	gadr: PCBT.GlobalVariable; zero: LONGINT; imported, visible: BOOLEAN;
+	gadr: PCBT.GlobalVariable; zero: HUGEINT; imported, visible: BOOLEAN;
 	mod: PCBT.Module; isEntry: BOOLEAN;
 BEGIN
 	IF (scope IS PCT.ProcScope) THEN
@@ -297,7 +308,7 @@ BEGIN
 				PCBT.context := mod;
 				IF (scope.firstVar # NIL) & (scope.firstVar.name = PCT.SelfName) THEN
 					NEW(gadr, PCBT.context); scope.firstVar.adr := gadr;
-					gadr.offset := PCBT.context.NewConst(zero, 4);
+					gadr.offset := PCBT.context.NewConst(zero, PCT.AddressSize);
 				END
 			END
 		END
@@ -307,31 +318,39 @@ END PreAllocate;
 
 (** Allocate - scope declarations (var/types) parsed *)
 
-PROCEDURE Allocate*(context, scope: PCT.Scope);
+PROCEDURE Allocate*(context, scope: PCT.Scope; hiddenVarsOnly: BOOLEAN (* ug *));
 	VAR proc: PCT.Proc; madr: PCBT.Module; globals: PCT.Variable;
 BEGIN
 	IF scope IS PCT.RecScope THEN
-		TypeSize(scope(PCT.RecScope).owner)
+		IF ~hiddenVarsOnly THEN
+			TypeSize(scope(PCT.RecScope).owner)
+		END
 	ELSIF scope IS PCT.ProcScope THEN
 		WITH scope: PCT.ProcScope DO
 			proc := scope.ownerO;
-			AllocateParameters(proc);
-			AllocateTypes(scope.firstType, scope.firstVar);
-			AllocateLocals(scope.firstVar, proc.adr(PCBT.Procedure).locsize)
+			IF hiddenVarsOnly THEN
+				AllocateLocals(scope.firstHiddenVar, proc.adr(PCBT.Procedure).locsize)
+			ELSE
+				AllocateParameters(proc);
+				AllocateTypes(scope.firstType, scope.firstVar);
+				AllocateLocals(scope.firstVar, proc.adr(PCBT.Procedure).locsize)
+			END
 		END
 	ELSIF scope IS PCT.ModScope THEN
 		WITH scope: PCT.ModScope DO
 			madr := scope.owner.adr(PCBT.Module);
-			AllocateTypes(scope.firstType, scope.firstVar);
-			globals := scope.firstVar;
+			IF hiddenVarsOnly THEN
+				AllocateGlobals(scope.firstHiddenVar, madr, context = scope, madr.locsize)
+			ELSE
+				AllocateTypes(scope.firstType, scope.firstVar);
+				globals := scope.firstVar;
 (*
-			ASSERT((scope.imported) OR (globals.name = PCT.SelfName));
+				ASSERT((scope.imported) OR (globals.name = PCT.SelfName));
 *)
-			IF (globals # NIL) & (globals.name = PCT.SelfName) THEN globals := globals.nextVar END;
-			AllocateGlobals(globals, madr, context = scope, madr.locsize)
+				IF (globals # NIL) & (globals.name = PCT.SelfName) THEN globals := globals.nextVar END;
+				AllocateGlobals(globals, madr, context = scope, madr.locsize)
+			END
 		END
-	(* ELSE
-			ignore WITH scope *)	
 	END
 END Allocate;
 
@@ -381,6 +400,70 @@ BEGIN
 	PCT.Allocate := Allocate;
 	PCT.PostAllocate := PostAllocate
 END Install;
+
+PROCEDURE SetBasicSizes*;
+
+	PROCEDURE GetSize (size: PCLIR.Size): LONGINT;
+	BEGIN
+		CASE size OF
+		PCLIR.Int8: RETURN 1;
+		| PCLIR.Int16: RETURN 2;
+		| PCLIR.Int32: RETURN 4;
+		| PCLIR.Int64: RETURN 8;
+		END;
+	END GetSize;
+
+	PROCEDURE GetAlign (size: PCLIR.Size): LONGINT;
+	BEGIN
+		CASE size OF
+		PCLIR.Int8: RETURN 1;
+		| PCLIR.Int16: RETURN 2;
+		| PCLIR.Int32: RETURN 4;
+		| PCLIR.Int64: RETURN 4;
+		END;
+	END GetAlign;
+
+	PROCEDURE DeduceBasicSize (type: PCT.Struct; size: PCLIR.Size; signed: BOOLEAN);
+	BEGIN
+		BasicSize (type, GetSize (size), GetAlign (size), size, signed);
+	END DeduceBasicSize;
+
+BEGIN
+	DeduceBasicSize (PCT.Set, PCLIR.Set, Unsigned);
+	DeduceBasicSize (PCT.NilType, PCLIR.Address, Unsigned);
+	DeduceBasicSize (PCT.Ptr, PCLIR.Address, Unsigned);
+
+	(* wrapping the following assignments into a helper function does not work *)
+
+	CASE PCLIR.Address OF
+	PCLIR.Int32: PCT.Address := PCT.Int32;
+	| PCLIR.Int64: PCT.Address := PCT.Int64;
+	END;
+
+	PCT.SystemAddress.type := PCT.Address;
+
+	CASE PCLIR.Set OF
+	PCLIR.Int32: PCT.SetType := PCT.Int32;
+	| PCLIR.Int64: PCT.SetType := PCT.Int64;
+	END;
+
+	CASE PCLIR.SizeType OF
+	PCLIR.Int32: PCT.Size := PCT.Int32;
+	| PCLIR.Int64: PCT.Size := PCT.Int64;
+	END;
+	
+	PCT.SystemSize.type := PCT.Size;
+	
+	procsize.size := GetSize (PCLIR.Address);
+	procsize.type := PCLIR.Address;
+	delegsize.size := procsize.size * 2;
+	delegsize.type := procsize.type;
+
+	ptrsize := PCT.Ptr.size(PCBT.Size);
+	
+	PCT.AddressSize := GetSize (PCLIR.Address);
+	PCT.SetSize := GetSize (PCLIR.Set);
+END SetBasicSizes;
 
 BEGIN
 	IF Trace THEN PCM.LogWLn; PCM.LogWStr("PCV.Trace on") END;

@@ -1,13 +1,13 @@
-MODULE AosTVDriver;	(** AUTHOR "oljeger@student.ethz.ch"; PURPOSE "Abstract TV driver"; *)
+MODULE AosTVDriver;	(** AUTHOR "oljeger@student.ethz.ch"; PURPOSE "Interface for TV card drivers"; *)
 
 IMPORT
-	AosPlugins, AosModules, AosTexts, AosOut;
-
-VAR
-	devices*:AosPlugins.Registry;
+	AosPlugins, AosModules, AosTexts, AosOut, Utilities, Standard := WMStandardComponents;
 
 CONST
-	WesternEuropeanChnlSet * = 0;
+	RegistryName = "AosTVDriver";
+	RegistryDesc = "TV drivers for Bluebottle";
+	
+	WesternEuropeanChnlSet* = 0;
 	VbiMaxLines* = 16;
 	VbiLineSize* = 2048;
 	VbiBufferItems = 20;
@@ -15,28 +15,44 @@ CONST
 	VbiBufferSize* = VbiDataSize *  VbiBufferItems;
 
 TYPE
+	(** The VbiBuffer objects contain a ring buffer with raw VBI data extracted by the TV card *)
 	VbiBuffer* = OBJECT
-	VAR
-		data	*: ARRAY VbiBufferSize
- OF CHAR;
-		readPos*: LONGINT;
-		insertPos*: LONGINT;
-		vbiSize
-*: LONGINT;
+		VAR
+			data*: ARRAY VbiBufferSize OF CHAR;
+			readPos*: LONGINT;
+			insertPos*: LONGINT;
+			vbiSize*: LONGINT;
+			timeout: BOOLEAN;
+			timer: Standard.Timer;
+		
+		PROCEDURE &Init;
+		BEGIN
+			NEW(timer);
+			timer.interval.Set(200);
+			timer.onTimer.Add(DoTimeout)
+		END Init;
+		
+		PROCEDURE DoTimeout(sender, data: PTR);
+		BEGIN {EXCLUSIVE}
+			timeout := TRUE
+		END DoTimeout;
+		
+		(** Wait for teletext data *)
+		PROCEDURE AwaitData*;
+		BEGIN {EXCLUSIVE}
+			timer.Start(NIL, NIL);
+			timeout := FALSE;
+			AWAIT (vbiSize > 0) OR timeout;
+			timer.Stop(NIL, NIL)
+		END AwaitData;
+		
+		PROCEDURE Finalize*;
+		BEGIN {EXCLUSIVE}
+			timeout := TRUE
+		END Finalize;
+		
 	END VbiBuffer;
 
-	ChannelSwitchHandler* = PROCEDURE {DELEGATE} (freq: LONGINT);
-
-	ChannelSwitchObserver = OBJECT
-	VAR
-		next: ChannelSwitchObserver;
-		handler: ChannelSwitchHandler;
-	END ChannelSwitchObserver;
-	
-VAR
-	channelSwitchObservers: ChannelSwitchObserver;
-
-TYPE
 	(** The TVTuner objects represents the tuning facilities of a video capture card. *)
 	TVTuner* = OBJECT
 	VAR 
@@ -109,7 +125,8 @@ TYPE
 	(** Get tuner frequency. *)
 	(** return value:	tuner frequency *)
 		PROCEDURE GetFrequency* (): LONGINT;
-		BEGIN HALT(99);	(** abstract *)
+		BEGIN
+			RETURN frequency
 		END GetFrequency;
 
 	(** Set radio frequency. *)
@@ -124,7 +141,7 @@ TYPE
 		BEGIN
 			NEW (chObs);
 			chObs.handler := handler;
-			(* insert new observer in front of the list (AT THE END???) *)
+			(* insert new observer in front of the list *)
 			chObs.next := channelSwitchObservers;
 			channelSwitchObservers := chObs;
 		END InstallChannelSwitchHandler;
@@ -135,7 +152,7 @@ TYPE
 		BEGIN
 			chObs := channelSwitchObservers;
 			WHILE chObs # NIL DO
-				chObs.handler (freq);
+				chObs.handler (freq, SELF);
 				chObs := chObs.next;
 			END;
 		END NotifyChannelSwitchObservers;
@@ -153,7 +170,7 @@ TYPE
 
 	(** Returns wether tuner is locked to a stable video signal or not. *)
 	(** return value:	TRUE if tuner is locked to a stable video signal, otherwise FALSE *)
-		PROCEDURE IsLocked * (): BOOLEAN;
+		PROCEDURE IsLocked* (): BOOLEAN;
 		BEGIN HALT(99);	(** abstract *)
 		END IsLocked;
 
@@ -248,37 +265,45 @@ TYPE
 
 	(** Get contrast value. *)
 	(** return value:	value of contrast multiplication factor *)
-		PROCEDURE GetContrast0* (): LONGINT;
+		PROCEDURE GetContrast* (): LONGINT;
 		BEGIN HALT(99);	(** abstract *)
 		END GetContrast;
 
 	(** Enable or disable color bars. *)
 	(** enable:	TRUE to enable color bars, FALSE for disabling color bars *)
-		PROCEDURE SetColorBars1* (enable: BOOLEAN);
+		PROCEDURE SetColorBars* (enable: BOOLEAN);
 		BEGIN HALT(99);	(** abstract *)
 		END SetColorBars;
 		
 	END TVTuner;
 
-	NotificationHandler2* = PROCEDURE {DELEGATE};
+	ChannelSwitchHandler* = PROCEDURE {DELEGATE} (freq: LONGINT; tuner: TVTuner);
+
+	ChannelSwitchObserver = OBJECT
+	VAR
+		next: ChannelSwitchObserver;
+		handler: ChannelSwitchHandler;
+	END ChannelSwitchObserver;
+
+	NotificationHandler* = PROCEDURE {DELEGATE};
 
 	(** The VideoCaptureDevice represents a video capture card with its tuning and audio components. *)
 	VideoCaptureDevice* = OBJECT (AosPlugins.Plugin)
 	(** Each VideoCaptureDevice must have a tuner, an audio and a vbiBuffer object. These can be accessed
 			via the appropriate GetXXX procedures *)
 
-		PROCEDURE & Init4* (base, irq, product, rev: LONGINT);
+		PROCEDURE & Init* (base, irq, product, rev: LONGINT);
 		BEGIN HALT(99);	(** abstract *)
 		END Init;
 	
 	(** Get the ringbuffer that contains the raw VBI data *)
-		PROCEDURE GetVbiData5* (): VbiBuffer6;
+		PROCEDURE GetVbiBuffer* (): VbiBuffer;
 		BEGIN HALT(99);	(** abstract *)
-		END GetVbiData;
+		END GetVbiBuffer;
 
 	(** Get the TVTuner object of this VideoCaptureDevice object. *)
 	(** return value:	TVTuner object of this card *)
-		PROCEDURE GetTuner7* (): TVTuner8;
+		PROCEDURE GetTuner* (): TVTuner;
 		BEGIN HALT(99);	(** abstract *)
 		END GetTuner;
 
@@ -308,6 +333,11 @@ TYPE
 		PROCEDURE IsVideoOpen* (): BOOLEAN;
 		BEGIN HALT(99);	(** abstract *)
 		END IsVideoOpen;
+		
+	(** Is the Vbi signal (Teletext) begin captured? *)
+		PROCEDURE IsVbiOpen* (): BOOLEAN;
+		BEGIN HALT(99);	(** abstract *)
+		END IsVbiOpen;
 
 	(** Set a list of clipping region. *)
 		PROCEDURE SetClipRegion*;
@@ -316,69 +346,69 @@ TYPE
 
 	(** Get the device status. *)
 	(** return value:	device status *)
-		PROCEDURE GetStatusA* (): LONGINT;
+		PROCEDURE GetStatus* (): LONGINT;
 		BEGIN HALT(99);	(** abstract *)
 		END GetStatus;
 
 	(** Set the video input format *)
 	(** format:	format of video signal (Bt848IFormPalBDGHI etc.) *)
-		PROCEDURE SetInputFormatB* (format: LONGINT);
+		PROCEDURE SetInputFormat* (format: LONGINT);
 		BEGIN HALT(99);	(** abstract *)
-		END SetInputFormatC;
+		END SetInputFormat;
 
 	(** Get the video input format. *)
-		PROCEDURE GetInputFormatD* (): LONGINT;
+		PROCEDURE GetInputFormat* (): LONGINT;
 		BEGIN HALT(99);	(** abstract *)
 		END GetInputFormat;
 		
-		PROCEDURE SetPixelFormatE* (format: LONGINT);
+		PROCEDURE SetPixelFormat* (format: LONGINT);
 		BEGIN HALT(99);	(** abstract *)
 		END SetPixelFormat;
 
 	(** Select RCA as input. *)
-		PROCEDURE SetInputDev0F*;
+		PROCEDURE SetInputDev0*;
 		BEGIN HALT(99);	(** abstract *)
 		END SetInputDev0;
 
 	(** Select the tuner as input. *)
-		PROCEDURE SetInputDev1G*;
+		PROCEDURE SetInputDev1*;
 		BEGIN HALT(99);	(** abstract *)
 		END SetInputDev1;
 
 	(** Select S-VHS (composite camera) as input. *)
-		PROCEDURE SetInputDev2H*;
+		PROCEDURE SetInputDev2*;
 		BEGIN HALT(99);	(** abstract *)
 		END SetInputDev2;
 
 	(** Select S-VHS as input. *)
-		PROCEDURE SetInputDevSVideoI*;
+		PROCEDURE SetInputDevSVideo*;
 		BEGIN HALT(99);	(** abstract *)
-		END SetInputDevSVideoJ;
+		END SetInputDevSVideo;
 
 	(** Select MUX 3 as input. *)
-		PROCEDURE SetInputDev3K*;
+		PROCEDURE SetInputDev3*;
 		BEGIN HALT(99);	(** abstract *)
-		END SetInputDev3L;
+		END SetInputDev3;
 
 	(** Set the video data buffer. *)
 	(** addr:	physical address of target buffer for video data. *)
 	(** width:	line length of video frame buffer *)
-		PROCEDURE SetVideoM* (addr: LONGINT; width: LONGINT);
+		PROCEDURE SetVideo* (addr: LONGINT; width: LONGINT);
 		BEGIN HALT(99);	(** abstract *)
 		END SetVideo;
 
 	(** Capture a single frame. *)
-		PROCEDURE CaptureSingleN*;
+		PROCEDURE CaptureSingle*;
 		BEGIN HALT(99);	(** abstract *)
 		END CaptureSingle;
 
 	(** Start continuous frame capture. *)
-		PROCEDURE CaptureContinuousO*;
+		PROCEDURE CaptureContinuous*;
 		BEGIN HALT(99);	(** abstract *)
 		END CaptureContinuous;
 
 	(** Stop continuous video data capture. *)
-		PROCEDURE StopCaptureContinuousP*;
+		PROCEDURE StopCaptureContinuous*;
 		BEGIN HALT(99);	(** abstract *)
 		END StopCaptureContinuous;
 
@@ -387,65 +417,81 @@ TYPE
 	(** rows:	number of rows of a frame *)
 	(** frames:	number of frames allocated *)
 	(** format:	AosEvenOnly, AosOddOnly, none (interlaced) *)
-		PROCEDURE SetGeometryQ* (columns, rows, frames: LONGINT; format: SET);
+		PROCEDURE SetGeometry* (columns, rows, frames: LONGINT; format: SET);
 		BEGIN HALT(99);	(** abstract *)
 		END SetGeometry;
 		
 	END VideoCaptureDevice;
 
 	(** The Audio object represents the audio facilities of the video capture card. *)
-	AudioR* = OBJECT
-		PROCEDURE & InitS* (vcd: VideoCaptureDeviceT);
+	Audio* = OBJECT
+		PROCEDURE & Init* (vcd: VideoCaptureDevice);
 		BEGIN HALT(99);	(** abstract *)
 		END Init;
 
 	(** Select the tuner for audio input. *)
-		PROCEDURE SetAudioTunerU*;
+		PROCEDURE SetAudioTuner*;
 		BEGIN HALT(99);	(** abstract *)
 		END SetAudioTuner;
 	
 	(** Select external input for audio input. *)
-		PROCEDURE SetAudioExternV*;
+		PROCEDURE SetAudioExtern*;
 		BEGIN HALT(99);	(** abstract *)
 		END SetAudioExtern;
 	
 	(** Select internal input for audio input. *)
-		PROCEDURE SetAudioInternW*;
+		PROCEDURE SetAudioIntern*;
 		BEGIN HALT(99);	(** abstract *)
 		END SetAudioIntern;
 	
 	(** Set audio to mute. *)
-		PROCEDURE SetAudioMuteX*;
+		PROCEDURE SetAudioMute*;
 		BEGIN HALT(99);	(** abstract *)
 		END SetAudioMute;
 	
 	(** Unmute audio. *)
-		PROCEDURE SetAudioUnmuteY*;
+		PROCEDURE SetAudioUnmute*;
 		BEGIN HALT(99);	(** abstract *)
 		END SetAudioUnmute;
 	
 	(** Returns the mute state. *)
 	(** return value:	TRUE if audio is mute, otherwise FALSE *)
-		PROCEDURE IsAudioMuteZ* (): BOOLEAN;
+		PROCEDURE IsAudioMute* (): BOOLEAN;
 		BEGIN HALT(99);	(** abstract *)
 		END IsAudioMute;
 		
 	END Audio;
 	
+VAR
+	channelSwitchObservers: ChannelSwitchObserver;
+	devices*:AosPlugins.Registry;
+
 (** Get a video device. *)
 (** idx:	index of video card. *)
 (** return value:	a VideoCaptureDevice object *)
-(** return value:	a VideoCaptureDevice object *)
 PROCEDURE GetVideoDevice* (idx: LONGINT): VideoCaptureDevice;
-	BEGIN HALT(99);	(** abstract *)
-	END GetVideoDevice;
+VAR
+	devName : ARRAY 32 OF CHAR;
+	nr: ARRAY 4 OF CHAR;
+	dev: AosPlugins.Plugin;
+BEGIN
+	devName := RegistryName;
+	Utilities.IntToStr(idx, nr);
+	Utilities.Append(devName, nr);
+	dev := devices.Get(devName);
+	IF dev # NIL THEN
+		RETURN dev(VideoCaptureDevice)
+	ELSE
+		RETURN NIL
+	END
+END GetVideoDevice;
 
 PROCEDURE GetDefaultDevice*() : VideoCaptureDevice;
 VAR p : AosPlugins.Plugin;
 BEGIN
 	p := devices.Get ("");
 	IF p = NIL THEN
-		AosOut.String ("{AosTVDriver} Error: No video capture device installed.");
+		AosOut.String ("{AosTVDriver} Error: No video capture device detected.");
 		AosOut.Ln;
 		RETURN NIL
 	END;
@@ -459,8 +505,25 @@ BEGIN
 END Cleanup;
 
 BEGIN
-	NEW(devices, "AosTVDriver", "TV drivers");
+	NEW(devices, RegistryName, RegistryDesc);
 	AosModules.InstallTermHandler (Cleanup);
 END AosTVDriver.
 
-]
+
+Note: The AosTV Application gets non-default devices via the GetVideoDevice() routine.
+All VideoCaptureDevices which are added to the devices registry must have the empty string as name!
+
+Example:
+MODULE MyTVDriver;
+
+PROCEDURE Install*;
+VAR
+	dev: AosTVDriver.VideoCaptureDevice;
+	res: LONGINT;
+BEGIN
+	NEW(dev);
+	... set the device properties ...
+	dev.SetName("");
+	AosTVDriver.devices.Add(dev, res);
+	ASSERT (res = AosPlugins.Ok)
+END Install;

@@ -32,7 +32,7 @@ END DoSoftInt;
 
 (* Display mapped ranges. *)
 
-PROCEDURE DisplayMap*;
+PROCEDURE DisplayMap*(ptr : PTR) : PTR;
 VAR i, j: LONGINT; pt: LONGINT; virt, phys, virt0, phys0, size: LONGINT;
 	
 	PROCEDURE Page;
@@ -72,7 +72,8 @@ BEGIN
 		END
 	END;
 	virt := -1;  Page;
-	AosOut.Char(0FX); AosOut.Exit
+	AosOut.Char(0FX); AosOut.Exit;
+	RETURN NIL;
 END DisplayMap;
 
 PROCEDURE Write64(s: ARRAY OF CHAR; low, high: SET);
@@ -110,7 +111,7 @@ BEGIN
 	low := msrlow; high := msrhigh
 END ReadMSR;
 
-PROCEDURE DisplayMTTR*;
+PROCEDURE DisplayMTTR*(ptr : PTR) : PTR;
 VAR version, i, j, k, vcnt: LONGINT; features, low, high, mask: SET; vendor: AosBoot.Vendor;
 BEGIN
 	AosOut.Enter;
@@ -170,6 +171,7 @@ BEGIN
 		AosOut.String("MSR not supported");  AosOut.Ln
 	END;
 	AosOut.Exit;
+	RETURN NIL;
 END DisplayMTTR;
 
 (*

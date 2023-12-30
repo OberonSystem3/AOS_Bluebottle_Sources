@@ -21,11 +21,20 @@ MODULE AosV24; (** AUTHOR "AFI"; PURPOSE "V24/RS-232 driver" *)
 			"http://freebsd.org/doc/en_US.ISO8859-1/articles/serial-uart"
 
 			"http://www.lammertbies.nl/comm/info/RS-232_uart.html"
+*
+* History:
+*	
+*	14.06.2006	Adapted to changes in AosSerials.Mod (staubesv)
+*	26.06.2006	ClearMC, SetMC & GetMC procedure bodies made exclusive, performance counters implemented (staubesv)
 *)
 
-IMPORT AosIO, AosActive, AosBoot, AosInterrupts, AosOut, SYSTEM;
+IMPORT AosIO, AosActive, AosBoot, AosInterrupts, AosOut, AosModules, SYSTEM, AosSerials;
 
 CONST
+
+	MaxPortNo = 8;	(* Up to 8 serial ports supported *)
+	BufSize = 1024;
+
 	(* Port registers *)
 	(* RBR = 0;	 Select with DLAB = 0 - Receive Buffer Register - read only
 							Select with DLAB = 1 - Baud Rate Divisor LSB *)
@@ -39,116 +48,79 @@ CONST
 	MSR = 6;	(* Modem Status Register - R/W *)
 	SCR = 7;	(* Scratch Register - R/W *)
 
-	(** Parity *)
-	ParNo* = 0;  ParOdd* = 1;  ParEven* = 2;  ParMark* = 3;  ParSpace* = 4;
-
-	(** Stop bits *)
-	Stop1* = 1;  Stop2* = 2;  Stop1dot5* = 3;
-
 	(** Modem control lines *)
 	DTR* = 0;  RTS* = 1;	(** output *)
 	Break* = 2;	(** input/output - Bit 6 in LCR *)
 	DSR* = 3;  CTS* = 4;  RI* = 5;  DCD* = 6;	(** input *)
 
-	(** Receive error diagnostic *)
-	OE* = 1;	(** Overrun Error *)
-	PE* = 2;	(** Parity Error *)
-	FE* = 3;	(** Framing Error *)
-	BI* = 4;	(** Break Interrupt *)
-	termination* = 5;	(* Indicates that the port is being closed *)
+	ModuleName = "AosV24";
 
-	Ok* =  0; PortInUse* =  1; NoSuchPort* =  2; WrongBPS* =  3; WrongData* =  4; WrongParity* =  5;
-	WrongStop* =  6;
-
-	MaxPortNo = 8;	(* Up to 8 serial ports supported *)
-	BufSize = 1024;
+	Verbose = TRUE;
 
 TYPE
 
-	Port* = OBJECT(AosIO.Connection)
+	RS232Port = OBJECT (AosSerials.Port)
 		VAR
-			baseaddr, irq: LONGINT;
-			portname-: ARRAY 5 OF CHAR;	(* Name COM1 to COM8 must terminate with a 0X *)
+			baseaddr, irq, maxbps: LONGINT;
 			buf: ARRAY BufSize OF CHAR;
 			head, tail: LONGINT;
-			open: BOOLEAN;
+			open, ox16: BOOLEAN;
 			diagnostic: LONGINT;
 
-		PROCEDURE &Init(basespec, irqspec, lnospec: LONGINT);
+		PROCEDURE &Init(basespec, irqspec : LONGINT);
 		BEGIN
 			baseaddr := basespec;
 			irq := irqspec;
-			open := FALSE;
-			COPY("COM ", portname);
-			portname[3] := CHR(ORD("1") + lnospec)
+			open := FALSE; ox16 := CheckOX16PCI954(basespec);
+			IF ox16 THEN
+				maxbps := 460800
+			ELSE
+				maxbps := 115200
+			END
 		END Init;
 
 		PROCEDURE Open*(bps, data, parity, stop : LONGINT; VAR res: LONGINT);
-		BEGIN
+		BEGIN {EXCLUSIVE}
+			IF open THEN
+				IF Verbose THEN ShowModule; AosOut.String(name); AosOut.String(" already open"); AosOut.Ln; END;
+				res := AosSerials.PortInUse;
+				RETURN
+			END;
 			SetPortState(bps, data, parity, stop, res);
-			IF res = 0 THEN
+			IF res = AosSerials.Ok THEN
 				open := TRUE;
 				head := 0; tail:= 0;
+				charactersSent := 0; charactersReceived := 0;
 				(* install interrupt handler *)
 				AosActive.InstallHandler(HandleInterrupt, AosInterrupts.IRQ0 + irq);
 				SYSTEM.PORTOUT(baseaddr + IER, 01X);	(* Enable receive interrupts *)
-				AosOut.String(portname); AosOut.String(" opened"); AosOut.Ln
+				IF Verbose THEN ShowModule; AosOut.String(name); AosOut.String(" opened"); AosOut.Ln END;
 			END
 		END Open;
 
-		(** Send len characters from buf to output, starting at ofs. res is non-zero on error. *)
-		PROCEDURE Send*(VAR buf: ARRAY OF CHAR; ofs, len: LONGINT; propagate: BOOLEAN; VAR res: LONGINT);
-		VAR i: LONGINT;
-		BEGIN
-			i := ofs;
-			WHILE i < len DO
-				SendChar(buf[i]);
-				INC(i)
-			END
-		END Send;
-
 		(** Send a single character to the UART. *)
-		PROCEDURE SendChar*(ch: CHAR);
+		PROCEDURE SendChar*(ch: CHAR; VAR res : LONGINT);
 		VAR s: SET;
 		BEGIN {EXCLUSIVE}
+			IF ~open THEN res := AosSerials.Closed; RETURN; END;
+			res := AosSerials.Ok;
 			REPEAT	(* wait for room in Transmitter Holding Register *)
 				SYSTEM.PORTIN(baseaddr + LSR, SYSTEM.VAL(CHAR, s))	(* now send that character *)
 			UNTIL 5 IN s;
-			SYSTEM.PORTOUT(baseaddr, ch)
+			SYSTEM.PORTOUT(baseaddr, ch);
+			INC(charactersSent);
 		END SendChar;
-
-		(** Receive size characters into buf, starting at ofs and return the effective number of bytes read in len.
-		Wait until at least min bytes (possibly zero) are available.
-		res is non-zero on error. *)
-		PROCEDURE Receive*(VAR buf: ARRAY OF CHAR; ofs, size, min: LONGINT; VAR len, res: LONGINT);
-		VAR ch: CHAR; check: LONGINT;
-		BEGIN
-			len := 0;
-			res := 0;
-			WHILE (len < min) DO
-				ReceiveChar(ch, check);
-				IF check # 0 THEN res := check END;
-				buf[ofs + len] := ch;
-				INC(len);
-			END;
-(*			WHILE (Available() > 0) & (len < size) DO	*)
-			WHILE (((tail - head) MOD BufSize) > 0) & (len < size) DO
-				ReceiveChar(ch, check);
-				IF check # 0 THEN res := check END;
-				buf[ofs + len] := ch;
-				INC(len)
-			END;
-		END Receive;
 
 		(** Wait for the next character is received in the input buffer. The buffer is fed by HandleInterrupt *)
 		PROCEDURE ReceiveChar*(VAR ch: CHAR; VAR res: LONGINT);
 		BEGIN {EXCLUSIVE}
+			IF ~open THEN res := AosSerials.Closed; RETURN END;
 			AWAIT(tail # head);
 			IF tail = -1 THEN
-				res := termination
+				res := AosSerials.Closed;
 			ELSE
 				ch := buf[head]; head := (head+1) MOD BufSize;
-				res := diagnostic
+				res := diagnostic;
 			END
 		END ReceiveChar;
 
@@ -162,15 +134,16 @@ TYPE
 				diagnostic := 0;
 				SYSTEM.PORTIN(baseaddr + LSR, SYSTEM.VAL(CHAR, s));	(* Inspect if error *)
 				IF (7 IN s) OR (1 IN s) THEN	(* Establish a diagnostic of the error *)
-					IF (1 IN s) THEN diagnostic := OE;
-					ELSIF (2 IN s) THEN diagnostic := PE
-					ELSIF (3 IN s) THEN diagnostic := FE
-					ELSIF (4 IN s) THEN diagnostic := BI
+					IF (1 IN s) THEN diagnostic := AosSerials.OverrunError;
+					ELSIF (2 IN s) THEN diagnostic := AosSerials.ParityError
+					ELSIF (3 IN s) THEN diagnostic := AosSerials.FramingError
+					ELSIF (4 IN s) THEN diagnostic := AosSerials.BreakInterrupt
 					END;
 				END;
 				SYSTEM.PORTIN(baseaddr, ch);	(* Receive a character from the UART - baseaddr points to RBR *)
 				n := (tail+1) MOD BufSize;
 				IF n # head THEN buf[tail] := ch; tail := n END;
+				INC(charactersReceived);
 			END;
 		END HandleInterrupt;
 
@@ -178,17 +151,27 @@ TYPE
 		BEGIN {EXCLUSIVE}
 			RETURN (tail - head) MOD BufSize
 		END Available;
-
-		PROCEDURE SetPortState*(bps, data, parity, stop : LONGINT; VAR res: LONGINT);
-		VAR s: SET;
+		
+		(* Set the port state: speed in bps, no. of data bits, parity, stop bit length. *)
+		PROCEDURE SetPortState(bps, data, parity, stop : LONGINT; VAR res: LONGINT);
+		CONST TCR = 2;
+		VAR s: SET; tcr: LONGINT;
 		BEGIN
-			IF open THEN	(* Prohibit if open *)
-				AosOut.String(portname);
-				AosOut.String(" already open"); AosOut.Ln;
-				res := PortInUse; RETURN
-			END;
-			IF (bps > 0) & (115200 MOD bps = 0) THEN
-				IF (data >= 5) & (data <= 8) & (parity >= ParNo) & (parity <= ParSpace) & (stop >= Stop1) & (stop <= Stop1dot5) THEN
+			IF (bps > 0) & (maxbps MOD bps = 0) THEN
+				IF (data >= 5) & (data <= 8) & (parity >= AosSerials.ParNo) & (parity <= AosSerials.ParSpace) &
+						(stop >= AosSerials.Stop1) & (stop <= AosSerials.Stop1dot5) THEN
+					IF ox16 THEN
+						IF bps <= 115200 THEN
+							tcr := 0
+						ELSE
+							tcr := 115200*16 DIV bps;
+							ASSERT((tcr >= 4) & (tcr < 16));
+							bps := 115200
+						END;
+						IF ReadICR(baseaddr, TCR) # CHR(tcr) THEN
+							WriteICR(baseaddr, TCR, CHR(tcr))
+						END
+					END;
 					bps := 115200 DIV bps;
 					(* disable interrupts *)
 					SYSTEM.PORTOUT(baseaddr+LCR, 0X);	(* clear DLAB *)
@@ -217,30 +200,31 @@ TYPE
 						| 7: s := {1}
 						| 8: s := {0,1}
 					END;
-					IF stop # Stop1 THEN INCL(s, 2) END;
+					IF stop # AosSerials.Stop1 THEN INCL(s, 2) END;
 					CASE parity OF
-						   ParNo:
-						| ParOdd: INCL(s, 3)
-						| ParEven: s := s + {3,4}
-						| ParMark: s := s + {3,5}
-						| ParSpace: s := s + {3..5}
+						   AosSerials.ParNo:
+						| AosSerials.ParOdd: INCL(s, 3)
+						| AosSerials.ParEven: s := s + {3,4}
+						| AosSerials.ParMark: s := s + {3,5}
+						| AosSerials.ParSpace: s := s + {3..5}
 					END;
 					(* Finalize the LCR *)
 					SYSTEM.PORTOUT(baseaddr+LCR, SYSTEM.VAL(CHAR, s));	(* DLAB is set = 0 at the same time *)
 					(* Set DTR, RTS, OUT2 in the MCR *)
 					SYSTEM.PORTOUT(baseaddr+MCR, SYSTEM.VAL(CHAR, {DTR,RTS,3}));
 (*					SYSTEM.PORTOUT(baseaddr+IER, 01X);	*)
-					res := Ok
-				ELSE res := WrongData (* bad data/parity/stop *)
+					res := AosSerials.Ok
+				ELSE res := AosSerials.WrongData (* bad data/parity/stop *)
 				END
-			ELSE res := WrongBPS (* bad BPS *)
+			ELSE res := AosSerials.WrongBPS (* bad BPS *)
 			END
 		END SetPortState;
 
-		(** Get the port state: speed, no. of data bits, parity, no. of stop bits *)
+		(** Get the port state: state (open/closed), speed in bps, no. of data bits, parity, top bit length. *)
 		PROCEDURE GetPortState*(VAR openstat : BOOLEAN; VAR bps, data, parity, stop : LONGINT);
+		CONST TCR = 2;
 		VAR savset, set: SET; ch: CHAR;
-		BEGIN
+		BEGIN {EXCLUSIVE}
 			(* get parameters *)
 			openstat := open;
 			SYSTEM.PORTIN(baseaddr + LCR, SYSTEM.VAL(CHAR, savset));
@@ -252,6 +236,12 @@ TYPE
 			IF (bps = 0 ) & (ch = 0X) THEN
 			ELSE
 				bps := 115200 DIV (100H*bps + ORD(ch))
+			END;
+			IF ox16 THEN
+				ch := ReadICR(baseaddr, TCR);
+				IF (ch >= 04X) & (ch < 16X) THEN
+					bps := bps*16 DIV ORD(ch)
+				END
 			END;
 			SYSTEM.PORTOUT(baseaddr+LCR, savset);	(* Reset the Divisor Latch Bit - DLAB = 0 *)
 			SYSTEM.PORTIN(baseaddr+LCR, SYSTEM.VAL(CHAR, set));
@@ -274,10 +264,10 @@ TYPE
 			END;
 		END GetPortState;
 
-		(** ClearMC - Clear the specified modem control lines.  s may contain DTR, RTS & Break. *)
+		(** Clear the specified modem control lines.  s may contain DTR, RTS & Break. *)
 		PROCEDURE ClearMC*(s: SET);
 		VAR t: SET;
-		BEGIN
+		BEGIN {EXCLUSIVE}
 			IF s * {DTR, RTS} # {} THEN
 				SYSTEM.PORTIN(baseaddr + MCR, SYSTEM.VAL(CHAR, t));
 				t := t - (s * {DTR, RTS});	(* modify only bits 0 & 1 *)
@@ -290,10 +280,10 @@ TYPE
 			END
 		END ClearMC;
 
-		(** SetMC - Set the specified modem control lines.  s may contain DTR, RTS & Break. *)
+		(** Set the specified modem control lines.  s may contain DTR, RTS & Break. *)
 		PROCEDURE SetMC*(s: SET);
 		VAR t: SET;
-		BEGIN
+		BEGIN {EXCLUSIVE}
 			IF s * {DTR, RTS} # {} THEN
 				SYSTEM.PORTIN(baseaddr + MCR, SYSTEM.VAL(CHAR, t));
 				t := t + (s * {DTR, RTS});	(* modify only bits 0 & 1 *)
@@ -306,11 +296,10 @@ TYPE
 			END
 		END SetMC;
 
-		(** GetMC - Return the state of the specified modem control lines.  s contains
-			the current state of DSR, CTS, RI, DCD & Break Interrupt. *)
+		(** Return the state of the specified modem control lines.  s contains the current state of DSR, CTS, RI, DCD & Break Interrupt. *)
 		PROCEDURE GetMC*(VAR s: SET);
 		VAR t: SET;
-		BEGIN
+		BEGIN {EXCLUSIVE}
 			s := {};
 			SYSTEM.PORTIN(baseaddr + MSR, SYSTEM.VAL(CHAR, t));	(* note: this clears bits 0-3 *)
 			IF 4 IN t THEN INCL(s, CTS) END;
@@ -325,8 +314,7 @@ TYPE
 		VAR s: SET;
 		BEGIN {EXCLUSIVE}
 			IF ~open THEN
-				AosOut.String(portname);
-				AosOut.String(" not open"); AosOut.Ln;
+				IF Verbose THEN ShowModule; AosOut.String(name); AosOut.String(" not open"); AosOut.Ln; END;
 				RETURN
 			END;
 			REPEAT	(* wait for last byte to leave *)
@@ -338,17 +326,46 @@ TYPE
 			(* remove interrupt handler *)
 			AosActive.RemoveHandler(HandleInterrupt, AosInterrupts.IRQ0 + irq);
 			open := FALSE;
-			AosOut.String(portname); AosOut.String(" closed"); AosOut.Ln
+			IF Verbose THEN ShowModule; AosOut.String(name); AosOut.String(" closed"); AosOut.Ln; END;
 		END Close;
 
-	END Port;
+	END RS232Port;
+	
+PROCEDURE ReadICR(baseaddr, index: LONGINT): CHAR;
+	CONST SPR = 7; ICR = 5; ICREnable = 6;
+	VAR ch: CHAR;
+BEGIN
+	SYSTEM.PORTOUT(baseaddr + SPR, 0X);
+	SYSTEM.PORTOUT(baseaddr + ICR, SYSTEM.VAL(CHAR, {ICREnable}));
+	SYSTEM.PORTOUT(baseaddr + SPR, CHR(index));
+	SYSTEM.PORTIN(baseaddr + ICR, ch);
+	SYSTEM.PORTOUT(baseaddr + SPR, 0X);
+	SYSTEM.PORTOUT(baseaddr + ICR, 0X);
+	RETURN ch
+END ReadICR;
 
-VAR ports*: ARRAY MaxPortNo OF Port;
-		noOfPorts-: LONGINT;
+PROCEDURE WriteICR(baseaddr, index: LONGINT; ch: CHAR);
+	CONST SPR = 7; ICR = 5;
+BEGIN
+	SYSTEM.PORTOUT(baseaddr + SPR, CHR(index));
+	SYSTEM.PORTOUT(baseaddr + ICR, ch)
+END WriteICR;
+
+PROCEDURE CheckOX16PCI954(baseaddr: LONGINT): BOOLEAN;
+	CONST ID1 = 8; ID2 = 9; ID3 = 10; REV = 11;
+BEGIN
+	RETURN (baseaddr >= 1000H) & (ReadICR(baseaddr, ID1) = 016X) & (ReadICR(baseaddr, ID2) = 0C9X) &
+		(ReadICR(baseaddr, ID3) = 050X) & (ReadICR(baseaddr, REV) = 001X)
+END CheckOX16PCI954;
+
+PROCEDURE ShowModule;
+BEGIN
+	AosOut.String(ModuleName); AosOut.String(": ");
+END ShowModule;
 
 (** Scan the installed serial ports and determine the chip type used *)
 PROCEDURE Scan*(par: PTR): PTR;
-VAR i: LONGINT; name: ARRAY 32 OF CHAR; port: Port; portstatus: SET;
+VAR i: LONGINT; port: RS232Port; serialPort : AosSerials.Port; portstatus: SET; found : BOOLEAN;
 
 	PROCEDURE DetectChip(baseaddr: LONGINT);
 	VAR ch: CHAR;
@@ -371,48 +388,42 @@ VAR i: LONGINT; name: ARRAY 32 OF CHAR; port: Port; portstatus: SET;
 				ELSE	(* No SCR present *)
 					AosOut.String("8250, 8250-B, (has flaws)")
 				END
-
 		| 1: AosOut.String("Unknown chip")
 		| 2: AosOut.String("16550, non-buffered (has flaws)")
-		| 3: AosOut.String("16550A, buffer operational")
+		| 3: IF CheckOX16PCI954(baseaddr) THEN
+					AosOut.String("OX16PCI954")
+				ELSE
+					AosOut.String("16550A, buffer operational")
+				END
 		END
 	END DetectChip;
 
 BEGIN
-	AosOut.String("Serial port detection and inspection"); AosOut.Ln;
-	FOR i := 0 TO 7 DO
-		COPY("COM ", name);
-		name[3] := CHR(ORD("1") + i);
-		port := GetPort(i);
-		IF (port # NIL) & (port.baseaddr # 0) THEN	(* Port has a valid base address *)
-			AosOut.String(name);
-			AosOut.Hex(port.baseaddr, 10);
-			AosOut.Char("H");
-			AosOut.Int(port.irq, 4);
-			DetectChip(port.baseaddr);
-			port.GetMC(portstatus);
-			IF CTS IN portstatus THEN AosOut.String(" - CTS signals the presence of a DCE / Modem") END;
-			AosOut.Ln
-		END
+	ShowModule; AosOut.String("Serial port detection and inspection:"); AosOut.Ln;
+	found := FALSE;
+	FOR i := 1 TO AosSerials.MaxPorts DO
+		serialPort := AosSerials.GetPort(i);
+		IF (serialPort # NIL) & (serialPort IS RS232Port) THEN
+			port := serialPort (RS232Port); found := TRUE;
+			IF port.baseaddr # 0 THEN (* Port has a valid base address *)
+				AosOut.String(port.name); AosOut.String(": "); AosOut.Hex(port.baseaddr, 10); AosOut.Char("H"); AosOut.Int(port.irq, 4);
+				DetectChip(port.baseaddr);
+				port.GetMC(portstatus);
+				IF CTS IN portstatus THEN AosOut.String(" - CTS signals the presence of a DCE / Modem") END;
+				AosOut.Ln
+			END
+		END;
 	END;
+	IF ~found THEN AosOut.String("No COM port found."); AosOut.Ln; END;
 	RETURN NIL
 END Scan;
 
-(** Given the COM port number (starting from 1) obtain the port object *)
-PROCEDURE GetPort*(number: LONGINT): Port;
-BEGIN
-	IF (number < 0) OR (number > noOfPorts - 1) THEN RETURN NIL
-	ELSE RETURN ports[number]
-	END
-END GetPort;
-
 (** Set the essential port operating parameters as specified in Aos.Par
 		If omitted, default standard values are assigned to COM1 and COM2 *)
-PROCEDURE Init;
-VAR i, p : LONGINT; name, s: ARRAY 16 OF CHAR; BASE, IRQ: LONGINT;
+PROCEDURE Install*(ptr: PTR): PTR;
+VAR i, p : LONGINT; name, s: ARRAY 16 OF CHAR; BASE, IRQ: LONGINT; port : RS232Port;
 BEGIN
-	noOfPorts := 0;
-	FOR i := 0 TO 7 DO
+	FOR i := 0 TO MaxPortNo-1 DO
 		COPY("COM ", name);
 		name[3] := CHR(ORD("1") + i);
 		AosBoot.GetConfig(name, s);
@@ -424,28 +435,27 @@ BEGIN
 		IF (i = 0) & (BASE = 0) THEN BASE := 3F8H; IRQ := 4 END;	(* COM1 port default values *)
 		IF (i = 1) & (BASE = 0) THEN BASE := 2F8H; IRQ := 3 END;	(* COM2 port default values *)
 		IF BASE # 0 THEN
-			NEW(ports[i], BASE, IRQ, i);
+			NEW(port, BASE, IRQ);
 
 			(* Check the presence of a UART at the specified base address *)
-			SYSTEM.PORTIN(ports[i].baseaddr + MCR, s[0]);
+			SYSTEM.PORTIN(port.baseaddr + MCR, s[0]);
 			IF ORD(s[0]) < 32 THEN	(* Bits 7..5 of the MCR are always 0 when a UART is present *)
-				INC(noOfPorts)
+				(* Register this RS232Port with an identical index in AosSerials.registeredSerials array *)
+				AosSerials.RegisterOnboardPort (i+1, port, name, "Onboard UART");	
 			ELSE
-				AosOut.String("No UART present at address specified for ");
+				ShowModule; AosOut.String("No UART present at address specified for ");
 				AosOut.String(name);
 				AosOut.Ln
 			END
 		END
-	END
-END Init;
+	END;
+	RETURN NIL
+END Install;
 
-BEGIN
-	Init
 END AosV24.
 
-(*
-Aos.Call AosV24.Scan
-System.Free AosV24 ~
+AosV24.Install ~		S.Free AosV24 ~
+AosV24.Scan ~
 
 Example Aos.Par information (typical values usually assigned to the 4 first serial ports)
 
@@ -502,14 +512,3 @@ Aos.V24.Mod -> V24.Obx
 	although it offers all the functionality of its predecessor.
 	Backward compatibility with the original version is thus provided for client modules.
 	New developments should avoid using it and make use of the enhanced AosV24.Obx.
-
-Color Codes used:
- Highlight
-Types and Procedures
-Lock Acquire / Lock Release
-Preferred notation (comment)
-Unsafe / Temporary / Stupid / requires attention
-Permanent Comment
-Assertion
-Debug
-*)

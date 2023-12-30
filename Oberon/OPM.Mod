@@ -138,7 +138,7 @@ MODULE OPM;	(** non-portable *)
 		breakpos*: LONGINT;	(* set by Mark *)
 		breakpc*: LONGINT;	(*set by OPV.Init*)
 		errors: ARRAY NumErrors DIV SetLen OF SET;
-		outputPath*: ARRAY 32 OF CHAR;	(* for reading and writing obj files. must include any trailing "/" or ":" *)
+		outputPath*: ARRAY 256 OF CHAR;	(* for reading and writing obj files. must include any trailing "/" or ":" *)
 		outputPrefix*: ARRAY 32 OF CHAR;	(* for writing obj files (in addition to outputPath). *)
 		codeOptions*, parserOptions*: SET;
 		errName*: ARRAY 32 OF CHAR;
@@ -146,11 +146,11 @@ MODULE OPM;	(** non-portable *)
 		extension*: ARRAY 8 OF CHAR;	(** object file extension *)
 
 	CONST
-		OFtag = 0BBX;	(* object file tag *)
-		OFNoZeroCompress = 0ADX;
-		OFnative = 0AFX;
-		OFnew = 0B0X;
-		OFportable = 088X;
+		OFtag* = 0BBX;	(* object file tag *)
+		OFNoZeroCompress* = 0ADX;
+		OFnative* = 0AFX;
+		OFnew* = 0B1X; (* fof *)
+		OFportable* = 088X;
 
 	VAR
 		LRealPat: RECORD L, H: LONGINT END ;

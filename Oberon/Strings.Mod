@@ -629,24 +629,25 @@ END StrToReal;
 	END BoolToStr;
 
 (** Convert a string to a set *)
-	PROCEDURE StrToSet* (str: ARRAY OF CHAR; VAR set: SET);
-	VAR i, d, d1: INTEGER; ch: CHAR; dot: BOOLEAN;
-	BEGIN
-		set := {}; dot := FALSE;
-		i := 0; ch := str[i];
-		WHILE (ch # 0X) & (ch # "}") DO
-			WHILE (ch # 0X) & ((ch < "0") OR (ch > "9")) DO INC(i); ch := str[i] END;
-			d := 0; WHILE (ch >= "0") & (ch <= "9") DO d := d*10 + ORD(ch) - 30H; INC(i); ch := str[i] END;
-			IF d <= MAX(SET) THEN INCL(set, d) END;
-			IF dot THEN
-				d1 := 0;
-				WHILE (d1 <= MAX(SET)) & (d1 < d) DO INCL(set, d1); INC(d1) END;
-				dot := FALSE
-			END;
-			WHILE ch = " " DO INC(i); ch := str[i] END;
-			IF ch = "." THEN d1 := d + 1; dot := TRUE END
-		END
-	END StrToSet;
+    PROCEDURE StrToSet*(str: ARRAY OF CHAR; VAR set: SET);
+      VAR i, d, d1: LONGINT; ch: CHAR; dot: BOOLEAN;
+    BEGIN
+      set := {}; dot := FALSE;
+      i := 0; ch := str[i];
+      WHILE (ch # 0X) & (ch # "}") DO
+        WHILE (ch # 0X) & ((ch < "0") OR (ch > "9")) DO INC(i); ch := str[i] END;
+        IF ch = 0X THEN RETURN END;
+        d := 0; WHILE (ch >= "0") & (ch <= "9") DO d := d*10 + ORD(ch) -  30H; INC(i); ch := str[i] END;
+        IF d <= MAX(SET) THEN INCL(set, d) END;
+        IF dot THEN
+          d1 := 0;
+          WHILE (d1 <= MAX(SET)) & (d1 < d) DO INCL(set, d1); INC(d1) END;
+          dot := FALSE
+        END;
+        WHILE ch = " " DO INC(i); ch := str[i] END;
+        IF ch = "." THEN d1 := d + 1; dot := TRUE END
+      END
+    END StrToSet;
 
 (** Convert a set to a string *)
 	PROCEDURE SetToStr* (set: SET; VAR str: ARRAY OF CHAR);

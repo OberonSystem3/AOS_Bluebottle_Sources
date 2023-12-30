@@ -61,7 +61,7 @@ MODULE AosISO9660Files;	(** AUTHOR "?/be"; PURPOSE "ISO 9660 File System (ported
 			VAR
 				fname, name, mmask, pname, fullname: Filename;
 				f: AosFS.File; R: AosFS.Rider;
-				attr: SET;
+				attr: SET; bAddToEnum: BOOLEAN;
 				pos, time, date, len, cl: LONGINT; res: INTEGER;
 			BEGIN {EXCLUSIVE}
 				Check(mask, name, res);
@@ -78,8 +78,21 @@ MODULE AosISO9660Files;	(** AUTHOR "?/be"; PURPOSE "ISO 9660 File System (ported
 							COPY(pname, fullname);
 							IF name[0] # 0X THEN AosFS.AppendStr("/", fullname) END;
 							AosFS.AppendStr(fname, fullname);
-							IF Directory IN attr THEN AosFS.AppendStr(" [DIR]", fullname) END;
-							enum.PutEntry(fullname, flags, time, date, len)
+							
+							bAddToEnum := TRUE;
+							IF Directory IN attr THEN
+								IF (fname = ".") OR (fname = "..") THEN
+									bAddToEnum := FALSE;
+								END;
+								flags := { AosFS.Directory };
+								len := 0;
+							ELSE
+								flags := {};
+							END;
+							
+							IF bAddToEnum THEN
+								enum.PutEntry(fullname, flags, time, date, len)
+							END;
 						END;
 					ELSE res := eFileDoesNotExist
 					END
@@ -103,6 +116,7 @@ MODULE AosISO9660Files;	(** AUTHOR "?/be"; PURPOSE "ISO 9660 File System (ported
 			(** Finalize the file system. *)			
 			PROCEDURE Finalize*;
 			BEGIN {EXCLUSIVE}
+				vol.Finalize;
 				Finalize^
 			END Finalize;
 		END FileSystem;
@@ -387,7 +401,8 @@ MODULE AosISO9660Files;	(** AUTHOR "?/be"; PURPOSE "ISO 9660 File System (ported
 
 	PROCEDURE MatchFile(VAR R: AosFS.Rider; name: ARRAY OF CHAR; VAR fname: ARRAY OF CHAR;
 		VAR pos, cl, time, date, len: LONGINT; VAR attr: SET; VAR res: INTEGER);
-	VAR found: BOOLEAN; f: File; fs: FileSystem; buf: ARRAY 256 OF CHAR; entryLen: LONGINT;
+	VAR 
+		found: BOOLEAN; f: File; fs: FileSystem; buf: ARRAY 256 OF CHAR; entryLen, padding: LONGINT;
 	BEGIN
 		f := R.file(File); fs := R.fs(FileSystem);
 		found := FALSE;
@@ -395,12 +410,25 @@ MODULE AosISO9660Files;	(** AUTHOR "?/be"; PURPOSE "ISO 9660 File System (ported
 			pos := R.file.Pos(R);
 			IF debug THEN LogString("MatchFile; pos: "); LogInt(pos); LogLn END;
 			R.file.Read(R, buf[0]); entryLen := ORD(buf[0]);
-			IF debug & R.eof THEN LogString("MatchFile; eof"); LogLn END;
 			IF debug THEN LogString("MatchFile; entryLen: "); LogInt(entryLen); LogLn END;
-			IF R.eof OR (entryLen = 0) THEN EXIT END;
-			R.file.ReadBytes(R, buf, 0, entryLen-1);
-			GetDir(buf, fname, time, date, cl, len, attr);
-			found := Utilities.Match(name, fname);
+			IF R.eof THEN 
+				IF debug THEN LogString("MatchFile; eof"); LogLn END;
+				EXIT 
+			END;
+			IF entryLen > 0 THEN
+				R.file.ReadBytes(R, buf, 0, entryLen-1);
+				GetDir(buf, fname, time, date, cl, len, attr);
+				found := Utilities.Match(name, fname);
+			ELSE (* Directory entries may not cross sectors. Skip padding bytes *)
+				padding := SS - (R.file.Pos(R) MOD SS);
+				IF (padding > 0) & (padding <= 256) THEN
+					IF debug THEN LogString("MatchFile; skip padding: "); LogInt(padding); LogLn; END;
+					R.file.ReadBytes(R, buf, 0, padding); (* Skip padding *)
+				ELSE
+					IF debug THEN LogString("MatchFile; Confusing directory structure... givin' up"); END;
+					EXIT;
+				END;
+			END;
 			IF found THEN EXIT END;
 		END;
 		IF found THEN res := 0 ELSE res := eInvalidFileName END;
@@ -506,7 +534,6 @@ END Cleanup;
 
 BEGIN
 	AosModules.InstallTermHandler(Cleanup)
-
 END AosISO9660Files.
 
 AosISO9660Volumes.Mod
@@ -516,7 +543,10 @@ Partitions.Show
 OFSTools.Mount CD IsoFS  IDE2 ~
 OFSTools.Unmount CD0 ~
 
-System.Free AosISO9660Files  AosISO9660Volumes ~
+S.Free AosISO9660Files  AosISO9660Volumes ~
 
 System.Directory CD:*.* ~
 
+History:
+
+30.05.2006	Fixed MatchFile: Directory entries may not cross sector boundaries. Skip padding bytes if necessary. (staubesv)

@@ -1,9 +1,9 @@
 (* ETH Oberon, Copyright 2001 ETH Zuerich Institut fuer Computersysteme, ETH Zentrum, CH-8092 Zuerich.
 Refer to the "General ETH Oberon System Source License" contract available at: http://www.oberon.ethz.ch/ *)
 
-MODULE Gadgets;	(** portable *) (*  , jm 18.1.95*)
+MODULE Gadgets;	(** portable *) (* , jm 18.1.95*)
 
-(**The Gadgets module forms the basis of the Gadgets system. It defines the most important types, provide default message handlers and often used utility procedures. In addition, a few gadget specific messages are defined.
+(**The Gadgets module forms the basis of the Gadgets system. It defines the most important types, provide default message handlers and often used utility procedures. In addition, a few gadget specific messages are defined.
 *)
 
 (*
@@ -1614,7 +1614,36 @@ END ChangeAttr;
 *)	
 PROCEDURE Set*; (* O.A value *)
 VAR S: Attributes.Scanner; name: ARRAY 64 OF CHAR; i, j: INTEGER; attr: ARRAY 32 OF CHAR; obj: Objects.Object;
-	A: Objects.AttrMsg;
+	A: Objects.AttrMsg; B: Objects.AttrMsg;   (*fof*)
+	
+	PROCEDURE Convert(VAR A,to: Objects.AttrMsg); (*fof*)
+	BEGIN
+		IF to.class = Objects.LongReal THEN 
+			IF A.class = Objects.Real THEN A.y := A.x; 
+			ELSIF A.class = Objects.Int THEN A.y := A.i; 
+			ELSE RETURN 
+			END; 
+		ELSIF to.class = Objects.Real THEN 
+			IF A.class = Objects.Int THEN A.x := A.i; 
+			ELSE RETURN 
+			END; 
+		ELSIF to.class= Objects.String THEN 
+			IF A.class = Objects.LongReal THEN 
+				Strings.RealToStr(A.y,A.s); 
+			ELSIF A.class = Objects.Real THEN 
+				Strings.RealToStr(A.x,A.s);
+			ELSIF A.class = Objects.Int THEN 
+				Strings.IntToStr(A.i,A.s); 
+			ELSIF A.class = Objects.Bool THEN 
+				Strings.BoolToStr(A.b,A.s); 
+			ELSE RETURN
+			END; 
+		ELSE 
+			RETURN 
+		END; 
+		A.class := to.class; 
+	END Convert;
+
 BEGIN
 	Attributes.OpenScanner(S, Oberon.Par.text, Oberon.Par.pos);
 	Attributes.Scan(S);
@@ -1650,6 +1679,14 @@ BEGIN
 			attr[j] := 0X; COPY(attr, A.name);
 			obj := FindObj(context, name);
 			IF obj # NIL THEN
+				B.id := Objects.get; (*fof*)
+				COPY(A.name,B.name); B.class := -1;B.res := -1; 
+				obj.handle(obj,B);  
+				IF (B.res #-1) & (B.class #-1) & (B.class # A.class) THEN 
+					Convert(A,B) 
+				END; 
+				A.res := -1; 
+				
 				obj.handle(obj, A);
 				IF A.res = -1 THEN
 					Texts.WriteString(W, "Attribute not set"); Texts.WriteLn(W); Log;

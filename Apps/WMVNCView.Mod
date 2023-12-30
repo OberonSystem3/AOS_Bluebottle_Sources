@@ -162,13 +162,14 @@ TYPE
 			manager.lock.ReleaseWrite
 		END KeyEvent;
 		
-		PROCEDURE MouseEvent(x, y: LONGINT; keys : SET);
+		PROCEDURE MouseEvent(x, y, dz: LONGINT; keys : SET);
 		VAR msg : Messages.Message;
 		BEGIN
 			manager.lock.AcquireWrite;
 			msg.originator := SELF;
 			msg.msgType := Messages.MsgPointer;
 			msg.x := ENTIER(range.l + x * inffx); msg.y := ENTIER(range.t + y * inffy); 
+			msg.dz := dz;
 			msg.flags := keys;
 			IF manager # NIL THEN manager.Handle(msg) END;
 			manager.lock.ReleaseWrite
@@ -293,7 +294,7 @@ END Cleanup;
 BEGIN
 	AosModules.InstallTermHandler(Cleanup)
 END WMVNCView.
- 
+
 System.Free WMVNCView AosVNCServer~
 Aos.Call WMVNCView.Install "Bluebottle VNC View1" "" 5903 0 0 1024 768~
 Aos.Call WMVNCView.Install "Bluebottle VNC View1" "" 5902 1280 0 1280 1024~

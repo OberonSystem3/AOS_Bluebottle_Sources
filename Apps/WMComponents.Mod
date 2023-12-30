@@ -1,8 +1,14 @@
 MODULE WMComponents;	(** AUTHOR "TF"; PURPOSE "Experiments with component concepts"; *)
-
+(**
+ * History:
+ *
+ *	21.03.2006	Stop the Form's sequencer in FormWindow.Close (staubesv)
+ *	15.06.2006	Call invalidate when fillColor of VisualComponent is changed (staubesv)
+ *)
+ 
 IMPORT
 	AosOut, AosInputs, AosIO, AosKernel, AosModules, AosActive, AosFS, Locks := WMLocks, 
-	XML, XMLScanner, XMLParser, XMLObjects, 
+	XML, XMLScanner, XMLParser, XMLObjects, AosCodecs,
 	Messages := WMMessages, Rectangles := WMRectangles,
 	WMEvents, WMProperties, WMGraphics, Utilities, WM := WMWindowManager, Raster,
 	AosCommands;
@@ -36,7 +42,7 @@ TYPE
 	ContextMenuHandler* = PROCEDURE {DELEGATE} (sender : ANY; x, y: LONGINT);
 	KeyEventHandler* = PROCEDURE {DELEGATE} (ucs : LONGINT; flags : SET; VAR keySym : LONGINT; VAR handled : BOOLEAN);
 	DrawHandler* = PROCEDURE {DELEGATE} (canvas : WMGraphics.Canvas);
-		
+	
 	(** Basic component *)
 TYPE
 	ComponentStyleChanged = OBJECT
@@ -72,6 +78,34 @@ TYPE
 			
 			SetNameAsString(StrComponent)
 		END Init;
+		
+		PROCEDURE Write*(w : AosIO.Writer; level : LONGINT);
+		VAR e: XMLObjects.Enumerator; c: PTR; name : Utilities.String;
+		BEGIN
+			name := GetName();
+			w.Char('<'); IF name = NIL THEN w.String("_NILNAME_") ELSE w.String(name^) END;
+			WriteAttributes(w, level);
+			w.Char('>');
+			properties.WriteXML(w, level);
+			e := GetContents();
+			IF e.HasMoreElements() THEN
+				c := e.GetNext(); (* we know there is a next element at this position *)
+				IF ~(c IS Properties) THEN 
+					c(XML.Content).Write(w, level + 1);
+					IF ~(c IS XML.ArrayChars)  THEN NewLine(w, level + 1) END;
+				END;
+				WHILE e.HasMoreElements() DO 
+					c := e.GetNext(); 
+					IF ~(c IS Properties) THEN 
+						NewLine(w, level + 1); 
+						c(XML.Content).Write(w, level + 1) 
+					END	
+				END;
+			END;
+			NewLine(w, level);
+			w.String("</"); IF name = NIL THEN w.String("_NILNAME_") ELSE w.String(name^); END;  w.Char('>')
+		END Write;
+		
 			
 		PROCEDURE IsCallFromSequencer*():BOOLEAN;
 		BEGIN RETURN sequencer.IsCallFromSequencer()
@@ -85,7 +119,7 @@ TYPE
 		(** Atomically set the components sequencer *)
 		PROCEDURE SetSequencer*(s : MsgSequencer);
 		VAR old : MsgSequencer;
-			contents : XMLObjects.Enumerator; c : PTR; result : Component;
+			contents : XMLObjects.Enumerator; c : ANY; result : Component;
 		BEGIN 
 			old := sequencer;
 			IF old # NIL THEN old.lock.AcquireWrite() END;
@@ -142,7 +176,7 @@ TYPE
 	
 		(** Find a sub component by its uid *)	
 		PROCEDURE FindByUID*(uid : String) : Component;
-		VAR contents : XMLObjects.Enumerator; c : PTR; result : Component; s : String;
+		VAR contents : XMLObjects.Enumerator; c : ANY; result : Component; s : String;
 		BEGIN
 			IF uid = NIL THEN RETURN NIL END;
 			s := SELF.uid.Get();
@@ -174,9 +208,9 @@ TYPE
 			isUID := FALSE; IF sr.Peek() = "%" THEN isUID := TRUE; ch := sr.Get() END;
 			sr.Token(id);
 			IF isUID THEN r := GetComponentRoot(); target := r.FindByUID(NewString(id))
-				;IF target  = NIL THEN AosOut.String("StringToComponent : UID target not found"); AosOut.String(id); END
+				;IF target  = NIL THEN AosOut.String("StringToComponent : UID target not found: "); AosOut.String(id); AosOut.Ln; END
 			ELSE target := FindByPath(id, 0)
-				;IF target  = NIL THEN AosOut.String("StringToComponent : Path target not found"); AosOut.String(id); END
+				;IF target  = NIL THEN AosOut.String("StringToComponent : Path target not found: "); AosOut.String(id); AosOut.Ln; END
 			END;
 			RETURN target
 		END StringToComponent;
@@ -194,9 +228,9 @@ TYPE
 			sr.Token(id); sr.SkipWhitespace; sr.Token(name); 
 			
 			IF isUID THEN r := GetComponentRoot(); target := r.FindByUID(NewString(id))
-				;IF target  = NIL THEN AosOut.String("StringToEvent : UID target not found"); AosOut.String(id); END
+				;IF target  = NIL THEN AosOut.String("StringToEvent : UID target not found: "); AosOut.String(id); AosOut.Ln; END
 			ELSE target := FindByPath(id, 0)
-				;IF target  = NIL THEN AosOut.String("StringToEvent : Path target not found"); AosOut.String(id); END
+				;IF target  = NIL THEN AosOut.String("StringToEvent : Path target not found: "); AosOut.String(id); AosOut.Ln; END
 			END;
 			IF target # NIL THEN RETURN target.eventListeners.GetHandlerByName(NewString(name))
 			ELSE RETURN NIL
@@ -207,7 +241,7 @@ TYPE
 			propagated.. 
 			Active components should terminate, external resources should be released *)
 		PROCEDURE Finalize*; (** PROTECTED *)
-		VAR contents : XMLObjects.Enumerator; c : PTR;
+		VAR contents : XMLObjects.Enumerator; c : ANY;
 		BEGIN
 			IF TraceFinalize IN Trace THEN IF uid # NIL THEN AosOut.String(uid^); AosOut.String(".Finalize") END END;
 			Acquire;
@@ -220,7 +254,7 @@ TYPE
 		END Finalize;
 		
 		PROCEDURE Reset*(sender, data : ANY); (** PROTECTED *)
-		VAR contents : XMLObjects.Enumerator; c : PTR;
+		VAR contents : XMLObjects.Enumerator; c : ANY;
 		BEGIN
 			IF ~IsCallFromSequencer() THEN sequencer.ScheduleEvent(SELF.Reset, sender, data)
 			ELSE
@@ -242,7 +276,7 @@ TYPE
 		(** Internal interface of the message handler. This method may only be called via the Handle method. 
 		Components that need to handle messages should implement HandleInternal. *)
 		PROCEDURE HandleInternal*(VAR msg : Message); (** PROTECTED *)
-		VAR result : PTR;
+		VAR result : ANY;
 		BEGIN
 			ASSERT(IsCallFromSequencer());
 		END HandleInternal;
@@ -266,7 +300,7 @@ TYPE
 		(** Broadcast a message to all direct subcomponents. The subcomponent can then decide
 		whether to further propagate the message to its children or not *)
 		PROCEDURE BroadcastSubcomponents*(VAR msg : Message); (** FINAL *)
-		VAR contents : XMLObjects.Enumerator; c : PTR;
+		VAR contents : XMLObjects.Enumerator; c : ANY;
 		BEGIN
 			Acquire;
 			contents := GetContents(); contents.Reset;
@@ -279,7 +313,7 @@ TYPE
 		
 		(* will be called synchronously if a property of the component changes. May not be called directly.
 			No such messages are sent until the component is initialized *)
-		PROCEDURE PropertyChanged*(sender, property : PTR);(** PROTECTED *)
+		PROCEDURE PropertyChanged*(sender, property : ANY);(** PROTECTED *)
 		BEGIN ASSERT(IsCallFromSequencer());
 		END PropertyChanged;
 		
@@ -291,7 +325,7 @@ TYPE
 		END RecacheProperties;
 		
 		
-		PROCEDURE InternalPropertyChanged(sender, property : PTR);
+		PROCEDURE InternalPropertyChanged(sender, property : ANY);
 		VAR debugPUpdate : BOOLEAN;
 		BEGIN
 			IF ~initialized THEN RETURN END;
@@ -336,7 +370,7 @@ TYPE
 TYPE
 	VisualComponent* = OBJECT(Component)
 	VAR
-		bounds- : WMProperties.RectangleProperty;
+		bounds-, bearing- : WMProperties.RectangleProperty;
 		alignment- : WMProperties.Int32Property;
 		fillColor- : WMProperties.ColorProperty;
 		visible-, takesFocus-, needsTab- : WMProperties.BooleanProperty;
@@ -354,6 +388,7 @@ TYPE
 		extDraw : DrawHandler;
 		extFocus : FocusHandler;
 		extContextMenu : ContextMenuHandler;
+		layoutManager : LayoutManager;
 		aligning* : BOOLEAN;
 	
 		hasOldPointer : BOOLEAN;
@@ -363,6 +398,7 @@ TYPE
 		BEGIN
 			Init^;
 			NEW(bounds, PrototypeBounds, NIL, NIL); properties.Add(bounds);
+			NEW(bearing, PrototypeBearing, NIL, NIL); properties.Add(bearing);
 			NEW(fillColor, PrototypeFillColor, NIL, NIL); properties.Add(fillColor);
 			NEW(visible, PrototypeVisible, NIL, NIL); properties.Add(visible);
 			NEW(takesFocus, PrototypeTakesFocus, NIL, NIL); properties.Add(takesFocus);
@@ -433,9 +469,10 @@ TYPE
 			r := GetVisualComponentRoot(); (* find the leaf component that has the focus *)
 			WHILE (r # NIL) & (r.focusComponent # NIL) & (r.focusComponent # r) DO r := r.focusComponent END;
 			p := r; (* clear the focus chain until the root or this component *)
-			WHILE (p # SELF) & (p # NIL) & (p IS VisualComponent) DO 
-				p(VisualComponent).focusComponent := p(VisualComponent);
-				p(VisualComponent).FocusLost ;p := p.GetParent()
+			WHILE (p # SELF) & (p # NIL) & (p IS VisualComponent) DO
+				x := p(VisualComponent);
+				x.focusComponent := x;
+				x.FocusLost; IF x.extFocus # NIL THEN x.extFocus(FALSE) END; p := p.GetParent()
 			END;
 			
 (*			WHILE (x # NIL) & (~IsInStaticChain(x)) DO
@@ -527,11 +564,12 @@ TYPE
 		BEGIN
 		END FocusPrev;
 		
-		PROCEDURE PropertyChanged*(sender, property : PTR);
+		PROCEDURE PropertyChanged*(sender, property : ANY);
 		BEGIN
 			IF property = bounds THEN Resized
 			ELSIF property = visible THEN Resized
 			ELSIF property = alignment THEN AlignmentChanged
+			ELSIF property = fillColor THEN Invalidate;
 			ELSE PropertyChanged^(sender, property)
 			END;
 		END PropertyChanged;
@@ -568,78 +606,41 @@ TYPE
 			RETURN t
 		END GetClientRect;
 		
-	(*	(** Set the bounds of the component in parent coordinates.  *)
-		PROCEDURE SetBounds*(rect : Rectangle);
+		PROCEDURE SetLayoutManager*(layoutManager : LayoutManager);
 		BEGIN
-			bounds.Set(rect)
-		END SetBounds;
-		
-		(** Get the width of the component *)
-		PROCEDURE GetWidth*() : LONGINT;
-		BEGIN
-			RETURN bounds.GetWidth()
-		END GetWidth;
-
-		(** Set the width of the component *)
-		PROCEDURE SetWidth*(width : LONGINT);
-		BEGIN
-			bounds.SetWidth(width) 
-		END SetWidth;
-		
-		(** Get the height of the component *)
-		PROCEDURE GetHeight*() : LONGINT;
-		BEGIN
-			RETURN bounds.GetHeight()
-		END GetHeight;
-		
-		(** Set the height of the component *)
-		PROCEDURE SetHeight*(height : LONGINT);
-		BEGIN 
-			bounds.SetHeight(height)
-		END SetHeight;
-		
-		(** Set the width and height of the component atomic *)
-		PROCEDURE SetExtents*(width, height : LONGINT);
-		BEGIN
-			bounds.SetExtents(width, height)
-		END SetExtents;
-		
-		(** Set the left position of the component, moving it (not resizing) *)
-		PROCEDURE SetLeft*(left : LONGINT);
-		BEGIN
-			bounds.SetLeft(left)
-		END SetLeft;
-		
-		(** Set the top position of the component, moving it (not resizing) *)
-		PROCEDURE SetTop*(top : LONGINT);
-		BEGIN
-			bounds.SetTop(top)
-		END SetTop; *)
+			Acquire;
+			SELF.layoutManager := layoutManager;
+			Release
+		END SetLayoutManager;
 		
 		PROCEDURE AlignSubComponents*;
-		VAR enum: XMLObjects.Enumerator; p: PTR; result, vc : VisualComponent;
-			r : Rectangle;
+		VAR enum: XMLObjects.Enumerator; p: ANY; result, vc : VisualComponent;
+			r, b : Rectangle;
 		BEGIN
 			Acquire;
 			IF aligning THEN Release; RETURN END;
 			aligning := TRUE;
-			r := GetClientRect();
-			enum := GetContents(); enum.Reset;
-			WHILE enum.HasMoreElements() DO
-				p := enum.GetNext();
-				IF p IS VisualComponent THEN
-					vc := p(VisualComponent);
-					IF vc.visible.Get() THEN 
-						CASE vc.alignment.Get() OF
-						| AlignTop : vc.bounds.Set(Rectangles.MakeRect(r.l, r.t, r.r, r.t + vc.bounds.GetHeight())); INC(r.t, vc.bounds.GetHeight())
-						| AlignLeft : vc.bounds.Set(Rectangles.MakeRect(r.l, r.t, r.l + vc.bounds.GetWidth(), r.b)); INC(r.l, vc.bounds.GetWidth())
-						| AlignBottom : vc.bounds.Set(Rectangles.MakeRect(r.l, r.b - vc.bounds.GetHeight(), r.r, r.b)); DEC(r.b, vc.bounds.GetHeight())
-						| AlignRight : vc.bounds.Set(Rectangles.MakeRect(r.r - vc.bounds.GetWidth(), r.t, r.r, r.b)); DEC(r.r, vc.bounds.GetWidth());
-						| AlignClient : IF ~Rectangles.RectEmpty(r) THEN vc.bounds.Set(r) END
-						ELSE (* nothing *)
-						END
-					END	
-				END
+			IF layoutManager # NIL THEN layoutManager(SELF) 
+			ELSE
+				r := GetClientRect();
+				enum := GetContents(); enum.Reset;
+				WHILE enum.HasMoreElements() DO
+					p := enum.GetNext();
+					IF p IS VisualComponent THEN
+						vc := p(VisualComponent);
+						IF vc.visible.Get() THEN
+							b := vc.bearing.Get(); 
+							CASE vc.alignment.Get() OF
+							| AlignTop : vc.bounds.Set(Rectangles.MakeRect(r.l + b.l , r.t + b.t, r.r - b.r, r.t + b.t + vc.bounds.GetHeight())); INC(r.t, vc.bounds.GetHeight() + b.t + b.b)
+							| AlignLeft : vc.bounds.Set(Rectangles.MakeRect(r.l + b.l, r.t + b.t, r.l + b.l + vc.bounds.GetWidth(), r.b - b.b)); INC(r.l, vc.bounds.GetWidth() + b.l + b.r)
+							| AlignBottom : vc.bounds.Set(Rectangles.MakeRect(r.l + b.l, r.b - vc.bounds.GetHeight() - b.b, r.r - b.r, r.b - b.b)); DEC(r.b, vc.bounds.GetHeight() + b.t + b.b)
+							| AlignRight : vc.bounds.Set(Rectangles.MakeRect(r.r - vc.bounds.GetWidth() - b.r , r.t + b.t, r.r - b.r, r.b - b.b)); DEC(r.r, vc.bounds.GetWidth() + b.l + b.r);
+							| AlignClient : IF ~Rectangles.RectEmpty(r) THEN vc.bounds.Set(Rectangles.MakeRect(r.l + b.l , r.t + b.t, r.r - b.r, r.b  - b.b)) END
+							ELSE (* nothing *)
+							END
+						END	
+					END
+				END	
 			END;
 			aligning := FALSE;
 			Release;
@@ -679,7 +680,7 @@ TYPE
 		
 		(** Return the topmost first child component at (x, y) *)
 		PROCEDURE GetPositionOwner*(x, y: LONGINT): VisualComponent;
-		VAR enum: XMLObjects.Enumerator; p: PTR; result, vc : VisualComponent; r : Rectangle;
+		VAR enum: XMLObjects.Enumerator; p: ANY; result, vc : VisualComponent; r : Rectangle;
 		BEGIN
 			Acquire;
 			enum := GetContents(); enum.Reset;
@@ -709,12 +710,12 @@ TYPE
 		END DragDropped;
 		
 		(** Is called via the message handler to inform about the result of a recent drag operation *)
-		PROCEDURE DragResult*(accepted : BOOLEAN; recipient : PTR; dragInfo : DragInfo);
+		PROCEDURE DragResult*(accepted : BOOLEAN; recipient : ANY; dragInfo : DragInfo);
 		BEGIN
 		END DragResult;
 		
 		(** Start a drag operation. *)
-		PROCEDURE StartDrag*(data : PTR; img : WMGraphics.Image; onAccept, onReject : Messages.CompCommand) : BOOLEAN;
+		PROCEDURE StartDrag*(data : ANY; img : WMGraphics.Image; onAccept, onReject : Messages.CompCommand) : BOOLEAN;
 		VAR rc : Component;
 		BEGIN
 			rc := GetVisualComponentRoot();
@@ -780,7 +781,7 @@ TYPE
 		END DrawForeground;
 		
 		PROCEDURE DrawSubComponents*(canvas : WMGraphics.Canvas);
-		VAR enum: XMLObjects.Enumerator; p: PTR; vc : VisualComponent; cr, r : Rectangle; 
+		VAR enum: XMLObjects.Enumerator; p: ANY; vc : VisualComponent; cr, r : Rectangle; 
 			BEGIN
 			CheckReadLock;
 			canvas.GetClipRect(cr);
@@ -818,7 +819,7 @@ TYPE
 			Release
 		END SetFont;
 		
-		(** Called by to component owner whenever a redraw to a canvas is needed. Caller must hold hierarchy lock *)
+		(** Called by the component owner whenever a redraw to a canvas is needed. Caller must hold hierarchy lock *)
 		PROCEDURE Draw*(canvas : WMGraphics.Canvas);
 		BEGIN
 
@@ -842,7 +843,7 @@ TYPE
 			IF ~visible.Get() THEN RETURN END;
 			IF ~IsCallFromSequencer() THEN
 				m.msgType := Messages.MsgExt;
-				m.ext := invalidateRectMsg; m.x := r.l; m.y := r.t; m.dx := r.r; m.dy := r.b;
+				m.ext := invalidateRectMsg; m.x := r.l; m.y := r.t; m.dx := r.r; m.dy := r.b; m.sender := SELF;
 				IF ~sequencer.Add(m) THEN END;
 			ELSE
 				parent := GetParent();
@@ -854,7 +855,7 @@ TYPE
 			END
 		END InvalidateRect;
 		
-		PROCEDURE InvalidateCommand*(sender, par : PTR);
+		PROCEDURE InvalidateCommand*(sender, par : ANY);
 		VAR dummy : Messages.AsyncToken;
 		BEGIN
 			IF ~initialized THEN RETURN END;
@@ -915,6 +916,7 @@ TYPE
 			(*	IF ~hasOldPointer THEN prevPointerInfo := GetInternalPointerInfo(); hasOldPointer := TRUE END; *)
 				SetInternalPointerInfo(pi);
 			END;*)	
+			SetInternalPointerInfo(pi);
 			pointerInfo := pi;
 			Release
 		END SetPointerInfo;
@@ -1027,13 +1029,16 @@ TYPE
 		
 		PROCEDURE HandleInternal*(VAR msg : Message); (** PROTECTED *)
 		VAR po : VisualComponent; nm : Message; handled : BOOLEAN; b : Rectangle;
+			enum: XMLObjects.Enumerator; 
+			r, v : VisualComponent;
+			p : XML.Element;
 		BEGIN
 			ASSERT(IsCallFromSequencer());
 			handled := FALSE;
 			IF msg.msgType = Messages.MsgPointer THEN 
 
 				IF msg.msgSubType = Messages.MsgSubPointerMove THEN
-					IF msg.flags * {0, 1, 2} = {} THEN
+					IF (msg.flags * {0, 1, 2} = {}) OR (fPointerOwner = NIL)  THEN
 						po := GetPositionOwner(msg.x, msg.y); 
 						IF po # fPointerOwner THEN
 							nm.msgType := Messages.MsgPointer;
@@ -1046,11 +1051,11 @@ TYPE
 				IF (fPointerOwner = SELF) THEN  
 					IF msg.msgSubType = Messages.MsgSubPointerMove THEN 
 						IF extPointerMove # NIL THEN extPointerMove(msg.x, msg.y, msg.flags, handled) END;
-						IF ~hasOldPointer & (pointerInfo # NIL) THEN 
+(*						IF ~hasOldPointer & (pointerInfo # NIL) THEN 
 							prevPointerInfo := GetInternalPointerInfo();
-							hasOldPointer := TRUE;
-							SetInternalPointerInfo(pointerInfo)
-						END;
+							hasOldPointer := TRUE; *)
+							SetInternalPointerInfo(pointerInfo);
+(*						END; *)
 						IF ~handled THEN PointerMove(msg.x, msg.y, msg.flags) END;
 						IF msg.dz # 0 THEN WheelMove(msg.dz) END
 					ELSIF msg.msgSubType = Messages.MsgSubPointerDown THEN 
@@ -1062,7 +1067,7 @@ TYPE
 						IF ~handled THEN PointerUp(msg.x, msg.y, msg.flags) END
 					ELSIF msg.msgSubType = Messages.MsgSubPointerLeave THEN
 						IF extPointerLeave # NIL THEN extPointerLeave(handled) END;
-						IF hasOldPointer THEN SetInternalPointerInfo(prevPointerInfo); hasOldPointer := FALSE END;
+(*						IF hasOldPointer THEN SetInternalPointerInfo(prevPointerInfo); hasOldPointer := FALSE END; *)
 						IF ~handled THEN PointerLeave END
 					END
 				ELSE 
@@ -1102,12 +1107,28 @@ TYPE
 						END
 					END
 				END
+			ELSIF (msg.msgType = Messages.MsgFocus) & (msg.msgSubType = Messages.MsgSubFocusLost) THEN
+				(* unset the old focus chain *)
+				r := GetVisualComponentRoot(); (* find the leaf component that has the focus *)
+				WHILE (r # NIL) & (r.focusComponent # NIL) & (r.focusComponent # r) DO r := r.focusComponent END;
+				p := r; (* clear the focus chain until the root or this component *)
+				WHILE (p # SELF) & (p # NIL) & (p IS VisualComponent) DO 
+					v := p(VisualComponent);
+					v.focusComponent := v;
+					v.FocusLost; IF v.extFocus # NIL THEN v.extFocus(FALSE) END; p := p.GetParent()
+				END;
 			ELSIF msg.msgType = Messages.MsgExt THEN
-				IF msg.ext = invalidateRectMsg THEN InvalidateRect(Rectangles.MakeRect(msg.x, msg.y, msg.dx, msg.dx)) END;
+				IF msg.ext = invalidateRectMsg THEN msg.sender(VisualComponent).InvalidateRect(Rectangles.MakeRect(msg.x, msg.y, msg.dx, msg.dy))
+				ELSE 
+					BroadcastSubcomponents(msg);
+				END
 			ELSE HandleInternal^(msg)	
 			END;
 		END HandleInternal;
 	END VisualComponent;
+
+	(* Layout Manager *)
+	LayoutManager* = PROCEDURE {DELEGATE} (vc : VisualComponent);
 	
 	FormWindow* = OBJECT(WM.DoubleBufferWindow)
 	VAR form : Form; locked : BOOLEAN;
@@ -1127,6 +1148,7 @@ TYPE
 			form.AddContent(x);
 			IF (x # NIL) & (x IS VisualComponent) THEN 
 				form.focusComponent := x(VisualComponent);
+				form.fPointerOwner := x(VisualComponent)
 			END;	
 			form.Reset(SELF, NIL);
 			EnableUpdate;
@@ -1149,8 +1171,11 @@ TYPE
 		PROCEDURE Resized( width, height: LONGINT);
 		BEGIN
 			IF ~scaling THEN
-				DisableUpdate;
+				DisableUpdate; 
+				form.Acquire;
 				ReInit(width, height);
+				form.Release;
+				
 				form.bounds.Set(Rectangles.MakeRect(0, 0, GetWidth(), GetHeight()));
 				content.bounds.Set(Rectangles.MakeRect(0, 0, GetWidth(), GetHeight()));
 				EnableUpdate;
@@ -1206,7 +1231,7 @@ TYPE
 		BEGIN
 			Close^; (* remove the form to avoid further messages *)
 			form.Acquire;			
-			IF form # NIL THEN form.Finalize END;
+			IF form # NIL THEN form.Finalize; form.sequencer.Stop; END;
 			form.Release			
 		END Close;
 	END FormWindow;
@@ -1259,6 +1284,8 @@ TYPE
 		list : WMProperties.PropertyList; 
 	END;
 	
+	ListArray* = POINTER TO ARRAY OF WMProperties.PropertyList;
+	
 	PropertyListList* = OBJECT
 	VAR first : PropertyListEntry;
 		PROCEDURE Find*(name : ARRAY OF CHAR) : WMProperties.PropertyList;
@@ -1294,13 +1321,32 @@ TYPE
 		VAR new : PropertyListEntry;
 		BEGIN {EXCLUSIVE}
 			RemoveInternal(name);
-			NEW(new); new.name := NewString(name); new.list := pl; new.next := first; first := new;
+			NEW(new); new.name := NewString(name); new.list := pl; new.next := first; first := new
 		END Add;
+		
+		PROCEDURE Enumerate*() : ListArray;
+		VAR array : ListArray; 
+			i, nofLists : LONGINT;
+			current : PropertyListEntry;
+		BEGIN {EXCLUSIVE}
+			i := 0;
+			current := first;
+			WHILE current # NIL DO INC(i); current := current.next	END;
+			NEW(array, i );
+			current := first;
+			i := 0;
+			WHILE current # NIL DO 
+				array[i] := current.list;
+				INC(i); 
+				current := current.next	
+			END;
+			RETURN array
+		END Enumerate;
 		
 		PROCEDURE UpdateStyle*;
 		VAR
 			en : XMLObjects.Enumerator;
-			p : PTR; s, n : String; i : LONGINT;
+			p : ANY; s, n : String; i : LONGINT;
 			pl : WMProperties.PropertyList;
 		BEGIN
 			IF currentStyle = NIL THEN RETURN END;
@@ -1321,18 +1367,18 @@ VAR hasErrors : BOOLEAN; (* accessed only from Load (EXCLUSIVE) *)
 	registry* : XML.ElementRegistry;
 	invalidateRectMsg* : Messages.MessageExtension; (* used as unique ID *)
 	 
-	PrototypeID*, PrototypeUID* : WMProperties.StringProperty;
-	PrototypeBounds* : WMProperties.RectangleProperty;
-	PrototypeEnabled* : WMProperties.BooleanProperty;
-	PrototypeFillColor* : WMProperties.ColorProperty;
-	PrototypeAlignment* : WMProperties.Int32Property;
-	PrototypeVisible*, PrototypeTakesFocus*, PrototypeNeedsTab* : WMProperties.BooleanProperty;
+	PrototypeID-, PrototypeUID- : WMProperties.StringProperty;
+	PrototypeBounds-, PrototypeBearing- : WMProperties.RectangleProperty;
+	PrototypeEnabled- : WMProperties.BooleanProperty;
+	PrototypeFillColor- : WMProperties.ColorProperty;
+	PrototypeAlignment- : WMProperties.Int32Property;
+	PrototypeVisible-, PrototypeTakesFocus-, PrototypeNeedsTab- : WMProperties.BooleanProperty;
 	StrComponent, StrVisualComponent : String;
 	GSonStartDrag, GSonStartDragInfo : String;
 	 
 	propertyListList- : PropertyListList;
 	currentStyle- : XML.Element;
-	componentStyleMsg : ComponentStyleChanged;
+	componentStyleMsg- : ComponentStyleChanged;
 
 PROCEDURE SetStyle*(style : XML.Element);
 BEGIN
@@ -1352,7 +1398,7 @@ BEGIN
 END SetStyleInternal;
 	 
 PROCEDURE FindRelativePath(x : Component; VAR path : ARRAY OF CHAR; pos : LONGINT) : Component;
-VAR p : PTR;
+VAR p : ANY;
 	contents: XMLObjects.Enumerator; 
 	sn : ARRAY MaxComponentNameSize OF CHAR;
 	i : LONGINT; id : String;
@@ -1398,15 +1444,15 @@ END Error;
 
 (** Load an XML file. Return NIL if errors occured *)
 PROCEDURE Load*(filename : ARRAY OF CHAR) : XML.Content;
-VAR f : AosFS.File;
-	scanner : XMLScanner.Scanner;
+VAR scanner : XMLScanner.Scanner;
 	parser : XMLParser.Parser;
 	doc : XML.Document;
+	in : AosIO.Reader;
 BEGIN {EXCLUSIVE}
 	hasErrors := FALSE;
-	f := AosFS.Old(filename);
-	IF f # NIL THEN
-		NEW(scanner, f); scanner.reportError := Error;
+	in := AosCodecs.OpenInputStream(filename);
+	IF in # NIL THEN
+		NEW(scanner, in); scanner.reportError := Error;
 		NEW(parser, scanner); parser.reportError := Error;
 		parser.elemReg := registry; doc := parser.Parse();
 		IF hasErrors THEN RETURN NIL END;
@@ -1420,12 +1466,14 @@ PROCEDURE LoadRegistry*(filename : ARRAY OF CHAR) : XML.Content;
 VAR f : AosFS.File;
 	scanner : XMLScanner.Scanner;
 	parser : XMLParser.Parser;
+	reader : AosFS.Reader;
 	doc : XML.Document;
 BEGIN {EXCLUSIVE}
 	hasErrors := FALSE;
 	f := AosFS.Old(filename);
 	IF f # NIL THEN
-		NEW(scanner, f); scanner.reportError := Error;
+		NEW(reader, f, 0);
+		NEW(scanner, reader); scanner.reportError := Error;
 		NEW(parser, scanner); parser.reportError := Error;
 		parser.elemReg := registry; doc := parser.Parse();
 		IF hasErrors THEN RETURN NIL END;
@@ -1438,24 +1486,26 @@ PROCEDURE LoadStyleInternal(filename : ARRAY OF CHAR);
 VAR f : AosFS.File;
 	scanner : XMLScanner.Scanner;
 	parser : XMLParser.Parser;
+	reader : AosFS.Reader;
 	doc : XML.Document;
 	manager : WM.WindowManager;
 BEGIN
 	hasErrors := FALSE;
 	f := AosFS.Old(filename);
 	IF f # NIL THEN
-		NEW(scanner, f); scanner.reportError := Error;
+		NEW(reader, f, 0);
+		NEW(scanner, reader); scanner.reportError := Error;
 		NEW(parser, scanner); parser.reportError := Error;
 		parser.elemReg := registry; doc := parser.Parse();
 		IF hasErrors THEN AosOut.String("Stylefile not ok"); AosOut.Ln 
 		ELSE
 			SetStyleInternal(doc.GetRoot())
 		END	
-	END;
+	END
 END LoadStyleInternal;
 
 (** Load Component registry file. Return NIL if errors occured *)
-PROCEDURE LoadStyle*(par : PTR) : PTR;
+PROCEDURE LoadStyle*(par : ANY) : ANY;
 VAR  filename : ARRAY 64 OF CHAR;	
 	s: AosCommands.Parameters;
 	sr : AosIO.StringReader;
@@ -1482,9 +1532,12 @@ BEGIN
 		NewString("unique identifier of the component"));
 	NEW(PrototypeEnabled, NIL, NewString("enabled"), 
 		NewString("defines if the component is enabled"));
+	PrototypeEnabled.Set(TRUE);
 	(* Visual component properties *)
 	NEW(PrototypeBounds, NIL, NewString("Bounds"), 
 		NewString("the bounding box of the component in parent coordinates"));
+	NEW(PrototypeBearing, NIL, NewString("Bearing"), 
+		NewString("the bearing (empty space) aroung the component if auto aligned"));
 	NEW(PrototypeFillColor, NIL, NewString("FillColor"), 
 		NewString("the main fill color of the component. i.e. background"));
 	NEW(PrototypeAlignment, NIL, NewString("Alignment"), 
@@ -1504,7 +1557,7 @@ BEGIN
 	StrVisualComponent := NewString("VisualComponent");
 END InitPrototypes;
 
-PROCEDURE DumpComponent*(obj : PTR);
+PROCEDURE DumpComponent*(obj : ANY);
 
 	PROCEDURE DumpProperties(pl : WMProperties.PropertyList);
 	VAR i : LONGINT; pa : WMProperties.PropertyArray; p :WMProperties.Property; s : String;
@@ -1570,7 +1623,12 @@ BEGIN
 	END
 END DumpComponent;
 
-PROCEDURE PropertyGenerator(par : PTR) : PTR;
+PROCEDURE NewLine(w : AosIO.Writer; level : LONGINT);
+BEGIN
+	w.Ln; WHILE level > 0 DO w.Char(09X); DEC(level) END
+END NewLine;
+
+PROCEDURE PropertyGenerator(par : ANY) : ANY;
 VAR x : Properties;
 BEGIN
 	NEW(x);
@@ -1578,12 +1636,13 @@ BEGIN
 END PropertyGenerator;
 
 BEGIN
+	NEW(componentStyleMsg);
 	NEW(propertyListList);
 	InitPrototypes;
 	NEW(registry);
 	registry.RegisterElement("Properties", PropertyGenerator);
 	NEW(invalidateRectMsg);
-	LoadStyleInternal("ComponentStyle.XML")
+(*	LoadStyleInternal("ComponentStyle.XML") *)
 END WMComponents.
 
 

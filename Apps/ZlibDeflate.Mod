@@ -1,7 +1,7 @@
 (* ETH Oberon, Copyright 2001 ETH Zuerich Institut fuer Computersysteme, ETH Zentrum, CH-8092 Zuerich.
 Refer to the "General ETH Oberon System Source License" contract available at: http://www.oberon.ethz.ch/ *)
 
-MODULE ZlibDeflate;	(** Stefan Walthert   **)
+MODULE ZlibDeflate;	(** Stefan Walthert  **)
 (** AUTHOR "swalthert"; PURPOSE "Zlib compression"; *)
 
 	(**
@@ -897,7 +897,8 @@ BEGIN
 	ASSERT(scan <= 2 * WindowSize - MinLookAhead, 110);	(* need lookahead *)
 	len := -1;
 	REPEAT
-		ASSERT(cur < stream.string, 111);	(* no future *)
+		IF cur >= stream.string THEN RETURN 0 END;
+(*		ASSERT(cur < stream.string, 111);	(* no future *) *)
 		match := cur;
 		
 		(* skip to next match if match length cannot increase or match lengtch < 2 *)

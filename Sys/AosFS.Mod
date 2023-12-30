@@ -1,6 +1,6 @@
 (* Aos, Copyright 2001, Pieter Muller, ETH Zurich *)
 
- MODULE AosFS;	(* pjm *)
+MODULE AosFS;	(* pjm *)
 
 (** Aos file system base. *)
 
@@ -9,7 +9,21 @@ IMPORT SYSTEM, AosIO, AosOut, AosModules, AosKernel, AosCommands;
 CONST
 	ReadOnly* = 0; Removable* = 1; Boot* = 2;	(** Volume property flags *)
 	Directory* = 1;	(** File flags *)
-
+	
+	Ok* = 0;
+	
+	(* Volume level errors *)
+	ReadOnlyError = 2901;		(* Tried to modify read-only volume. Causes HALT *)
+	VolumeFull = 2902;			(* Tried to allocate block on full volume. Causes HALT *)
+	InvalidAdr= 2903;			(* Block address outside of volume. Causes HALT *)
+	
+	(* File level errors *)
+	VolumeReadOnly* = 2905; 	(** Cannot modify read-only volume *)
+	FsNotFound* = 2906; 		(** File system not found *)
+	FileAlreadyExists* = 2908;	(** File already exists *)
+	BadFileName* = 2909;		(** Bad file name *)
+	FileNotFound* = 2910;		(** File not found *)
+	
 	EnumSize* = 0; EnumTime* = 1;	(** Enumerate flags. *)
 	
 	PrefixLength* = 16;	(** maximum length of a file system prefix. *)
@@ -23,6 +37,8 @@ CONST
 	DefaultReaderSize = 4096;
 	
 	PathDelimiter* = "/";	(** Path delimiter *)
+	
+	BufferSize = 32*1024; 	(* Buffersize for file copy operation *)
 
 TYPE
 (** All record fields are read-only for users, and read-write for extenders. *)
@@ -110,8 +126,8 @@ TYPE
 		
 		PROCEDURE AllocBlock*(hint: Address; VAR adr: Address);
 		BEGIN {EXCLUSIVE}
-			IF ReadOnly IN flags THEN HALT(2901) END;
-			IF size - used <= reserved THEN HALT(2902) END;
+			IF ReadOnly IN flags THEN HALT(ReadOnlyError) END;
+			IF size - used <= reserved THEN HALT(VolumeFull) END;
 			ASSERT(hint >= 0);
 			IF hint > size THEN hint := 0 END;
 			adr := hint+1;
@@ -123,31 +139,31 @@ TYPE
 					INCL(map[adr DIV 32], adr MOD 32);
 					EXIT
 				END;
-				IF adr = hint THEN HALT(2902) END
+				IF adr = hint THEN HALT(VolumeFull) END
 			END;
 			INC(used)
 		END AllocBlock;
 
 		PROCEDURE FreeBlock*(adr: Address);
 		BEGIN {EXCLUSIVE}
-			IF (adr < 1) OR (adr > size) THEN HALT(2903) END;
-			IF ReadOnly IN flags THEN HALT(2901) END;
+			IF (adr < 1) OR (adr > size) THEN HALT(InvalidAdr) END;
+			IF ReadOnly IN flags THEN HALT(ReadOnlyError) END;
 			EXCL(map[adr DIV 32], adr MOD 32);
 			DEC(used)
 		END FreeBlock;
 		
 		PROCEDURE MarkBlock*(adr: Address);
 		BEGIN {EXCLUSIVE}
-			IF (adr < 1) OR (adr > size) THEN HALT(2903) END;
-			IF ReadOnly IN flags THEN HALT(2901) END;
+			IF (adr < 1) OR (adr > size) THEN HALT(InvalidAdr) END;
+			IF ReadOnly IN flags THEN HALT(ReadOnlyError) END;
 			INCL(map[adr DIV 32], adr MOD 32);
 			INC(used)
 		END MarkBlock;
 		
 		PROCEDURE Marked*(adr: Address): BOOLEAN;
 		BEGIN {EXCLUSIVE}
-			IF (adr < 1) OR (adr > size) THEN HALT(2903) END;
-			IF ReadOnly IN flags THEN HALT(2901) END;
+			IF (adr < 1) OR (adr > size) THEN HALT(InvalidAdr) END;
+			IF ReadOnly IN flags THEN HALT(ReadOnlyError) END;
 			RETURN (adr MOD 32) IN map[adr DIV 32]
 		END Marked;
 		
@@ -430,6 +446,7 @@ VAR
 	fsroot: FileSystem;	(* list of known file systems *)
 	files: AosKernel.FinalizedCollection;	(* all open files - cleaned up by GC *)
 	seacher: FileSearcher;	(* enumerator shared by various procedures, protected with module EXCLUSIVE *)
+	fileClipboard : File; (* contains the pointer to the file in the clipboard opened with Copy *)
 
 (** Buffered reading and writing. *)
 
@@ -766,12 +783,109 @@ BEGIN {EXCLUSIVE}
 				END
 			END
 		ELSE
-			res := 2905	(* can not modify read-only volume *)
+			res := VolumeReadOnly	(* can not modify read-only volume *)
 		END
 	ELSE
-		res := 2906	(* file system not found *)
+		res := FsNotFound	(* file system not found *)
 	END
 END Delete;
+
+(* copies the file with the given name to the fileClipboard *)
+PROCEDURE Copy*(name: ARRAY OF CHAR; VAR res: LONGINT);
+VAR file: File;
+BEGIN
+	res := -1;
+	file := Old(name);
+	IF file = NIL THEN RETURN END;
+	fileClipboard := file;
+	res := 0;
+END Copy;
+
+(* pastes the fileClipboard into the file with the given name if it doesn't exist already *)
+PROCEDURE Paste*(name: ARRAY OF CHAR; VAR res: LONGINT);
+VAR writer : Writer;
+	reader : Reader;
+	file : File;
+	chunk : ARRAY 4096 OF CHAR;
+	len : LONGINT;
+BEGIN
+	IF fileClipboard = NIL THEN RETURN END;
+	IF Old(name) # NIL THEN res := FileAlreadyExists;			(* File already exists *)		
+	ELSE
+		file := New(name);
+		IF file = NIL THEN res := BadFileName; RETURN END;	(* Bad Filename *)
+		NEW(writer, file, 0);
+		NEW(reader, fileClipboard, 0);
+		WHILE (reader.res = AosIO.Ok) DO
+			reader.Bytes(chunk, 0, LEN(chunk), len);
+			writer.Bytes(chunk, 0, len);
+		END;
+		writer.Update;
+		Register(file);
+		res := 0;
+	END;
+END Paste;
+
+(**
+ * Make a copy of a file
+ * @param source: Prefix, path and name of file to be copied
+ * @param destination: Prefix, path and name of file to be created
+ * @param overwrite: @in: Overwrite existing files? @out: Has an existing file been overwritten?
+ * @param res: @out: Result code
+ *)	
+PROCEDURE CopyFile*(source, destination : ARRAY OF CHAR; VAR overwrite : BOOLEAN; VAR res : LONGINT);
+VAR 
+	sprefix, dprefix : Prefix;
+	sname : ARRAY LEN(source) OF CHAR;
+	dname : ARRAY LEN(destination) OF CHAR;
+	sPos, dPos : Rider;
+	sfs, dfs : FileSystem;
+	sfile, dfile : File; 
+	buffer : ARRAY BufferSize OF CHAR; 
+	i : LONGINT; 
+BEGIN
+	SplitName(source, sprefix, sname);
+	SplitName(destination, dprefix, dname);
+	BEGIN {EXCLUSIVE}
+		IF sprefix = "" THEN sfs := fsroot; ELSE sfs := FindFS(sprefix); END;
+		IF dprefix = "" THEN dfs := fsroot; ELSE dfs := FindFS(dprefix); END;
+		IF (sfs # NIL) & (dfs # NIL) THEN (* We found the file system *)
+			IF (dfs.vol = NIL) OR ~(ReadOnly IN dfs.vol.flags) THEN (* We may write to the target volume *)
+				sfile := OpenOld(seacher, sfs, sname);
+				IF sfile # NIL THEN (* We found the source file *)
+					dfile := OpenOld(seacher, dfs, dname); 
+					IF (dfile = NIL) OR overwrite THEN (* We may write to the target file *)
+						IF dfile # NIL THEN overwrite := TRUE; ELSE overwrite := FALSE; END; 
+						dfile := dfs.New0(dname);
+						IF dfile # NIL THEN (* We could create the target file *)
+							res := Ok;
+						ELSE res := BadFileName;
+						END;
+					ELSE res := FileAlreadyExists;
+					END;
+				ELSE res := FileNotFound;
+				END;
+			ELSE res :=VolumeReadOnly;
+			END;
+		ELSE res := FsNotFound; 
+		END;
+	END;
+	
+	IF res # Ok THEN RETURN END; 
+	
+	(* copy file content *)
+	sfile.Set(sPos, 0); dfile.Set(dPos, 0);
+	i := 0;
+	WHILE i < (sfile.Length() DIV BufferSize) DO
+		sfile.ReadBytes(sPos, buffer, 0, BufferSize);
+		dfile.WriteBytes(dPos, buffer, 0, BufferSize);
+		INC(i);
+	END;
+	sfile.ReadBytes(sPos, buffer, 0, sfile.Length() MOD BufferSize);
+	dfile.WriteBytes(dPos, buffer, 0, sfile.Length() MOD BufferSize);
+	
+	Register(dfile); (* Will enter exclusive region *)
+END CopyFile;
 
 (** Rename a file. res = 0 indicates success. *)
 
@@ -790,10 +904,10 @@ BEGIN {EXCLUSIVE}
 			IF key # 0 THEN f := FindOpenFile(seacher, nfs, key) ELSE f := NIL END;
 			nfs.Rename0(fold, fnew, f, res)
 		ELSE
-			res := 2905	(* can not modify read-only volume *)
+			res := VolumeReadOnly	(* can not modify read-only volume *)
 		END
 	ELSE
-		res := 2906	(* file system not found *)
+		res := FsNotFound	(* file system not found *)
 	END
 END Rename;
 
@@ -842,10 +956,10 @@ BEGIN {EXCLUSIVE}
 				END
 			END
 		ELSE
-			res := 2905	(* can not modify read-only volume *)
+			res := VolumeReadOnly	(* can not modify read-only volume *)
 		END
 	ELSE
-		res := 2906	(* file system not found *)
+		res := FsNotFound	(* file system not found *)
 	END
 END RemoveDirectory;
 
@@ -1092,7 +1206,7 @@ o A typical code pattern for reading a file is:
 	IF f # NIL THEN
 		AosFS.OpenReader(r, f, 0);	(* open a buffer on the file *)
 		LOOP
-			AosIO.Read(r, ch);	(* read a character from the buffer *)
+			ch := r.Get();	(* read a character from the buffer *)
 			IF r.res # AosIO.Ok THEN EXIT END;	(* end-of-file, or other error *)
 			"do something with ch"
 		END
@@ -1107,9 +1221,9 @@ o A typical code pattern for writing a file is:
 		AosFS.OpenWriter(w, f, 0);	(* open a buffer on the file *)
 		WHILE "not done" DO
 			"assign ch"
-			AosIO.Write(w, ch)	(* write a character to the buffer (if the buffer is full, it is written to the file) *)
+			w.Char(ch)	(* write a character to the buffer (if the buffer is full, it is written to the file) *)
 		END;
-		AosIO.Update(w);	(* write the last buffer to the file *)
+		w.Update;	(* write the last buffer to the file *)
 		AosFS.Register(f)	(* enter the file in the directory *)
 
 o See the AosIO module for more procedures operating on Reader and Writer buffers, e.g. ReadRawInt, WriteRawInt, etc.

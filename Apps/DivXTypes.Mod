@@ -7,10 +7,11 @@ MODULE DivXTypes;
 
 	IMPORT
 		SYSTEM, AVI;
+		
 	CONST
 		(* Write Debug Output to into File DivXDebug.Log *)
 		Debug* = FALSE;
-			EnableMMX* = TRUE;
+		EnableMMX* = TRUE;
 			
 		DecMbc* = 45;	(* used for max resolution *)
 		DecMbr* = 36;
@@ -57,9 +58,18 @@ MODULE DivXTypes;
 		DCStoreChrArray* = POINTER TO ARRAY OF ARRAY OF ARRAY OF LONGINT;
 		ACLeftChrArray* = POINTER TO ARRAY OF ARRAY OF ARRAY OF ARRAY OF LONGINT;
 		ACTopChrArray* = POINTER TO ARRAY OF ARRAY OF ARRAY OF ARRAY OF LONGINT;
-		
+	
+	
+	TYPE
+		VideoBuffer*=RECORD
+		data*: POINTER TO ARRAY OF CHAR;
+		index*: LONGINT;
+		size*: LONGINT;
+	END;	
+	
 	(* 2 helper functions *)
-	TYPE MyUtils*  = OBJECT
+	TYPE
+		MyUtils*  = OBJECT
 
 		(* Compare to arrays up to "len" elements *)
 		PROCEDURE CompareCharArrays*( VAR ar1,ar2: ARRAY OF CHAR; len: LONGINT ): BOOLEAN;
@@ -231,17 +241,17 @@ MODULE DivXTypes;
 
 		predictDir*: LONGINT;
 
-	PROCEDURE &init;
-	BEGIN
-		NEW( dcStoreLum, 2*DecMbr + 1, 2*DecMbc + 1 );
-		NEW( acLeftLum, 2*DecMbr + 1, 2*DecMbc + 1, 7 );
-		NEW( acTopLum, 2*DecMbr + 1, 2*DecMbc + 1, 7 );
-		
-		NEW( dcStoreChr, 2, DecMbr + 1, DecMbc + 1 );
-		NEW( acLeftChr, 2, DecMbr + 1, DecMbc + 1, 7 );
-		NEW( acTopChr, 2, DecMbr + 1 , DecMbc + 1, 7 )
-		
-	END init;
+		PROCEDURE &init;
+		BEGIN
+			NEW( dcStoreLum, 2*DecMbr + 1, 2*DecMbc + 1 );
+			NEW( acLeftLum, 2*DecMbr + 1, 2*DecMbc + 1, 7 );
+			NEW( acTopLum, 2*DecMbr + 1, 2*DecMbc + 1, 7 );
+			
+			NEW( dcStoreChr, 2, DecMbr + 1, DecMbc + 1 );
+			NEW( acLeftChr, 2, DecMbr + 1, DecMbc + 1, 7 );
+			NEW( acTopChr, 2, DecMbr + 1 , DecMbc + 1, 7 )
+			
+		END init;
 	END ACDC;
 
 	(* Contains the actual state of the decoding process. One Instance of that Objekt is shared between the modules *)
@@ -269,14 +279,17 @@ MODULE DivXTypes;
 		modeMap*: ARRAY ( DecMbr + 1 ) OF ARRAY ( DecMbc + 2 ) OF LONGINT;
 		mbWidth*, mbHeight*: LONGINT;
 		
-		PROCEDURE &init( opt: DecoderOptions; buffers: MP4Buffers );
+		PROCEDURE &init( );
+		BEGIN
+			NEW( hdr);
+			NEW( coeffPred );
+			NEW( mp4Tables );
+		END init;
+		
+		PROCEDURE SetUpState*( buffers: MP4Buffers);
 		VAR
 			i, j, cc, offset: LONGINT;
 		BEGIN
-			NEW( hdr, opt );
-			NEW( coeffPred );
-			NEW( mp4Tables );
-					
 			(* picture dimension vars *)
 			horizontalSize := hdr.width;
 			verticalSize := hdr.height;
@@ -366,7 +379,7 @@ MODULE DivXTypes;
 					frameRefBaseOffset[cc] := edgedRefBaseOffset[cc] + codedPictureWidth*32 + 32;
 
 					frameFor := edgedFor;
-			    	frameForBaseOffset[cc] := edgedForBaseOffset[cc] + codedPictureWidth*32 + 32
+			    		frameForBaseOffset[cc] := edgedForBaseOffset[cc] + codedPictureWidth*32 + 32
 			    ELSE
 					IF cc = 1 THEN 
 						offset := codedPictureWidth*codedPictureHeight;
@@ -414,7 +427,8 @@ MODULE DivXTypes;
 				modeMap[i][0] := Intra;
 				modeMap[i][mbWidth+1] := Intra
 			END;
-		END init;
+		END SetUpState;
+		
 	END MP4State;
 
 	(* Contains the Header of the avi File *)
@@ -439,11 +453,13 @@ MODULE DivXTypes;
 		(* extra/derived *)
 		mbASize*, mbXSize*, mbYSize*, picNum*, mba*, mbXPos*, mbYPos*, intraBlockRescaled*: LONGINT;
 		
-		PROCEDURE & init( opt: DecoderOptions );
+		PROCEDURE & init(); (* opt: DecoderOptions ); *)
 		BEGIN
 			(* Set default values *)
+			(*
 			width := opt.xDim;
 			height := opt.yDim;
+			*)
 			quantPrecision := 5;
 			bitsPerPixel := 8;
 			quantType := 0;
@@ -452,10 +468,20 @@ MODULE DivXTypes;
 			complexityEstimationDisable := 1;
 			
 			picNum := 0;
+			(* 
 			mbXSize := width DIV 16;
 			mbYSize := height DIV 16;
 			mbASize := mbXSize * mbYSize
+			*)
 		END init;
+		
+		PROCEDURE FinishHeader*();
+		BEGIN
+			mbXSize := width DIV 16;
+			mbYSize := height DIV 16;
+			mbASize := mbXSize * mbYSize
+		END FinishHeader;
+		
 	END MP4Header;
 
 	(* Contains decoder options *)
@@ -464,37 +490,37 @@ MODULE DivXTypes;
 		xDim*,yDim*, displayYSize*, displayCSize*: LONGINT;	(* Size Of Image *)
 		deblockYH*, deblockYV*, deringY*, deblockCH*, deblockCV*, deringC*: BOOLEAN;
 	
-	PROCEDURE &init(h: AVI.AVIStreamHeaderPtr );
-	BEGIN
-		SetPostProcessLevel( 10 );
-		xDim := h.bitMapInfo.width;
-		yDim := h.bitMapInfo.height;
-				
-		displayYSize := xDim * yDim;
-		displayCSize := ( xDim * yDim ) DIV 4
-	END init;
-	
-	(* Set Postprocesslevel *)
-	PROCEDURE SetPostProcessLevel*( n: LONGINT );
-	BEGIN
-		CASE n OF 
-				0: deblockYH := FALSE; deblockYV := FALSE; deringY := FALSE;
-					deblockCH := FALSE; deblockCV := FALSE; deringC := FALSE;
-			| 1: deblockYH := TRUE; deblockYV := FALSE; deringY := FALSE;
-					deblockCH := FALSE; deblockCV := FALSE; deringC := FALSE;
-			| 2: deblockYH := TRUE; deblockYV := TRUE; deringY := FALSE;
-					deblockCH := FALSE; deblockCV := FALSE; deringC := FALSE;
-			| 3: deblockYH := TRUE; deblockYV := TRUE; deringY := TRUE;
-					deblockCH := FALSE; deblockCV := FALSE; deringC := FALSE;
-			| 4: deblockYH := TRUE; deblockYV := TRUE; deringY := TRUE;
-					deblockCH := TRUE; deblockCV := FALSE; deringC := FALSE;
-			| 5: deblockYH := TRUE; deblockYV := TRUE; deringY := TRUE;
-					deblockCH := TRUE; deblockCV := TRUE; deringC := FALSE
-		ELSE 
-			deblockYH := TRUE; deblockYV := TRUE; deringY := TRUE;
-			deblockCH := TRUE; deblockCV := TRUE; deringC := TRUE
-		END;
-	END SetPostProcessLevel;
+		PROCEDURE &init(width: LONGINT; height: LONGINT );
+		BEGIN
+			SetPostProcessLevel( 10 );
+			xDim := width;
+			yDim := height;
+					
+			displayYSize := xDim * yDim;
+			displayCSize := ( xDim * yDim ) DIV 4
+		END init;
+		
+		(* Set Postprocesslevel *)
+		PROCEDURE SetPostProcessLevel*( n: LONGINT );
+		BEGIN
+			CASE n OF 
+					0: deblockYH := FALSE; deblockYV := FALSE; deringY := FALSE;
+						deblockCH := FALSE; deblockCV := FALSE; deringC := FALSE;
+				| 1: deblockYH := TRUE; deblockYV := FALSE; deringY := FALSE;
+						deblockCH := FALSE; deblockCV := FALSE; deringC := FALSE;
+				| 2: deblockYH := TRUE; deblockYV := TRUE; deringY := FALSE;
+						deblockCH := FALSE; deblockCV := FALSE; deringC := FALSE;
+				| 3: deblockYH := TRUE; deblockYV := TRUE; deringY := TRUE;
+						deblockCH := FALSE; deblockCV := FALSE; deringC := FALSE;
+				| 4: deblockYH := TRUE; deblockYV := TRUE; deringY := TRUE;
+						deblockCH := TRUE; deblockCV := FALSE; deringC := FALSE;
+				| 5: deblockYH := TRUE; deblockYV := TRUE; deringY := TRUE;
+						deblockCH := TRUE; deblockCV := TRUE; deringC := FALSE
+			ELSE 
+				deblockYH := TRUE; deblockYV := TRUE; deringY := TRUE;
+				deblockCH := TRUE; deblockCV := TRUE; deringC := TRUE
+			END;
+		END SetPostProcessLevel;
 	END DecoderOptions;
 	
 	(* Buffers for the decoder *)
@@ -503,18 +529,18 @@ MODULE DivXTypes;
 		displayBuffer*, edgedRefBuffer*, edgedForBuffer*: PointerToArrayOfCHAR;
 		edgedRefBufferSize*, edgedForBufferSize*, displayBufferSize*: LONGINT;
 
-	PROCEDURE &init( opt: DecoderOptions );
-	BEGIN
-		edgedRefBufferSize := ( ( opt.xDim + 64 ) * ( opt.yDim + 64 ) ) + 
-			( 2 * ( ( ( opt.xDim DIV 2 ) + 64 ) * ( ( opt.yDim DIV 2 ) + 64 ) ) );
-		edgedForBufferSize := edgedRefBufferSize;
-
-		displayBufferSize := opt.displayYSize + ( 2 * opt.displayCSize );
-		
-		NEW( displayBuffer, displayBufferSize );
-		NEW( edgedRefBuffer, edgedRefBufferSize );
-		NEW( edgedForBuffer, edgedForBufferSize )
-	END init;
+		PROCEDURE &init( opt: DecoderOptions );
+		BEGIN
+			edgedRefBufferSize := ( ( opt.xDim + 64 ) * ( opt.yDim + 64 ) ) + 
+				( 2 * ( ( ( opt.xDim DIV 2 ) + 64 ) * ( ( opt.yDim DIV 2 ) + 64 ) ) );
+			edgedForBufferSize := edgedRefBufferSize;
 	
-	END MP4Buffers;
+			displayBufferSize := opt.displayYSize + ( 2 * opt.displayCSize );
+			
+			NEW( displayBuffer, displayBufferSize );
+			NEW( edgedRefBuffer, edgedRefBufferSize );
+			NEW( edgedForBuffer, edgedForBufferSize )
+		END init;
+	
+	END MP4Buffers;	
 END DivXTypes.

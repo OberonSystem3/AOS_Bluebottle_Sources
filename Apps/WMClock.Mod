@@ -1,14 +1,19 @@
 MODULE WMClock;
-
-IMPORT WM := WMWindowManager, WMGraphics, WMGraphicUtilities, WMRectangles, WMPopups,
-	WMRestorable, WMMessages,
-	WMComponents, WMProperties, WMStandardComponents, Utilities, AosKernel, AosModules, AosActive;
+(** 
+ * History:
+ *
+ *	08.01.2007	Store viewMode when saving desktop, adapted to WMRestorable (staubesv)
+ *)
+ 
+IMPORT 
+	WM := WMWindowManager, WMGraphics, WMGraphicUtilities, WMRectangles, WMPopups,
+	WMRestorable, WMMessages, WMComponents, WMProperties, WMStandardComponents, Utilities, AosKernel, AosModules, AosActive;
 
 CONST
 	ViewModeStandard* = 0;
 	ViewModeDateTime* = 1;
 	ViewModeAnalog* = 2;
-	ViewModeMax = ViewModeAnalog;
+	ToggleColor = 99;
 	
 TYPE
 	ContextMenuPar = OBJECT
@@ -17,23 +22,30 @@ TYPE
 	PROCEDURE &New(m : LONGINT); BEGIN mode := m END New;
 	END ContextMenuPar;
 
-	ClockWindow = OBJECT(WMComponents.FormWindow)
-	
-		VAR
-			dragging : BOOLEAN;
-			lastX, lastY : LONGINT;
-			clockComponent : ClockComponent;
-			contextMenu : WMPopups.Popup;
-	
+	ClockWindow = OBJECT(WMComponents.FormWindow);
+	VAR
+		dragging : BOOLEAN;
+		lastX, lastY : LONGINT;
+		clockComponent : ClockComponent;
+		contextMenu : WMPopups.Popup;
+
 		PROCEDURE &New(c : WMRestorable.Context);
+		VAR configuration : WMRestorable.XmlElement; viewMode, color : LONGINT;
 		BEGIN
 			Init(120, 40, TRUE); 
 			manager := WM.GetDefaultManager();
 	          
 			NEW(clockComponent);
+			clockComponent.alignment.Set(WMComponents.AlignClient);
 			SetContent(clockComponent);
-	          
-			IF c # NIL THEN WMRestorable.AddByContext(SELF, c, {WM.FlagStayOnTop})				
+			
+			IF (c # NIL) THEN
+				WMRestorable.AddByContext(SELF, c, {WM.FlagStayOnTop});
+				configuration := WMRestorable.GetElement(c, "Configuration");
+				IF configuration # NIL THEN
+					WMRestorable.LoadLongint(configuration, "color", color); clockComponent.color.Set(color);
+					WMRestorable.LoadLongint(configuration, "viewMode", viewMode); clockComponent.viewMode.Set(viewMode);
+				END;
 			ELSE  WM.ExtAddWindow(SELF, 50, 50, 	{WM.FlagStayOnTop})
 			END;	
 		END New;
@@ -49,6 +61,7 @@ TYPE
 				contextMenu.AddParButton("Time", HandleToggleView, contextMenuParStandard);
 				contextMenu.AddParButton("Date", HandleToggleView, contextMenuParDateTime);
 				contextMenu.AddParButton("Day of Week", HandleToggleView, contextMenuParAnalog);
+				contextMenu.AddParButton("Toggle Color", HandleToggleColor, contextToggleColor);
 				contextMenu.Popup(bounds.l+x, bounds.t+y)
 			END
 		END PointerDown;
@@ -58,8 +71,13 @@ TYPE
 		BEGIN
 			manager := WM.GetDefaultManager();
 			manager.SetFocus(SELF);
-			Close
+			Close;
 		END HandleClose;
+		
+		PROCEDURE HandleToggleColor(sender, data: ANY);
+		BEGIN
+			IF (clockComponent.color.Get() = 0FFH) THEN clockComponent.color.Set(0FFFFFFFFH) ELSE clockComponent.color.Set(0FFH) END;
+		END HandleToggleColor;
 		
 		PROCEDURE HandleToggleView(sender, par: PTR);
 		VAR manager : WM.WindowManager;
@@ -89,10 +107,14 @@ TYPE
 		END PointerUp;
 		
 		PROCEDURE Handle(VAR x: WMMessages.Message);
+		VAR configuration : WMRestorable.XmlElement;
 		BEGIN
 			IF (x.msgType = WMMessages.MsgExt) & (x.ext # NIL) THEN
 				IF (x.ext IS WMRestorable.Storage) THEN
-					x.ext(WMRestorable.Storage).Add("WMClock", "WMClock.Open", SELF, NIL)
+					NEW(configuration); configuration.SetName("Configuration");
+					WMRestorable.StoreLongint(configuration, "color", clockComponent.color.Get());
+					WMRestorable.StoreLongint(configuration, "viewMode", clockComponent.viewMode.Get());
+					x.ext(WMRestorable.Storage).Add("WMClock", "WMClock.Open", SELF, configuration)
 				ELSE Handle^(x)
 				END
 			ELSE Handle^(x)
@@ -101,12 +123,12 @@ TYPE
 		
 	END ClockWindow;
 	
-	ClockComponent* = OBJECT(WMStandardComponents.Label)
-		VAR
-			str, format : Utilities.String;
-			t : AosKernel.Timer;
-			running, terminated : BOOLEAN;
-			viewMode* : WMProperties.Int32Property;
+	ClockComponent* = OBJECT(WMComponents.VisualComponent)
+	VAR
+		str, format : Utilities.String;
+		t : AosKernel.Timer;
+		running, terminated : BOOLEAN;
+		viewMode*, color* : WMProperties.Int32Property;
 			
 		PROCEDURE Finalize;
 		BEGIN
@@ -117,11 +139,13 @@ TYPE
 			END
 		END Finalize;
 		
-		PROCEDURE Draw(canvas : WMGraphics.Canvas);
+		PROCEDURE DrawBackground(canvas : WMGraphics.Canvas);
 		BEGIN
-			Draw^(canvas);
-			WMGraphicUtilities.DrawRect(canvas, WMRectangles.MakeRect(0,0,119,39), 0FFH, WMGraphics.ModeCopy);
-		END Draw;
+			DrawBackground^(canvas);
+			canvas.SetColor(color.Get());
+			WMGraphicUtilities.DrawRect(canvas, GetClientRect(), color.Get(), WMGraphics.ModeCopy);
+			WMGraphics.DrawStringInRect(canvas, GetClientRect(), FALSE, WMGraphics.AlignCenter, WMGraphics.AlignCenter, str^)
+		END DrawBackground;
 		
 		PROCEDURE PropertyChanged*(sender, property: PTR);
 		VAR vmValue : LONGINT;
@@ -133,7 +157,9 @@ TYPE
 				ELSIF vmValue = ViewModeAnalog THEN COPY("www dd.", format^)
 				END;
 				t.Wakeup;
-				Invalidate
+				Invalidate;
+			ELSIF property = color THEN
+				Invalidate;
 			ELSE
 				PropertyChanged^(sender, property);
 			END
@@ -143,6 +169,8 @@ TYPE
 		BEGIN
 			Init^;
 			NEW(viewMode, prototypeViewMode, NIL, NIL); properties.Add(viewMode);
+			NEW(color, prototypeColor, NIL, NIL); properties.Add(color);
+			color.Set(0FFH);
 		END Init;
 		
 		PROCEDURE Initialize;
@@ -157,9 +185,6 @@ TYPE
 	BEGIN {ACTIVE}
 		NEW(str, 10); NEW(format, 10);
 		NEW(t);
-		bounds.SetWidth(120); alignment.Set(WMComponents.AlignLeft);
-		textColor.Set(0FFH);
-		alignH.Set(WMGraphics.AlignCenter);
 		SetFont(WMGraphics.GetFont("Oberon", 24, {WMGraphics.FontBold}));
 		
 		BEGIN {EXCLUSIVE}
@@ -168,7 +193,7 @@ TYPE
 		terminated := FALSE;
 		WHILE running DO
 			Utilities.FormatDateTime(format^, Utilities.Now(), str^);
-			caption.Set(str);
+			Invalidate;
 			IF viewMode.Get() = ViewModeDateTime THEN t.Sleep(5000)
 			ELSE t.Sleep(500)
 			END
@@ -192,7 +217,8 @@ VAR
 	clockWindow : ClockWindow;
 	firstNode, lastNode : ClockWindowNode;
 	prototypeViewMode : WMProperties.Int32Property;
-	contextMenuParStandard, contextMenuParDateTime, contextMenuParAnalog : ContextMenuPar;
+	prototypeColor : WMProperties.Int32Property;
+	contextMenuParStandard, contextMenuParDateTime, contextMenuParAnalog, contextToggleColor : ContextMenuPar;
 
 PROCEDURE Open*(par : ANY) : ANY;
 VAR
@@ -229,7 +255,10 @@ BEGIN
 	NEW(contextMenuParStandard, ViewModeStandard);
 	NEW(contextMenuParDateTime, ViewModeDateTime);
 	NEW(contextMenuParAnalog, ViewModeAnalog);
+	NEW(contextToggleColor, ToggleColor);
 	AosModules.InstallTermHandler(CloseAll);
+	NEW(prototypeColor, NIL, WMStandardComponents.NewString("Color"),
+		WMStandardComponents.NewString("toggle clock color"));
 	NEW(prototypeViewMode, NIL, WMStandardComponents.NewString("ViewMode"),
 		WMStandardComponents.NewString("select view mode"));
 	prototypeViewMode.Set(-1)

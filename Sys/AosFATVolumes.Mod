@@ -68,7 +68,7 @@ TYPE
 			fatCache, dataCache: Cache;
 			timer: AosKernel.Timer;
 			NreadSector*, NwriteSector*, NreadCluster*, NwriteCluster*, NreadFAT*, NwriteFAT*, NallocCluster*: LONGINT;	(* stats *)
-			
+		
 		PROCEDURE Init*(flags: SET; size, reserved: LONGINT);
 		BEGIN HALT(301)	(* abstract *)
 		END Init;
@@ -92,6 +92,7 @@ TYPE
 		PROCEDURE Initialize(VAR bpb: BPB; MaxClusters: LONGINT): BOOLEAN;
 		BEGIN {} (* must be exclusive in overridden methods *)
 			(* check BPB signature *)
+			IF ~((bpb[510]=055X) & (bpb[511]=0AAX)) THEN RETURN FALSE END;
 			IF ~(((bpb[0] = 0EBX) & (bpb[2] = 090X)) OR (bpb[0] = 0E9X)) THEN RETURN FALSE END;
 			
 			sectorsPC := ORD(bpb[13]);
@@ -105,6 +106,22 @@ TYPE
 			NreadSector := 0; NwriteSector := 0; NreadCluster := 0; NwriteCluster := 0; NallocCluster := 0; NreadFAT := 0; NwriteFAT := 0;
 			RETURN TRUE
 		END Initialize;
+		
+		(** This procedure is intended to provide low level access to FAT volume objects to disk utilities.
+			Don't use it for mounting volumes! Initialise should be called before calling this procedure *)
+		PROCEDURE InitLowLevel*(bpbin : ARRAY OF CHAR; numClusters : LONGINT; dev : AosDisks.Device; start, size, blockSize : LONGINT) : BOOLEAN;
+		VAR bpb : BPB;
+		BEGIN
+			COPY(bpbin, bpb);
+			ASSERT((LEN(bpb)=512) & (bpb[510]=055X) & (bpb[511]=0AAX));
+			SELF.dev := dev; SELF.start := start; SELF.size := size; SELF.blockSize := BS;
+			flags := {};
+			IF Initialize(bpb, numClusters) THEN 
+				RETURN TRUE;
+			ELSE
+				RETURN FALSE;
+			END;
+		END InitLowLevel;
 		
 		PROCEDURE Finalize;
 		VAR i, j, res: LONGINT; ptable: AosDisks.PartitionTable;
@@ -420,7 +437,6 @@ TYPE
 				numRootSectors := (GetUnsignedInteger(bpb, 17)*32 + BS - 1) DIV BS;
 				endFAT := start + firstRootSector + numRootSectors - 1;
 				startData := start + firstRootSector + numRootSectors - 2*sectorsPC;
-				
 				IF (bpb[38] = 029X) THEN
 					FOR i := 0 TO 10 DO label[i] := bpb[43+i] END; label[11] := 0X;
 					Utilities.TrimRight(label, " ")
@@ -677,7 +693,15 @@ TYPE
 						(GetLongint(info, 484) = 061417272H)	(* struc signature *)
 					THEN
 						freeCount := GetLongint(info, 488);
-						freeCluster := GetLongint(info, 492)
+						freeCluster := GetLongint(info, 492);
+						
+						IF (freeCluster < 2) OR (freeCluster > maxClusters+1) OR (freeCount < 0) OR (freeCount > maxClusters) THEN
+							AosOut.Enter; AosOut.String("WARNING: free cluster, free count info in BPB invalid ("); 
+							AosOut.Int(freeCluster, 0); AosOut.String(", "); AosOut.Int(freeCount, 0); AosOut.Char(")");
+							AosOut.Exit;
+							freeCount := -1;
+							freeCluster := 2
+						END
 					ELSE
 						freeCount := -1;
 						freeCluster := 2
@@ -844,7 +868,8 @@ BEGIN {EXCLUSIVE}
 				IF (type = 1) OR (* FAT12 *)
 					(type = 4) OR (* FAT16, up to 32MB *)
 					(type = 6) OR (type = 0EH) OR (* FAT16, over 32MB / FAT16 LBA *)
-					(type = 0BH) OR (type = 0CH) (* FAT32, up to 2047GB / FAT32 LBA *)
+					(type = 0BH) OR (type = 0CH) OR (* FAT32, up to 2047GB / FAT32 LBA *)
+					~IsPartitioned(dev)
 				THEN
 					IF ~(AosDisks.Mounted IN ptable[part].flags) THEN
 						InitVol(dev, part, type, p.vol, flags, cacheSize);
@@ -852,26 +877,21 @@ BEGIN {EXCLUSIVE}
 							IF (AosFS.ReadOnly IN flags) THEN INCL(ptable[part].flags, AosDisks.ReadOnly) END;
 							INCL(ptable[part].flags, AosDisks.Mounted)
 						END
-					ELSE
-						AosOut.String(" already mounted")
+					ELSE AosOut.String(" already mounted")
 					END
-				ELSE
-					AosOut.String(" wrong partition type")
+				ELSE AosOut.String(" wrong partition type")
 				END				
-			ELSE
-				AosOut.String(" invalid partition")
+			ELSE AosOut.String(" invalid partition")
 			END;
 			IF p.vol = NIL THEN
-				dev.Close(res)	(* close again - ignore res *)
+				dev.Close(res); (* close again - ignore res *)
 			END
-		ELSE
-			AosOut.String(" error "); AosOut.Int(res, 1)
+		ELSE AosOut.String(" error "); AosOut.Int(res, 1)
 		END
-	ELSE
-		AosOut.String(" not found")
+	ELSE AosOut.String(" not found")
 	END;
 	AosOut.Ln;
-	p.str[0] := 0X;	(* no error message *)
+	p.str[0] := 0X; (* no error message *)
 	RETURN NIL
 END New;
 
@@ -885,58 +905,65 @@ END WritePartitionType;
 
 PROCEDURE InitVol(dev: AosDisks.Device; partIdx, type: LONGINT; VAR vol: AosFS.Volume; flags: SET; cacheSize: LONGINT);
 VAR
-	bpb: BPB; vol12: FAT12Volume; vol16: FAT16Volume; vol32: FAT32Volume; 
-	fatSize, numSectors, numClusters, reserved, numFATs, rootEntryCount, sectPC, res, fat: LONGINT;
+	bpb: BPB; vol12: FAT12Volume; vol16: FAT16Volume; vol32: FAT32Volume; fatString : ARRAY 12 OF CHAR;
+	fatSize, numSectors, numClusters, reserved, numFATs, rootEntryCount, sectPC, res, fat : LONGINT;
 BEGIN {}
 	dev.Transfer(AosDisks.Read, dev.table[partIdx].start, 1, bpb, 0, res);
 	IF (res = Ok) THEN
-		(* determine FAT type *)
-		fatSize := GetUnsignedInteger(bpb, 22);
-		IF (fatSize = 0) THEN fatSize := GetLongint(bpb, 36) END;
-		numSectors := GetUnsignedInteger(bpb, 19);
-		IF (numSectors = 0) THEN numSectors := GetLongint(bpb, 32) END;
-		reserved := GetUnsignedInteger(bpb, 14);
-		numFATs := ORD(bpb[16]);
-		rootEntryCount := GetUnsignedInteger(bpb, 17);
-		sectPC := ORD(bpb[13]);
-		
-		numClusters := (numSectors - (reserved + (numFATs*fatSize) + (rootEntryCount*32 + BS - 1) DIV BS)) DIV sectPC;
-		
-		IF (numClusters < 4085) THEN NEW(vol12); vol := vol12; fat := 12
-		ELSIF (numClusters < 65525) THEN NEW(vol16); vol := vol16; fat := 16
-		ELSE NEW(vol32); vol := vol32; fat := 32
-		END;
-		
-		(* check if partition type matches with determined FS type *)
-		IF ((type = 1) & (fat # 12)) OR 
-			(((type = 4) OR (type = 6) OR (type = 0EH)) & (fat # 16)) OR
-			(((type = 0BH) OR (type = 0CH)) & (fat # 32))
-		THEN
-			AosOut.String(" failed: BPB (bios parameter block) or partition table corrupt"); AosOut.Ln;
-			AosOut.String("   file system type according to partition table: "); WritePartitionType(type); AosOut.Ln;
-			AosOut.String("   determined file system type: FAT"); AosOut.Int(fat, 0);
-			vol := NIL;
-			RETURN
-		END;
-		
-		WITH vol: Volume DO
-			vol.name := "<no name>";
-			vol.size := dev.table[partIdx].size;
-			vol.blockSize := BS; vol.flags := flags;
-			vol.dev := dev; vol.start := dev.table[partIdx].start;
-			IF (AosDisks.ReadOnly IN dev.flags) THEN INCL(flags, AosFS.ReadOnly) END;
-			IF ~vol.Initialize(bpb, numClusters) THEN
-				EXCL(dev.table[partIdx].flags, AosDisks.Mounted);
-				vol := NIL 
+		IF (bpb[510]=055X) & (bpb[511]=0AAX) THEN (* boot sector signature ok *)
+			(* determine FAT type *)
+			fatSize := GetUnsignedInteger(bpb, 22);
+			IF (fatSize = 0) THEN fatSize := GetLongint(bpb, 36) END;
+			numSectors := GetUnsignedInteger(bpb, 19);
+			IF (numSectors = 0) THEN numSectors := GetLongint(bpb, 32) END;
+			reserved := GetUnsignedInteger(bpb, 14);
+			numFATs := ORD(bpb[16]);
+			rootEntryCount := GetUnsignedInteger(bpb, 17);
+			sectPC := ORD(bpb[13]);
+			
+			(* FAT type determination *)
+			numClusters := (numSectors - (reserved + (numFATs*fatSize) + (rootEntryCount*32 + BS - 1) DIV BS)) DIV sectPC;
+			
+			IF (numClusters < 4085) THEN NEW(vol12); vol := vol12; fat := 12; fatString := "FAT12";
+			ELSIF (numClusters < 65525) THEN NEW(vol16); vol := vol16; fat := 16; fatString := "FAT16";
+			ELSE NEW(vol32); vol := vol32; fat := 32; fatString := "FAT32";
+			END;
+			
+			IF ~IsPartitioned(dev) THEN
+				AosOut.String(" ("); AosOut.String(fatString); AosOut.String(" volume)"); AosOut.Ln;
 			ELSE
-				IF FATCacheEnabled & (FATCacheSize > 0) THEN vol.SetCache(FAT, FATCacheSize, FATWriteBehind) END;
-				IF (cacheSize # 0) THEN vol.SetCache(Data, ABS(cacheSize), cacheSize < 0)
-				ELSE vol.SetCache(Data, 0, FALSE)
+				(* check if partition type matches with determined FS type *)
+				IF ((type = 1) & (fat # 12)) OR 
+					(((type = 4) OR (type = 6) OR (type = 0EH)) & (fat # 16)) OR
+					(((type = 0BH) OR (type = 0CH)) & (fat # 32))
+				THEN
+					AosOut.String(" failed: BPB (bios parameter block) or partition table corrupt"); AosOut.Ln;
+					AosOut.String("   file system type according to partition table: "); WritePartitionType(type); AosOut.Ln;
+					AosOut.String("   determined file system type: FAT"); AosOut.Int(fat, 0);
+					vol := NIL;
+					RETURN
+				END;
+			END;
+			
+			WITH vol: Volume DO
+				vol.name := "<no name>";
+				vol.size := dev.table[partIdx].size;
+				vol.blockSize := BS; vol.flags := flags;
+				vol.dev := dev; vol.start := dev.table[partIdx].start;
+				IF (AosDisks.ReadOnly IN dev.flags) THEN INCL(flags, AosFS.ReadOnly) END;
+				IF ~vol.Initialize(bpb, numClusters) THEN
+					EXCL(dev.table[partIdx].flags, AosDisks.Mounted);
+					vol := NIL 
+				ELSE
+					IF FATCacheEnabled & (FATCacheSize > 0) THEN vol.SetCache(FAT, FATCacheSize, FATWriteBehind) END;
+					IF (cacheSize # 0) THEN vol.SetCache(Data, ABS(cacheSize), cacheSize < 0)
+					ELSE vol.SetCache(Data, 0, FALSE)
+					END
 				END
 			END
-		END
-	ELSE
-		AosOut.String(" cannot read BPB (bios parameter block")
+		ELSE AosOut.String(" BPB signature wrong")
+		END;
+	ELSE AosOut.String(" cannot read BPB (bios parameter block")
 	END	
 END InitVol;
 
@@ -979,6 +1006,16 @@ BEGIN
 	FOR i := 0 TO 3 DO b[ofs+i] := CHR(value); value := value DIV 100H END
 END PutLongint;
 
+PROCEDURE IsPartitioned(dev : AosDisks.Device) : BOOLEAN;
+BEGIN
+	ASSERT((dev # NIL) & (dev.table # NIL));
+	RETURN dev.table[0].flags * {AosDisks.Valid} # {};
+END IsPartitioned;
+
 END AosFATVolumes.
+
+History:
+
+	20.02.2006	Allow unpartitioned devices to be mounted (staubesv)
 
 System.Free AosFATVolumes ~

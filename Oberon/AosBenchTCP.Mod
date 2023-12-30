@@ -1,6 +1,6 @@
 MODULE AosBenchTCP;	(* pjm *)
 
-IMPORT AosKernel, AosIP, AosTCP, AosDNS, Kernel, Texts, Oberon, In;
+IMPORT AosKernel, AosIP, AosOut, AosTCP, AosDNS, Utilities, AosIO, AosCommands;
 
 CONST
 	BufSize = 32768;	(* multiple of 1024 *)
@@ -83,67 +83,102 @@ TYPE
 	END Tester;
 
 VAR
-	w: Texts.Writer;
 	buf: Bytes;
+
 
 PROCEDURE Message(msg1, msg2: ARRAY OF CHAR; res: LONGINT);
 BEGIN
-	Kernel.LockOberon;
-	Texts.WriteString(w, Header); Texts.WriteString(w, msg1); Texts.WriteString(w, msg2);
+	AosOut.String(Header); AosOut.String(msg1); AosOut.String(msg2);
 	IF res # 0 THEN
-		Texts.WriteString(w, ", res="); Texts.WriteInt(w, res, 1)
+		AosOut.String(", res="); AosOut.Ln; 
 	END;
-	Texts.WriteLn(w); Texts.Append(Oberon.Log, w.buf);
-	Kernel.UnlockOberon
+	AosOut.Ln;
 END Message;
 
+
 PROCEDURE Report(ms, port, total: LONGINT; msg: ARRAY OF CHAR);
+VAR
+	realStr: ARRAY 128 OF CHAR;
+	
 BEGIN
-	Kernel.LockOberon;
-	Texts.WriteString(w, Header);
-	IF port = DiscardPort THEN Texts.WriteString(w, "Discard ")
-	ELSIF port = EchoPort THEN Texts.WriteString(w, "Echo ")
-	ELSE Texts.WriteString(w, "Chargen ")
+	AosOut.String(Header);
+	IF port = DiscardPort THEN AosOut.String("Discard ");
+	ELSIF port = EchoPort THEN AosOut.String("Echo ");
+	ELSE AosOut.String("Chargen ");
 	END;
-	Texts.WriteInt(w, total, 1); Texts.WriteString(w, "KB, ");
-	Texts.WriteInt(w, ms, 1); Texts.WriteString(w, "ms, ");
+	AosOut.Int(total, 0); AosOut.String("KB, ");
+	AosOut.Int(ms, 0); AosOut.String("ms, ");
 	IF ms # 0 THEN
-		Texts.WriteInt(w, ENTIER(total/ms*1000.0), 1); Texts.WriteString(w, "KB/s,");
-		Texts.WriteRealFix(w, total/1024.0*8/ms*1000.0, 1, 1, 0); Texts.WriteString(w, "Mb/s")
+		AosOut.Int(ENTIER(total/ms*1000.0), 0); AosOut.String("KB/s,");
+		Utilities.FloatToStr(total/1024.0*8/ms*1000.0, 0,0,0,realStr);
+		AosOut.String(realStr); AosOut.String("Mb/s");
 	ELSE
-		Texts.WriteString(w, " N/A")
+		AosOut.String(" N/A");
 	END;
-	Texts.WriteString(w, ", "); Texts.WriteString(w, msg);
-	Texts.WriteLn(w); Texts.Append(Oberon.Log, w.buf);
-	Kernel.UnlockOberon
+	AosOut.String(", "); AosOut.String(msg);
+	AosOut.Ln;
 END Report;
 
-PROCEDURE Discard*;	(** server KB *)
-VAR t: Tester; num: LONGINT; server: ARRAY 64 OF CHAR;
+
+(** server KB *)
+PROCEDURE Discard*(par: PTR): PTR;
+VAR 
+	t: Tester; 
+	num: LONGINT; 
+	server: ARRAY 64 OF CHAR;
+	params: AosCommands.Parameters;
+	strReader: AosIO.StringReader;
+	
 BEGIN
-	In.Open; In.String(server); In.LongInt(num);
-	IF In.Done & (num > 0) THEN
-		NEW(t, server, num, DiscardPort)
-	END
+	params := par(AosCommands.Parameters);
+	NEW(strReader, LEN(params.str^));
+	strReader.Set(params.str^);
+	strReader.SkipWhitespace;
+	
+	strReader.String(server); strReader.SkipWhitespace;
+	strReader.Int(num, FALSE); strReader.SkipWhitespace;
+	
+	NEW(t, server, num, DiscardPort);
+
+	RETURN NIL;
 END Discard;
 
-PROCEDURE Echo*;	(** server KB *)
-VAR t: Tester; num: LONGINT; server: ARRAY 64 OF CHAR;
+
+(** server KB *)
+PROCEDURE Echo*(par: PTR):PTR;	
+VAR 
+	t: Tester; 
+	num: LONGINT; 
+	server: ARRAY 64 OF CHAR;
+	params: AosCommands.Parameters;
+	strReader: AosIO.StringReader;
+	
 BEGIN
-	In.Open; In.String(server); In.LongInt(num);
-	IF In.Done & (num > 0) THEN
-		NEW(t, server, num, EchoPort)
-	END
+	params := par(AosCommands.Parameters);
+	NEW(strReader, LEN(params.str^));
+	strReader.Set(params.str^);
+	strReader.SkipWhitespace;
+	
+	strReader.String(server); strReader.SkipWhitespace;
+	strReader.Int(num, FALSE); strReader.SkipWhitespace;
+
+	NEW(t, server, num, EchoPort);
+
+	RETURN NIL;
 END Echo;
 
 BEGIN
-	Texts.OpenWriter(w); NEW(buf, BufSize)
+	NEW(buf, BufSize)
 END AosBenchTCP.
 
-AosBenchTCP.Discard "192.168.0.2" 1000
+AosBenchTCP.Discard 192.168.0.2 1000
 AosBenchTCP.Discard portnoy.ethz.ch 10
-AosBenchTCP.Discard lillian.ethz.ch 40
+AosBenchTCP.Discard lillian.ethz.ch 40000
 AosBenchTCP.Discard bluebottle.ethz.ch 40
 
-AosBenchTCP.Echo lillian.ethz.ch 40
+AosBenchTCP.Echo lillian.ethz.ch 40000 ~
 AosBenchTCP.Echo bluebottle.ethz.ch 40
+
+AosBenchTCP.Echo FE80::230:1BFF:FEAF:EEF2 100000~
+AosBenchTCP.Discard FE80::230:1BFF:FEAF:EEF2 100000~
+S.Free AosBenchTCP

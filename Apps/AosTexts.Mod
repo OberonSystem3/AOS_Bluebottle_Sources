@@ -1,7 +1,8 @@
 MODULE AosTexts;	(** AUTHOR "TF"; PURPOSE "Basic Unicode text system"; *)
 
 IMPORT
-		AosOut, AosActive, AosKernel, WMEvents, WMLocks, Utilities;
+		AosOut, AosIO, AosActive, AosKernel, WMEvents, WMLocks, Utilities, FP1616,
+		XML, XMLParser, XMLScanner, XMLObjects, AosFS;
 
 CONST TraceHard = FALSE;
 
@@ -13,7 +14,9 @@ CONST
 	CR = 0DX; LF = 0AX;
 	NewLineChar* = 10;
 	TabChar* = 9;
+	SpaceChar* = 32;
 	ObjectChar* = -1;
+	LabelChar* = -2;
 	UsePieceTable = TRUE;
 		
 TYPE
@@ -22,7 +25,7 @@ TYPE
 	Char32* = LONGINT;
 	
 	FontInfo* = OBJECT
-	VAR fontcache* : PTR;
+	VAR fontcache* : ANY;
 		name* : ARRAY 32 OF CHAR;
 		size* : LONGINT;
 		style* : SET;
@@ -45,6 +48,17 @@ TYPE
 	VAR color*, bgcolor* : LONGINT;
 		voff* : LONGINT;
 		fontInfo* : FontInfo;
+		
+		PROCEDURE Set* (color, bgcolor, voff : LONGINT; name : ARRAY OF CHAR; size : LONGINT; style : SET);
+		BEGIN
+			SELF.color := color;
+			SELF.bgcolor := bgcolor;
+			SELF.voff := voff;
+			NEW(fontInfo);
+			COPY(name, fontInfo.name);
+			fontInfo.size := size;
+			fontInfo.style := style
+		END Set;
 			
 		PROCEDURE IsEqual*(attr : Attributes) : BOOLEAN;
 		BEGIN
@@ -60,16 +74,146 @@ TYPE
 			RETURN a
 		END Clone;
 	END Attributes;
+
+	AttributeChangerProc* = PROCEDURE {DELEGATE} (VAR attributes : Attributes; userData : ANY);
+	
+	StyleChangedMsg* = OBJECT
+	END StyleChangedMsg;
+
+	ParagraphStyle* = OBJECT
+	VAR name* : ARRAY 128 OF CHAR;				(* name of the paragraph style *)
+		alignment* : LONGINT;						(* 0 = left, 1 = center, 2 = right, 3 = justified *)
+		spaceBefore* : LONGINT;					(* space before paragraph [mm] *)
+		spaceAfter* : LONGINT;						(* space after paragrapg [mm] *)
+		leftIndent* : LONGINT;						(* left Indent [mm] *)
+		rightIndent* : LONGINT;						(* right Indent [mm] *)
+		firstIndent* : LONGINT;						(* first Line Indent [mm] *)
+		charStyle* : CharacterStyle;					(* default character style *)
+		tabStops* : ARRAY 256 OF CHAR;			(* tabStop String *)
+		
+		PROCEDURE IsEqual*(style : ParagraphStyle) : BOOLEAN;
+		BEGIN
+			RETURN (style # NIL) & (name = style.name) & (alignment = style.alignment) & (spaceBefore = style.spaceBefore) &
+				(spaceAfter = style.spaceAfter) & (leftIndent = style.leftIndent) & (rightIndent = style.rightIndent) &
+				(firstIndent = style.firstIndent) & (charStyle = style.charStyle) & (tabStops = style.tabStops)
+		END IsEqual;
+		
+		PROCEDURE Clone*(): ParagraphStyle;
+		VAR newStyle : ParagraphStyle;
+			newName : ARRAY 128 OF CHAR;
+		BEGIN
+			NEW(newStyle);
+			COPY(name,newName);
+			Utilities.Append(newName,"COPY");
+			WHILE GetParagraphStyleByName(newName) # NIL DO
+				Utilities.Append(newName,"COPY");
+			END;
+			COPY(newName, newStyle.name);
+			newStyle.alignment := alignment;
+			newStyle.spaceBefore := spaceBefore;
+			newStyle.spaceAfter := spaceAfter;
+			newStyle.leftIndent := leftIndent;
+			newStyle.rightIndent := rightIndent;
+			newStyle.firstIndent := firstIndent;
+			newStyle.charStyle := charStyle;
+			COPY(tabStops, newStyle.tabStops);
+			
+			RETURN newStyle;
+		END Clone;
+			
+	END ParagraphStyle;
+	
+	ParagraphStyleArray* = POINTER TO ARRAY OF ParagraphStyle;
+		
+	CharacterStyle* = OBJECT
+	VAR fontcache* : PTR;
+		name* : ARRAY 128 OF CHAR;				(* name of the character style *)
+		family* : ARRAY 32 OF CHAR;				(* font family *)
+		style* : SET;									(* font style; 0 = bold, 1 = italic *)
+		size* : LONGINT;							(* font size [pt]; 1pt == 1/72inch == 0,3527777778mm *)
+		leading* : LONGINT;							(* baseline distance [pt] - usually 120% of font size *)
+		baselineShift* : LONGINT;					(* baseline shift up/down [pt] *)
+		tracking* : LONGINT;						(* character spacing [pt] *)
+
+		scaleHorizontal* : LONGINT;					(* horizontal character scale *)
+		scaleVertical* : LONGINT;					(* vertical character scale *)
+		color* : LONGINT;							(* character color *)
+		bgColor* : LONGINT;						(* character background color *);	
+		
+		PROCEDURE &New;
+		BEGIN
+			fontcache := NIL;
+		END New;
+		
+		PROCEDURE IsEqual*(cstyle : CharacterStyle) : BOOLEAN;
+		BEGIN
+			RETURN (cstyle # NIL) & (name = cstyle.name) & (family = cstyle.family) & (style = cstyle.style) & (leading = cstyle.leading) &
+			(baselineShift = cstyle.baselineShift) & (tracking = cstyle.tracking) & 
+			(scaleHorizontal = cstyle.scaleHorizontal) & (scaleVertical = cstyle.scaleVertical) & (color = cstyle.color) &
+			(bgColor = cstyle.bgColor)
+		END IsEqual;
+			
+		PROCEDURE Clone*(): CharacterStyle;
+		VAR newStyle : CharacterStyle;
+			newName : ARRAY 128 OF CHAR;
+		BEGIN
+			NEW(newStyle);
+			COPY(name, newName);
+			Utilities.Append(newName, "COPY");
+			WHILE GetCharacterStyleByName(newName) # NIL DO
+				Utilities.Append(newName,"COPY");
+			END;
+			COPY(newName, newStyle.name);
+			COPY(family, newStyle.family);
+			newStyle.style := style;
+			newStyle.size := size;
+			newStyle.leading := leading;
+			newStyle.baselineShift := baselineShift;
+			newStyle.tracking := tracking;
+			newStyle.scaleHorizontal := scaleHorizontal;
+			newStyle.scaleVertical := scaleVertical;
+			newStyle.color := color;
+			newStyle.bgColor := bgColor;
+			
+			RETURN newStyle;
+		END Clone;
+			
+			
+	END CharacterStyle;
+	
+	CharacterStyleArray* = POINTER TO ARRAY OF CharacterStyle;
+	
+CONST HLOver* = 0; HLUnder* = 1; HLWave* = 2; 
+TYPE
+
+	HighlightStyle* = OBJECT
+	VAR kind*: LONGINT;
+	
+		PROCEDURE IsEqual*(hstyle: HighlightStyle) : BOOLEAN;
+		BEGIN
+			RETURN (hstyle # NIL) & (kind = hstyle.kind);
+		END IsEqual;
+	
+	END HighlightStyle;
+	
+	HighlightStyleArray = POINTER TO ARRAY OF HighlightStyle;
+	
+	Link* = Utilities.String;
 	
 	Piece* = OBJECT
 	VAR next*, prev* : Piece;
 		len*, startpos* : LONGINT;
 		attributes* : Attributes;
+		pstyle* : ParagraphStyle;
+		cstyle* : CharacterStyle;
+	(* 	hstyle* : HighlightStyle; *)
+		link* : Link;
 		
 		(** Return a copy of the piece, prev/next pointers nil and pos 0 *)
 		PROCEDURE Clone*() : Piece;
 		BEGIN
 			HALT(301); (* Abstract *)
+			RETURN NIL
 		END Clone;
 		
 		(** Split the UnicodePiece at pos in text position and return right piece *)
@@ -82,10 +226,11 @@ TYPE
 		PROCEDURE Merge*(right : Piece) : BOOLEAN;
 		BEGIN
 			HALT(301); (* Abstract *)
+			RETURN FALSE
 		END Merge;
 		
 	END Piece;
-	
+		
 	UnicodePiece* = OBJECT(Piece)
 		(** index in text position; index and (index + length) must be in the piece *) 
 		PROCEDURE GetUCS32Buf*(index : LONGINT; length : LONGINT; VAR ucs : UCS32String; VAR res : LONGINT);
@@ -115,7 +260,11 @@ TYPE
 		VAR m : MemUnicodePiece; i : LONGINT;
 		BEGIN
 			NEW(m);
-			m.len := len; IF attributes # NIL THEN m.attributes := attributes.Clone() END;
+			m.len := len;
+			IF attributes # NIL THEN m.attributes := attributes.Clone() END;
+			IF cstyle # NIL THEN m.cstyle := cstyle END;
+			IF pstyle # NIL THEN m.pstyle := pstyle END;
+			IF link # NIL THEN m.link := link END;
 			NEW(m.buffer, LEN(buffer));
 			FOR i := 0 TO LEN(buffer) - 1 DO m.buffer[i] := buffer[i] END;
 			RETURN m
@@ -146,7 +295,11 @@ TYPE
 			IF pos - startpos < len THEN
 				(* create right part *)
 				NEW(mp); 
-				IF attributes # NIL THEN mp.attributes := attributes.Clone() END; NEW(mp.buffer, len - (pos - startpos)); 
+				IF attributes # NIL THEN mp.attributes := attributes.Clone() END;
+				IF cstyle # NIL THEN mp.cstyle := cstyle END;
+				IF pstyle # NIL THEN mp.pstyle := pstyle END;
+				IF link # NIL THEN mp.link := link END;		
+				NEW(mp.buffer, len - (pos - startpos)); 
 				mp.len := len - (pos - startpos); mp.startpos := pos;
 				j := 0; FOR i := pos - startpos TO len - 1 DO mp.buffer[j] := buffer[i]; INC(j) END;
 				(* adjust own length *)
@@ -166,9 +319,14 @@ TYPE
 		VAR temp : PUCS32String;
 			i, j : LONGINT;
 		BEGIN
-			IF right = SELF THEN AosOut.String("Shit happens "); AosOut.Ln END;
-			IF (right # NIL) & (right IS MemUnicodePiece) & (right # SELF) &
+			IF right = NIL THEN RETURN FALSE END;
+			IF right = SELF THEN AosOut.String("Consistency Check in AosTexts Failed"); AosOut.Ln END;
+			IF (right.len > 1) & (right.next = NIL) THEN RETURN FALSE END; (* avoid overgreedily merging *)
+			IF  (right IS MemUnicodePiece) & (right # SELF) &
 				((attributes = NIL) & (right.attributes = NIL) OR (attributes # NIL) & attributes.IsEqual(right.attributes)) &
+				((cstyle = NIL) & (right.cstyle = NIL) & (pstyle = NIL) & (right.pstyle = NIL) OR
+				(cstyle # NIL) & cstyle.IsEqual(right.cstyle) & (pstyle # NIL) & pstyle.IsEqual(right.pstyle)) &					
+				(link = right.link) &
 				(len < 1000) THEN
 				NEW(temp, len + right.len);
 				FOR i := 0 TO len - 1 DO temp[i] := buffer[i] END;
@@ -198,7 +356,11 @@ TYPE
 		VAR p : ObjectPiece;
 		BEGIN
 			NEW(p);
-			p.len := len; IF attributes # NIL THEN p.attributes := attributes.Clone() END;
+			p.len := len;
+			IF attributes # NIL THEN p.attributes := attributes.Clone() END;
+			IF cstyle # NIL THEN p.cstyle := cstyle END;
+			IF pstyle # NIL THEN p.pstyle := pstyle END;
+			IF link # NIL THEN p.link := link END;	
 			p.object := object;
 			RETURN p
 		END Clone;
@@ -206,11 +368,11 @@ TYPE
 		PROCEDURE Split*(pos : LONGINT; VAR right : Piece);
 		VAR mp : ObjectPiece; p : Piece; i, j : LONGINT;
 		BEGIN
-			AosOut.String("objpiece split"); AosOut.Ln;
+(*			AosOut.String("objpiece split"); AosOut.Ln;
 			AosOut.String("Split of a len = 1 piece should never happen"); AosOut.Ln;
-			IF pos - startpos < len THEN
+*)			IF pos - startpos < len THEN
 				AosOut.String("Should never happen"); AosOut.Ln;
-			ELSE right := next; AosOut.String("Huga right is next"); AosOut.Ln;
+			ELSE right := next; (* AosOut.String("Huga right is next"); AosOut.Ln; *)
 			END
 		END Split;
 		
@@ -220,6 +382,42 @@ TYPE
 			RETURN FALSE
 		END Merge;
 	END ObjectPiece;
+	
+	LabelPiece* = OBJECT(Piece)
+	VAR label* : Utilities.String;
+	
+		PROCEDURE &Init;
+		BEGIN
+			len := 1
+		END Init;
+		
+		(** Return a copy of the piece, prev/next pointers nil and pos 0 *)
+		PROCEDURE Clone*() : Piece;
+		VAR p :  LabelPiece;
+		BEGIN
+			NEW(p);
+			p.len := len;
+			p.label := label;
+			RETURN p
+		END Clone;
+		
+		PROCEDURE Split*(pos : LONGINT; VAR right : Piece);
+		VAR mp : LabelPiece; p : Piece; i, j : LONGINT;
+		BEGIN
+(*			AosOut.String("objpiece split"); AosOut.Ln;
+			AosOut.String("Split of a len = 1 piece should never happen"); AosOut.Ln;
+*)			IF pos - startpos < len THEN
+				AosOut.String("Should never happen"); AosOut.Ln;
+			ELSE right := next; (* AosOut.String("Huga right is next"); AosOut.Ln; *)
+			END
+		END Split;
+		
+		(** Merge right to self; return true if ok *)
+		PROCEDURE Merge*(right : Piece) : BOOLEAN;
+		BEGIN
+			RETURN FALSE
+		END Merge;
+	END LabelPiece;	
 	
 	(** a TextPosition is assigned to a text and positioned with SetPosition. If
 		the text is changed after the position was set, the position is updated *)
@@ -239,8 +437,14 @@ TYPE
 			IF TraceHard THEN 
 				AosOut.String("TextPosition : ChangeRequest"); AosOut.Int(op, 5); AosOut.Int(pos, 5); AosOut.Int(len, 5);AosOut.Ln;
 			END;
-			IF (position >= pos) & (op = OpInsert) THEN INC(position, len) 
-			ELSIF (position > pos) & (op = OpDelete) THEN DEC(position, len) 
+			IF (position >= pos) & (op = OpInsert) THEN INC(position, len)
+			ELSIF (position >= pos) & (position <= pos + len)  & (op = OpDelete) THEN position := pos
+			ELSIF (position > pos) & (op = OpDelete) THEN 
+				IF position < len THEN AosOut.String("WRONG"); AosOut.String(" pos ="); AosOut.Int(pos, 5); 
+				AosOut.String(" len ="); AosOut.Int(len, 5);
+				AosOut.String(" position = "); AosOut.Int(position, 0); AosOut.Ln; 
+				AosOut.Ln END;
+				DEC(position, len)
 			END
 		END Changed;
 		
@@ -266,6 +470,9 @@ TYPE
 		voff-, color-, bgcolor- : LONGINT;
 		font- : FontInfo;
 		attributes- : Attributes;
+		cstyle- : CharacterStyle;
+		pstyle- : ParagraphStyle;
+		link- : Link;
 		object- : PTR;
 			
 		PROCEDURE &New*(t : UnicodeText);
@@ -280,18 +487,31 @@ TYPE
 		END Changed;
 		
 		PROCEDURE ReadCh*(VAR ucs32 : LONGINT); 
-		VAR buf : ARRAY 2 OF LONGINT; res : LONGINT;
+		VAR buf : ARRAY 2 OF LONGINT; res : LONGINT; tfont: FontInfo;
+			tempObj : ObjectPiece;
 		BEGIN
 			eot := (backwards) & (position = 0) OR (~backwards) & (position = text.GetLength());
 			IF eot THEN ucs32 := 0; RETURN END;
 			IF (piece = NIL) OR (piece.startpos > position) OR (piece.startpos + piece.len <= position) THEN 
 				text.FindPiece(position, piece);
-				IF (piece # NIL) & (piece IS ObjectPiece) THEN object := piece(ObjectPiece).object;
+				IF (piece # NIL) & (piece IS ObjectPiece) THEN tempObj := piece(ObjectPiece); object := tempObj.object;
+				ELSIF (piece # NIL) & (piece IS LabelPiece) THEN object := piece(LabelPiece);
 				ELSE object := NIL
 				END;
 				IF piece = NIL THEN res := -1; ucs32 := 0; RETURN END;
 				attributes := piece.attributes;
-				IF attributes # NIL THEN voff := attributes.voff; color := attributes.color; bgcolor := attributes.bgcolor; font := attributes.fontInfo
+				cstyle := piece.cstyle;
+				pstyle := piece.pstyle;
+				link := piece.link;
+				IF cstyle # NIL THEN
+					voff := cstyle.baselineShift; color := cstyle.color; bgcolor := cstyle.bgColor;
+					NEW(tfont); COPY(cstyle.family, tfont.name); tfont.size := ENTIER(FP1616.FixpToFloat(cstyle.size)); tfont.style := cstyle.style;
+					font := tfont;
+				ELSIF pstyle # NIL THEN
+					voff := pstyle.charStyle.baselineShift; color := pstyle.charStyle.color; bgcolor := pstyle.charStyle.bgColor;
+					NEW(tfont); COPY(pstyle.charStyle.family, tfont.name); tfont.size := ENTIER(FP1616.FixpToFloat(pstyle.charStyle.size)); tfont.style := pstyle.charStyle.style;
+					font := tfont;
+				ELSIF attributes # NIL THEN voff := attributes.voff; color := attributes.color; bgcolor := attributes.bgcolor; font := attributes.fontInfo
 				ELSE voff := 0; color := 0FFH; bgcolor := 0; font := NIL
 				END;
 			END;
@@ -305,6 +525,7 @@ TYPE
 			END;
 			IF piece IS UnicodePiece THEN piece(UnicodePiece).GetUCS32(position, ucs32)
 			ELSIF piece IS ObjectPiece THEN ucs32 := ObjectChar
+			ELSIF piece IS LabelPiece THEN ucs32 := LabelChar
 			END;	
 			IF backwards THEN DEC(position) ELSE INC(position) END
 		END ReadCh;
@@ -321,6 +542,53 @@ TYPE
 	VAR timestamp*, op*, pos*, len* : LONGINT;
 	END TextChangeInfo;
 	
+
+	UndoManager*= OBJECT				
+		
+		PROCEDURE InsertText*(pos: LONGINT; text: Text);
+		BEGIN
+			
+		END InsertText;
+
+		PROCEDURE DeleteText*(pos: LONGINT; text: Text);
+		BEGIN
+			
+		END DeleteText;
+		
+		PROCEDURE BeginObjectChange*(pos: LONGINT);
+		BEGIN
+			
+		END BeginObjectChange;
+						
+		PROCEDURE ObjectChanged*(pos, len, type: LONGINT; obj: ANY);
+		BEGIN
+			
+		END ObjectChanged;
+		
+		PROCEDURE EndObjectChange*(len, type: LONGINT; to: ANY);
+		BEGIN
+			
+		END EndObjectChange;
+		
+		PROCEDURE SetText*(text: Text);
+		BEGIN
+		
+		END SetText;		
+		
+		PROCEDURE Undo*;
+		BEGIN
+			
+		END Undo;						
+		
+		PROCEDURE Redo*;
+		BEGIN
+			
+		END Redo;
+		
+													
+	END UndoManager;
+	
+
 TYPE
 	(** UnicodeText offers an editable unicode text abstraction, basing on UnicodePiece *)
 	UnicodeText* = OBJECT
@@ -338,6 +606,8 @@ TYPE
 		pieceTableOk : BOOLEAN;
 		pieceTable : POINTER TO ARRAY OF Piece;
 		
+		um: UndoManager;
+		
 		PROCEDURE &New;
 		BEGIN
 			NEW(lock);
@@ -348,6 +618,14 @@ TYPE
 			nofPieces := 0;
 			NEW(onTextChanged, SELF, onTextChangedStr, NIL, NIL);
 		END New;
+		
+		PROCEDURE SetUndoManager*(u: UndoManager);
+		BEGIN
+			um := u;
+			IF um # NIL THEN 
+				um.SetText(SELF) 
+			END
+		END SetUndoManager;										
 		
 		(** acquire a write lock on the object *)
 		PROCEDURE AcquireWrite*;
@@ -389,13 +667,12 @@ TYPE
 		PROCEDURE UpdatePieceTable;
 		VAR cur : Piece; len, i : LONGINT;
 		BEGIN
-			IF LEN(pieceTable^) < nofPieces THEN NEW(pieceTable, nofPieces + Utilities.Max(256, nofPieces DIV 2)) END;
+			IF LEN(pieceTable^) < nofPieces THEN NEW(pieceTable, nofPieces * 2) END;
 			len := LEN(pieceTable^);
 			cur := first; i := 0; pieceTable[0] := first;
 			WHILE (cur # NIL) & (i < len) DO pieceTable[i] := cur; cur := cur.next; INC(i) END;
 			pieceTableOk := i = nofPieces;
-			IF ~pieceTableOk THEN 
-			AosOut.Int(i, 0); AosOut.String(" vs "); AosOut.Int(nofPieces, 0); AosOut.Ln END;
+			IF ~pieceTableOk THEN AosOut.Int(i, 0); AosOut.String(" vs "); AosOut.Int(nofPieces, 0); AosOut.Ln END;
 		END UpdatePieceTable;
 		
 		(* Return the piece that contains pos or the last piece if pos is not found *)
@@ -446,7 +723,10 @@ TYPE
 		
 		PROCEDURE AccumulateChanges(op, pos, len : LONGINT);
 		BEGIN
-			IF upOp >= 0 THEN upOp := OpMulti
+			IF upOp >= 0 THEN 
+				IF (upOp = OpInsert) & (op = OpAttributes) & (pos = upPos) & (len = upLen) THEN (* ignore *)
+				ELSE upOp := OpMulti
+				END	
 			ELSE upOp := op; upPos := pos; upLen := len
 			END;
 		END AccumulateChanges;
@@ -496,43 +776,71 @@ TYPE
 					IF nofPieces < LEN(pieceTable^) THEN pieceTable[nofPieces - 1] := n
 					ELSE pieceTableOk := FALSE
 					END 
-				ELSE pieceTableOk := FALSE
+				ELSE pieceTableOk := FALSE 
 				END;
 				cur := n; WHILE cur # NIL DO cur.startpos := pos; INC(pos, cur.len); cur := cur.next END;
 				cur := n; IF cur.Merge(cur.next) THEN DEC(nofPieces); pieceTableOk := FALSE END; 
 				IF (cur.prev # NIL) & cur.prev.Merge(cur) THEN DEC(nofPieces); pieceTableOk := FALSE END
 			END;
 			AccumulateChanges(OpInsert, chpos, chlen);
-			UpdatePositionObjects(OpInsert, chpos, chlen)
+			UpdatePositionObjects(OpInsert, chpos, chlen)			
 		END InsertPiece;
+		
+		PROCEDURE InsertObject*(obj: XML.Element);
+		BEGIN
+			
+		END InsertObject;
+		
 		
 		(** Insert a UCS32 buffer at position pos into the text. Index in characters/objects *)
 		PROCEDURE InsertUCS32* (pos : LONGINT; VAR buf : UCS32String);
 		VAR n : MemUnicodePiece;
-			p : Piece;
+			p : Piece; 
+			t: Text;
 		BEGIN 
 			ASSERT(lock.HasWriteLock(), 3000);
 			IF buf[0] = 0 THEN RETURN END;
 			IF pos > GetLength() THEN pos := GetLength() END;
 			NEW(n); n.SetBuf(buf); 
 			FindPiece(pos, p);
-			IF (p # NIL) THEN n.attributes := p.attributes END;
-			InsertPiece(pos, n)
+			IF (p # NIL) THEN
+				n.attributes := p.attributes;
+				n.cstyle := p.cstyle;
+				n.pstyle := p.pstyle;
+				n.link := p.link;			
+			END;			
+			IF um # NIL THEN 
+				NEW(t); 
+				t.AcquireWrite;
+				t.InsertUCS32(0, buf); 
+				um.InsertText(pos, t);
+				t.ReleaseWrite;
+			END;
+			InsertPiece(pos, n);
 		END InsertUCS32;
 		
 		(** Delete len characters from position pos  *)
 		PROCEDURE Delete* (pos, len : LONGINT);
 		VAR al, ar, bl, br, cur: Piece;
-			p : LONGINT;
+			p : LONGINT; t: Text;
 		BEGIN 
 			ASSERT(lock.HasWriteLock(), 3000);
 			INC(timestamp); 
-			(* don't do illegal changes *)
+			(* don't do illegal changes *)			
 			IF (len <= 0) OR (pos < 0) OR (pos + len > length) OR (first = NIL) THEN RETURN END; 
 			IF length = 0 THEN first := NIL; nofPieces := 0; pieceTableOk := FALSE
-			ELSE
+			ELSE			
 				GetSplittedPos(pos, al, ar);
 				GetSplittedPos(pos + len, bl, br);
+												
+				IF um # NIL THEN 
+					NEW(t); 
+					t.AcquireWrite;
+					t.CopyFromText(SELF, pos, len, 0);
+					um.DeleteText(pos, t);
+					t.ReleaseWrite;
+				END;
+
 				IF al # NIL THEN
 					cur := al.next; WHILE (cur # NIL) & (cur # br) DO pieceTableOk := FALSE; DEC(nofPieces); cur := cur.next END;
 					al.next := br; IF br # NIL THEN br.prev := al END;
@@ -554,29 +862,97 @@ TYPE
 			UpdatePositionObjects(OpDelete, pos, len)
 		END Delete;
 		
-		(** Copy pos to pos + len to the dest text, starting at destPos. The calling process must have
-			acquired both texts [Must hold lock]. If the destitnation text is the same as SELF, then
-			the destination position must be outside the source range, otherwise the command returns
-			without changing the text *)
-		PROCEDURE CopyToText*(from, len : LONGINT; dest : UnicodeText; destPos : LONGINT);
-		VAR fromP, toP, curP : Piece; pos : LONGINT;
+		PROCEDURE CopyFromText*(fromText: UnicodeText; fromPos, len, destPos : LONGINT);
+		VAR fromP, toP, curP : Piece; pos : LONGINT; t: Text;
 		BEGIN
-			ASSERT(lock.HasReadLock(), 3000);
+			ASSERT(lock.HasWriteLock(), 3000);
+			ASSERT(fromText.lock.HasReadLock(), 3000);
+			ASSERT(fromText # NIL);
+			ASSERT(fromPos >= 0);
+			ASSERT(len >= 0);
+			ASSERT(fromPos + len <= fromText.length);
+			ASSERT(destPos >= 0);			
+			ASSERT((fromText # SELF) OR ((destPos < fromPos) OR (destPos >  fromPos + len))); (* Avoid recursive copy *)
+			
+			fromText.GetSplittedPos(fromPos, curP, fromP);
+			fromText.GetSplittedPos(fromPos + len, curP, toP);
+			
+			curP := fromP; pos := destPos;
+			
+			WHILE (curP # NIL) & (curP # toP) DO
+				InsertPiece(pos, curP.Clone());
+				INC(pos, curP.len);
+				curP := curP.next
+			END ;			
+			
+			IF um # NIL THEN 
+				NEW(t); 
+				t.AcquireWrite;
+				t.CopyFromText(SELF, destPos, len, 0); 
+				um.InsertText(destPos, t);
+				t.ReleaseWrite;
+			END
+						
+		END CopyFromText;		
+		
+		PROCEDURE AttributeChanger(VAR attr : Attributes; userData : ANY);
+		BEGIN
+			IF (userData # NIL) & (userData IS Attributes) THEN attr := userData(Attributes) END;
+		END AttributeChanger;
+		
+		(** Set piece attributes for charater at position pos to pos + len. [Must hold write lock] *)
+		PROCEDURE SetAttributes*(pos, len : LONGINT; attr : Attributes);
+		BEGIN
+			UpdateAttributes(pos, len, AttributeChanger, attr)
+		END SetAttributes;
+		
+		(** Calls the attributeChanger procedure for all pieces so the attributes can be changed. userData 
+			is forwarded to the attributeChanger as context.
+		 [Must hold write lock] *)
+		PROCEDURE UpdateAttributes*(pos, len : LONGINT; attributeChanger : AttributeChangerProc; userData : ANY);
+		VAR al, ar, bl, br, cur : Piece;
+		BEGIN
+			IF len = 0 THEN RETURN END;
 			(* don't do illegal changes *)
 			IF (len <= 0) OR (pos < 0) OR (pos + len > length) OR (first = NIL) THEN RETURN END;
-			(* avoid recursive copy *)
-			IF (dest = SELF) & (destPos >= from) & (destPos <= from + len) THEN RETURN END;
-			GetSplittedPos(from, curP, fromP); GetSplittedPos(from + len, curP, toP);
-			curP := fromP; pos := destPos;
-			IF curP # NIL THEN
-				REPEAT
-					dest.InsertPiece(pos, curP.Clone()); INC(pos, curP.len); curP := curP.next
-				UNTIL (curP = toP) OR (curP = NIL)
-			END	
-		END CopyToText;
+			ASSERT(attributeChanger # NIL);
+			ASSERT(lock.HasWriteLock(), 3000);
+			INC(timestamp);
+			GetSplittedPos(pos, al, ar);
+			GetSplittedPos(pos + len, bl, br);
+			cur := ar;
+			IF um # NIL THEN um.BeginObjectChange(pos) END;
+			WHILE cur # br DO 
+				IF um # NIL THEN 
+					IF cur.attributes = NIL THEN
+						um.ObjectChanged(cur.startpos, cur.len, 102, NIL) 
+					ELSE
+						um.ObjectChanged(cur.startpos, cur.len, 102, cur.attributes.Clone()) 
+					END
+				END;
+				attributeChanger(cur.attributes, userData); 
+				cur := cur.next 
+			END;
+			IF um # NIL THEN 
+				IF userData # NIL THEN
+					um.EndObjectChange(len, 102, userData(Attributes).Clone())  
+				ELSE
+					um.EndObjectChange(len, 102, NIL)
+				END
+			END;
+			(* try merging *)
+			WHILE (cur # NIL) & (cur # al) DO 
+				IF cur.prev # NIL THEN 
+					IF cur.prev.Merge(cur) THEN DEC(nofPieces); pieceTableOk := FALSE END
+				END;	
+				cur := cur.prev 
+			END;
+			AccumulateChanges(OpAttributes, pos, len);
+			UpdatePositionObjects(OpAttributes, pos, len)	
+		END UpdateAttributes;
 		
-		(** Set piece attributes for charater at position pos to pos + len. [Must hold lock] *)
-		PROCEDURE SetAttributes*(pos, len : LONGINT; attr : Attributes);
+		(** Set piece character style for character at position pos to pos + len. [Must hold lock] *)
+		PROCEDURE SetCharacterStyle*(pos, len : LONGINT; cstyle : CharacterStyle);
 		VAR al, ar, bl, br, cur : Piece;
 		BEGIN
 			IF len = 0 THEN RETURN END;
@@ -587,7 +963,13 @@ TYPE
 			GetSplittedPos(pos, al, ar);
 			GetSplittedPos(pos + len, bl, br);
 			cur := ar;
-			WHILE cur # br DO cur.attributes := attr; cur := cur.next END;
+			IF um # NIL THEN um.BeginObjectChange(pos) END;
+			WHILE cur # br DO 
+				IF um # NIL THEN um.ObjectChanged(cur.startpos, cur.len, 100, cur.cstyle) END;
+				cur.cstyle := cstyle; 				
+				cur := cur.next 
+			END;
+			IF um # NIL THEN um.EndObjectChange(len, 100, cstyle)  END;
 			(* try merging *)
 			WHILE (cur # NIL) & (cur # al) DO 
 				IF cur.prev # NIL THEN 
@@ -595,15 +977,67 @@ TYPE
 				END;	
 				cur := cur.prev 
 			END;
-(*			
-			$$$
-			cur.attributes := attr;
-			IF (al # NIL) & al.Merge(al.next) THEN cur := ar.next; DEC(nofPieces); pieceTableOk := FALSE END; 
-			WHILE cur.next # br DO cur.next.attributes := attr; IF cur.Merge(cur.next) THEN  DEC(nofPieces); pieceTableOk:= FALSE END;  cur := cur.next END;
-			IF (bl # NIL) & bl.Merge(bl.next) THEN DEC(nofPieces); pieceTableOk := FALSE END; *)
 			AccumulateChanges(OpAttributes, pos, len);
 			UpdatePositionObjects(OpAttributes, pos, len)
-		END SetAttributes;
+		END SetCharacterStyle;
+		
+		(** Set piece paragraph style for charater at position pos to pos + len. [Must hold lock] *)
+		PROCEDURE SetParagraphStyle*(pos, len : LONGINT; pstyle : ParagraphStyle);
+		VAR al, ar, bl, br, cur : Piece;
+		BEGIN
+			IF len = 0 THEN RETURN END;
+			(* don't do illegal changes *)
+			IF (len <= 0) OR (pos < 0) OR (pos + len > length) OR (first = NIL) THEN RETURN END; 
+			ASSERT(lock.HasWriteLock(), 3000);
+			INC(timestamp);
+			GetSplittedPos(pos, al, ar);
+			GetSplittedPos(pos + len, bl, br);
+			cur := ar;
+			IF um # NIL THEN um.BeginObjectChange(pos) END;
+			WHILE cur # br DO 
+				IF um # NIL THEN um.ObjectChanged(cur.startpos, cur.len, 101, cur.pstyle) END;
+				cur.pstyle := pstyle; 
+				cur := cur.next 
+			END;
+			IF um # NIL THEN um.EndObjectChange(len, 101, pstyle)  END;
+			(* try merging *)
+			WHILE (cur # NIL) & (cur # al) DO 
+				IF cur.prev # NIL THEN 
+					IF cur.prev.Merge(cur) THEN DEC(nofPieces); pieceTableOk := FALSE END
+				END;	
+				cur := cur.prev 
+			END;
+			AccumulateChanges(OpAttributes, pos, len);
+			UpdatePositionObjects(OpAttributes, pos, len)
+		END SetParagraphStyle;		
+		
+		(** Set piece link for charater at position pos to pos + len. [Must hold lock] *)
+		PROCEDURE SetLink*(pos, len : LONGINT; link :Link);
+		VAR al, ar, bl, br, cur : Piece;
+		BEGIN
+			IF TraceHard THEN
+				AosOut.String("Setting Link: "); AosOut.String("pos= "); AosOut.Int(pos, 0);
+				AosOut.String(" length= "); AosOut.Int(len, 0); AosOut.Ln;
+			END;
+			IF len = 0 THEN RETURN END;
+			(* don't do illegal changes *)
+			IF (len <= 0) OR (pos < 0) OR (pos + len > length) OR (first = NIL) THEN RETURN END; 
+			ASSERT(lock.HasWriteLock(), 3000);
+			INC(timestamp);
+			GetSplittedPos(pos, al, ar);
+			GetSplittedPos(pos + len, bl, br);
+			cur := ar;
+			WHILE cur # br DO cur.link := link; cur := cur.next END;
+			(* try merging *)
+			WHILE (cur # NIL) & (cur # al) DO 
+				IF cur.prev # NIL THEN 
+					IF cur.prev.Merge(cur) THEN DEC(nofPieces); pieceTableOk := FALSE END
+				END;	
+				cur := cur.prev 
+			END;
+			AccumulateChanges(OpAttributes, pos, len);
+			UpdatePositionObjects(OpAttributes, pos, len)
+		END SetLink;
 			
 		(** Return length in characters [Must hold lock]*)
 		PROCEDURE GetLength* () : LONGINT;
@@ -683,7 +1117,7 @@ TYPE
 	END UnicodeText;
 	
 	Text* = UnicodeText;
-	
+(* ------------------------------------------------------------------ *)	
 VAR clipboard* : UnicodeText;
 	onTextChangedStr : Utilities.String;
 	
@@ -693,6 +1127,233 @@ VAR clipboard* : UnicodeText;
 	lastText : Text;
 	onLastSelectionChanged-, 
 	onLastTextChanged- : WMEvents.EventSource;
+	
+	pStyles : ParagraphStyleArray; nofPStyles : LONGINT;
+	cStyles : CharacterStyleArray; nofCStyles : LONGINT;	
+	
+(** Insert the given Paragraph Style into the Paragraph Style Array *)
+PROCEDURE AddParagraphStyle*(style: ParagraphStyle);
+VAR newStyles: ParagraphStyleArray;
+	oldStyle: ParagraphStyle;
+	cStyle: CharacterStyle;
+	i : LONGINT;
+BEGIN
+	oldStyle := GetParagraphStyleByName(style.name);
+	IF (oldStyle = NIL) THEN								(* style does not exist yet - create one *)
+		INC(nofPStyles); 
+		IF nofPStyles > LEN(pStyles) THEN
+			NEW(newStyles, LEN(pStyles) * 2);
+			FOR i := 0 TO LEN(pStyles)-1 DO newStyles[i] := pStyles[i]; END;
+			pStyles := newStyles;					
+		END;
+		pStyles[nofPStyles-1] := style;
+	ELSE												(* style does exist - only update style *)
+		oldStyle.alignment := style.alignment;
+		oldStyle.firstIndent := style.firstIndent;
+		oldStyle.leftIndent := style.leftIndent;
+		oldStyle.rightIndent := style.rightIndent;
+		oldStyle.spaceBefore := style.spaceBefore;
+		oldStyle.spaceAfter := style.spaceAfter;
+		cStyle := GetCharacterStyleByName(style.charStyle.name);
+		IF cStyle # NIL THEN	oldStyle.charStyle := cStyle; END;
+		COPY(style.tabStops, oldStyle.tabStops);
+	END;			
+END AddParagraphStyle;
+
+(** Remove the given Paragraph Style from the Paragraph Style Array *)
+PROCEDURE RemoveParagraphStyle*(style: ParagraphStyle);
+VAR i : LONGINT;
+BEGIN
+	i := 0; WHILE (i < nofPStyles) & (pStyles[i] # style) DO INC(i) END;
+	IF i < nofPStyles THEN
+		WHILE (i < nofPStyles-1) DO pStyles[i] := pStyles[i+1]; INC(i); END;
+		DEC(nofPStyles);
+		pStyles[nofPStyles] := NIL;
+	END;
+END RemoveParagraphStyle;
+
+(** Return the Paragraph Style with the given Name if any *)
+PROCEDURE GetParagraphStyleByName*(name: ARRAY OF CHAR): ParagraphStyle;
+VAR styleObject: ParagraphStyle;
+	i : LONGINT;
+	found : BOOLEAN;
+	match: Utilities.String;
+BEGIN
+	styleObject := NIL;
+	i := 0; found := FALSE;
+	WHILE ((i < nofPStyles) & ~found) DO
+		match := Utilities.NewString(pStyles[i].name);
+		IF Utilities.Match(match^, name) THEN
+			styleObject := pStyles[i]; found := TRUE;
+		END;
+		INC(i);
+	END;
+	RETURN styleObject;
+END GetParagraphStyleByName;
+
+(** Insert the given Character Style into the Character Style Array *)
+PROCEDURE AddCharacterStyle*(style: CharacterStyle);
+VAR newStyles: CharacterStyleArray;
+	oldStyle: CharacterStyle;
+	i : LONGINT;
+BEGIN
+	oldStyle := GetCharacterStyleByName(style.name);
+	IF (oldStyle = NIL) THEN								(* style does not exist yet - create one *)
+		INC(nofCStyles); 
+		IF nofCStyles > LEN(cStyles) THEN
+			NEW(newStyles, LEN(cStyles) * 2);
+			FOR i := 0 TO LEN(cStyles)-1 DO newStyles[i] := cStyles[i]; END;
+			cStyles := newStyles;					
+		END;
+		cStyles[nofCStyles-1] := style;
+	ELSE												(* style does exist - only update style *)
+		IF ~oldStyle.IsEqual(style) THEN
+			oldStyle.fontcache := NIL;
+			COPY(style.family, oldStyle.family);
+			oldStyle.style := style.style;
+			oldStyle.size := style.size;
+			oldStyle.leading := style.leading;
+			oldStyle.baselineShift := style.baselineShift;
+			oldStyle.color := style.color;
+			oldStyle.bgColor := style.bgColor;
+			oldStyle.tracking := style.tracking;
+			oldStyle.scaleHorizontal := style.scaleHorizontal;
+			oldStyle.scaleVertical := style.scaleVertical;
+		END;
+	END;		
+END AddCharacterStyle;
+
+(** Remove the given Character Style from  the Character Style Array *)
+PROCEDURE RemoveCharacterStyle*(style: CharacterStyle);
+VAR i : LONGINT;
+BEGIN
+	i := 0; WHILE (i < nofCStyles) & (cStyles[i] # style) DO INC(i) END;
+	IF i < nofCStyles THEN
+		WHILE (i < nofCStyles-1) DO cStyles[i] := cStyles[i+1]; INC(i); END;
+		DEC(nofCStyles);
+		cStyles[nofCStyles] := NIL;
+	END;
+END RemoveCharacterStyle;
+
+(** Returns the Character Style with the given Name if any *)
+PROCEDURE GetCharacterStyleByName*(name: ARRAY OF CHAR): CharacterStyle;
+VAR styleObject: CharacterStyle;
+	i : LONGINT;
+	found : BOOLEAN;
+	match: Utilities.String;
+BEGIN
+	styleObject := NIL;
+	i := 0; found := FALSE;
+	WHILE ((i < nofCStyles) & ~found) DO
+		match := Utilities.NewString(cStyles[i].name);
+		IF Utilities.Match(match^, name) THEN
+			styleObject := cStyles[i]; found := TRUE;
+		END;
+		INC(i);
+	END;
+	RETURN styleObject;
+END GetCharacterStyleByName;
+
+PROCEDURE GetCharacterStyleArray*(): CharacterStyleArray;
+BEGIN
+	RETURN cStyles;
+END GetCharacterStyleArray;
+
+PROCEDURE GetParagraphStyleArray*(): ParagraphStyleArray;
+BEGIN
+	RETURN pStyles;
+END GetParagraphStyleArray;
+
+(* loads the default styles from the default-style XML *)
+PROCEDURE InitDefaultStyles;
+VAR reader : AosFS.Reader;
+	f : AosFS.File;
+
+BEGIN
+	(* Load Default Styles *)
+	f := AosFS.Old("DefaultTextStyles.XML");
+	IF f = NIL THEN RETURN END;
+	NEW(reader, f, 0);
+	LoadStyles(reader, FALSE);
+	(* Load User Styles *)
+	f := AosFS.Old("UserTextStyles.XML");
+	IF f = NIL THEN RETURN END;
+	NEW(reader, f, 0);
+	LoadStyles(reader, FALSE);		
+
+END InitDefaultStyles;
+
+(* loads the styles from the given reader *)
+PROCEDURE LoadStyles*(r: AosIO.Reader; verbose: BOOLEAN);
+VAR parser : XMLParser.Parser;
+	scanner : XMLScanner.Scanner;
+	defaultStyles : XML.Document;
+	root: XML.Element;
+	content : XMLObjects.Enumerator;
+	ptr : ANY;
+	str, name : Utilities.String;
+	cStyle : CharacterStyle;
+	pStyle : ParagraphStyle;
+	tempReal: LONGREAL; tempInt, tempRes : LONGINT; tempBool: BOOLEAN;
+
+BEGIN
+	NEW(scanner, r);
+	NEW(parser, scanner);
+	defaultStyles := parser.Parse();
+	
+	root := defaultStyles.GetRoot();
+	content := root.GetContents(); content.Reset();
+	WHILE content.HasMoreElements() DO
+		ptr := content.GetNext();
+		IF ptr IS XML.Element THEN 
+			str := ptr(XML.Element).GetName();
+			
+			IF (str # NIL) & (str^ = "character-style") THEN					(* character styles *)
+				NEW(cStyle);
+				str := ptr(XML.Element).GetAttributeValue("name"); IF str # NIL THEN COPY(str^, cStyle.name) END;
+				str := ptr(XML.Element).GetAttributeValue("font-family"); IF str # NIL THEN COPY(str^, cStyle.family) END;
+				str := ptr(XML.Element).GetAttributeValue("font-style");
+				IF str # NIL THEN
+					IF (str^ = "0") THEN cStyle.style := {};
+					ELSIF (str^ = "1") THEN cStyle.style := {0};
+					ELSIF (str^ = "2") THEN cStyle.style := {1};
+					ELSIF (str^ = "3") THEN cStyle.style := {0,1};
+					ELSE cStyle.style := {};
+					END;
+				END;
+				str := ptr(XML.Element).GetAttributeValue("font-size"); IF str # NIL THEN Utilities.StrToFloat(str^, tempReal); cStyle.size := FP1616.FloatToFixp(SHORT(tempReal)); END;
+				str := ptr(XML.Element).GetAttributeValue("leading"); IF str # NIL THEN Utilities.StrToFloat(str^, tempReal); cStyle.leading := FP1616.FloatToFixp(SHORT(tempReal)); END;
+				str := ptr(XML.Element).GetAttributeValue("baseline-shift"); IF str # NIL THEN Utilities.StrToFloat(str^, tempReal); cStyle.baselineShift := FP1616.FloatToFixp(SHORT(tempReal)); END;
+				str := ptr(XML.Element).GetAttributeValue("color"); IF str # NIL THEN Utilities.HexStrToInt(str^, tempInt, tempRes); cStyle.color := tempInt; END;
+				str := ptr(XML.Element).GetAttributeValue("bgcolor"); IF str # NIL THEN Utilities.HexStrToInt(str^, tempInt, tempRes); cStyle.bgColor := tempInt; END;
+				str := ptr(XML.Element).GetAttributeValue("tracking"); IF str # NIL THEN Utilities.StrToFloat(str^, tempReal); cStyle.tracking := FP1616.FloatToFixp(SHORT(tempReal)); END;
+				str := ptr(XML.Element).GetAttributeValue("h-scale"); IF str # NIL THEN Utilities.StrToFloat(str^, tempReal); cStyle.scaleHorizontal := FP1616.FloatToFixp(SHORT(tempReal)); END;
+				str := ptr(XML.Element).GetAttributeValue("v-scale"); IF str # NIL THEN Utilities.StrToFloat(str^, tempReal); cStyle.scaleVertical := FP1616.FloatToFixp(SHORT(tempReal)); END;
+				AddCharacterStyle(cStyle);									(* Load the Style into AosTexts *)
+				IF verbose THEN AosOut.String("AosTexts Loading Character Style: "); AosOut.String(cStyle.name); AosOut.Ln; END;
+			
+			ELSIF (str # NIL) & (str^ = "paragraph-style") THEN				(* paragraph styles *)
+				NEW(pStyle);
+				str := ptr(XML.Element).GetAttributeValue("name"); IF str # NIL THEN COPY(str^, pStyle.name) END;
+				str := ptr(XML.Element).GetAttributeValue("alignment"); IF str # NIL THEN Utilities.StrToInt(str^, pStyle.alignment) END;
+				str := ptr(XML.Element).GetAttributeValue("first-indent"); IF str # NIL THEN Utilities.StrToFloat(str^, tempReal); pStyle.firstIndent := FP1616.FloatToFixp(SHORT(tempReal)); END;
+				str := ptr(XML.Element).GetAttributeValue("left-indent"); IF str # NIL THEN Utilities.StrToFloat(str^, tempReal); pStyle.leftIndent := FP1616.FloatToFixp(SHORT(tempReal)); END;
+				str := ptr(XML.Element).GetAttributeValue("right-indent"); IF str # NIL THEN Utilities.StrToFloat(str^, tempReal); pStyle.rightIndent :=  FP1616.FloatToFixp(SHORT(tempReal)); END;
+				str := ptr(XML.Element).GetAttributeValue("space-before"); IF str # NIL THEN Utilities.StrToFloat(str^, tempReal); pStyle.spaceBefore := FP1616.FloatToFixp(SHORT(tempReal)); END;
+				str := ptr(XML.Element).GetAttributeValue("space-after"); IF str # NIL THEN Utilities.StrToFloat(str^, tempReal); pStyle.spaceAfter := FP1616.FloatToFixp(SHORT(tempReal)); END;
+				str := ptr(XML.Element).GetAttributeValue("character-style"); 
+				IF str # NIL THEN
+					cStyle := GetCharacterStyleByName(str^);
+					IF cStyle # NIL THEN pStyle.charStyle := cStyle; END;
+				END;
+				str := ptr(XML.Element).GetAttributeValue("tab-stops"); IF str # NIL THEN COPY(str^, pStyle.tabStops) END;
+				AddParagraphStyle(pStyle);									(* Load the Style into AosTexts *)
+				IF verbose THEN AosOut.String("AosTexts Loading Paragraph Style: "); AosOut.String(pStyle.name); AosOut.Ln; END;
+			END;
+		END;	
+	END;	
+
+END LoadStyles;
 
 PROCEDURE SetLastSelection*(text : Text; from, to : TextPosition);
 BEGIN 
@@ -727,7 +1388,18 @@ BEGIN {EXCLUSIVE}
 	RETURN lastText
 END GetLastText;
 
+PROCEDURE GetDefaultAttributes* () : Attributes;
+VAR defaultAttributes : Attributes;
 BEGIN
+	NEW(defaultAttributes);
+	defaultAttributes.Set(0FFH, 0H, 0, "Oberon", 10, {});
+	RETURN defaultAttributes
+END GetDefaultAttributes;
+
+BEGIN
+	NEW(pStyles, 4); nofPStyles := 0;
+	NEW(cStyles, 4); nofCStyles := 0;
+	InitDefaultStyles;
 	NEW(onTextChangedStr, 16); COPY("onTextChanged", onTextChangedStr^);
 	NEW(onLastTextChanged, NIL, Utilities.NewString("OnLastTextChanged"), 
 		Utilities.NewString("fired when the last selection is changed"), NIL);

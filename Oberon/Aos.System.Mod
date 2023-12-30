@@ -1,13 +1,17 @@
 (* Aos, Copyright 2001, Pieter Muller, ETH Zurich *)
 
 MODULE System; (** portable, except where noted *) (* pjm *)
-
-(* Based on System.Mod by jg, nw, ard, nm, jm, ejz et al. *)
-
-(** Aos Native Oberon *)
+(** 
+ * Based on System.Mod by jg, nw, ard, nm, jm, ejz et al.
+ * Aos Native Oberon
+ *
+ * History:
+ *
+ *	16.03.2007	Activate S.FreeDownTo instead of AosTools.FreeDownTo in procedure FreeOberon (staubesv)
+ *)
 
 IMPORT SYSTEM, Kernel, AosFS, Files, Modules, Objects, Display, Input, Fonts, Viewers, Texts, Oberon, 
-	TextFrames, AosBoot, AosOut, AosMemory, AosHeap, AosModules, AosActive, AosKernel, AosCommands;
+	TextFrames, AosOut, AosMemory, AosHeap, AosModules, AosActive, AosKernel, AosCommands;
 
 CONST
 	OberonBaseModule = "Kernel";
@@ -993,9 +997,9 @@ VAR par: AosCommands.Parameters; res: LONGINT; msg: ARRAY 128 OF CHAR;
 BEGIN
 	Oberon.OpenTrack(0, Display.Width);	(* inhibit display updates *)
 	NEW(par); NEW(par.str, 32); COPY(OberonBaseModule, par.str^);
-	AosCommands.Activate("AosTools.FreeDownTo", par, {}, res, msg);
+	AosCommands.Activate("S.FreeDownTo", par, {}, res, msg);
 	Kernel.UnlockOberon;
-	AosActive.Terminate	(* kill Oberon process in an unclean way (race with above! workaround in AosTools) *)
+	AosActive.Terminate	(* kill Oberon process in an unclean way (race with above! workaround in S.Mod) *)
 END FreeOberon;
 
 PROCEDURE Quit*;

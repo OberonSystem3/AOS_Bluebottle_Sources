@@ -101,7 +101,7 @@ MODULE OPC;	(** non-portable *)
 
 	(* special *)
 	phi = OPL.phi; 	pushReg = OPL.pushReg;	popReg = OPL.popReg; 	case = OPL.case;
-	entier = OPL.entier;	short = OPL.short;	label = OPL.label;
+	entier = OPL.entier;	short = OPL.short;	label = OPL.label; finlabel = OPL.finlabel;
 
 	newStat = OPL.newStat;
 
@@ -116,7 +116,8 @@ MODULE OPC;	(** non-portable *)
 
 	TYPE 
 		Item* = RECORD
-			mode*, mnolev*, scale*: SHORTINT;	(* mnolev < 0 -> mno (module number) = -mnolev *)
+			mode*, scale*: SHORTINT;	
+			mnolev* : LONGINT; (* mnolev < 0 -> mno (module number) = -mnolev *)
 			typ*: OPT.Struct; node*: OPT.Node;
 			adr*, offs*, inx*, descReg*, descOffs*: LONGINT
 		END;
@@ -441,7 +442,13 @@ Intel i386 :
 	(* set condition code *)
 	BEGIN
 		x.typ := OPT.booltyp; x.mode := Coc; x.adr := cc; x.offs := Nil; x.inx := Nil; x.node := NIL
-	END SetCC;
+	END SetCC;	
+
+	PROCEDURE DefFinallyLabel* (n: OPT.Node);
+	BEGIN		
+		InitInstr (finlabel, 0, 0, n);
+		INC (pc)
+	END DefFinallyLabel;
 
 	PROCEDURE DefLabel* (VAR L: Label);
 	BEGIN
@@ -555,7 +562,7 @@ Intel i386 :
 				
 	PROCEDURE CompleteSL (VAR x: Item); 
 	(* complete static link *)
-		VAR n: INTEGER; sl: Item;
+		VAR n: LONGINT; sl: Item;
 	BEGIN
 		IF x.mnolev > 0 THEN
 			n := level - x.mnolev;
@@ -2688,7 +2695,7 @@ Intel i386 :
 	END EndCall;
 	
 	PROCEDURE Call* (VAR x: Item; proc: OPT.Object; node: OPT.Node);
-		VAR n: INTEGER; sl: Item; param: OPT.Object; tag, t0, t1, self, y, z: Item; label: Label;
+		VAR n: LONGINT; sl: Item; param: OPT.Object; tag, t0, t1, self, y, z: Item; label: Label;
 	BEGIN
 		IF (x.mode IN {LProc, CProc}) OR ((x.mode IN {XProc}) & (x.mnolev >= 0)) THEN (* local procedure *)	(* was active only *)
 			IF slNeeded IN proc.conval.setval THEN

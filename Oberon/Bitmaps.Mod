@@ -312,9 +312,9 @@ BEGIN
 	END
 END ReplPattern;
 
-PROCEDURE DisplayBlock*(B: Bitmap; SX, SY, W, H, DX, DY, mode: INTEGER);
+PROCEDURE DisplayBlock*(B: Bitmap; SX, SY, W, H, DX, DY, mode: INTEGER; VAR colortable: ARRAY OF LONGINT (* fof *));
 BEGIN 
-	Display.DisplayBlock(SYSTEM.VAL(LONGINT, B), SX, SY, W, H, DX, DY, mode);
+	Display.DisplayBlock(SYSTEM.VAL(LONGINT, B), SX, SY, W, H, DX, DY, mode,colortable);
 END DisplayBlock;
 
 PROCEDURE GetPix*(VAR addr: LONGINT; VAR buf: SYSTEM.BYTE; depth: INTEGER);

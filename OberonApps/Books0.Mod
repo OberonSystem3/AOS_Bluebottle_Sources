@@ -1,14 +1,14 @@
 (* ETH Oberon, Copyright 2001 ETH Zuerich Institut fuer Computersysteme, ETH Zentrum, CH-8092 Zuerich.
 Refer to the "General ETH Oberon System Source License" contract available at: http://www.oberon.ethz.ch/ *)
 
-MODULE Books0;	(** portable *)
+MODULE Books0; (** portable *)	(* ejz   *)
 	IMPORT Oberon, Files, Texts, Objects, Display, Display3, Effects, Gadgets;
 	
 	CONST
 		(* modes for Frame *)
 		none* = 0;
 		(* max. length of (file-) names and identifiers *)
-		nameLen* = 32;
+		nameLen* = 128;
 		identLen* = 32;
 		(* size of contents-Gadget (ContElem) *)
 		contElemW = 10; contElemH = 11;
@@ -306,7 +306,7 @@ MODULE Books0;	(** portable *)
 					IF (M.F = NIL) OR (M.F = F) THEN
 						x := M.x + F.X; y := M.y + F.Y; w := F.W; h := F.H;
 						IF M IS Display.DisplayMsg THEN
-							WITH M: Display.DisplayMsg  DO
+							WITH M: Display.DisplayMsg DO
 								IF M.device = Display.screen THEN
 									IF (M.id = Display.full) OR (M.F = NIL) THEN
 										Gadgets.MakeMask(F, x, y, M.dlink, R);
@@ -401,8 +401,7 @@ MODULE Books0;	(** portable *)
 (* insert or append any Gadgets.Frame to a Texts.Text *)
 	
 	PROCEDURE InsertFrame*(T: Texts.Text; pos: LONGINT; obj: Gadgets.Frame);
-		VAR
-			W: Texts.Writer;
+		VAR W: Texts.Writer;
 	BEGIN
 		Texts.OpenWriter(W);
 		Texts.WriteObj(W, obj);
@@ -410,8 +409,7 @@ MODULE Books0;	(** portable *)
 	END InsertFrame;
 	
 	PROCEDURE AppendFrame*(T: Texts.Text; obj: Gadgets.Frame);
-		VAR
-			W: Texts.Writer;
+		VAR W: Texts.Writer;
 	BEGIN
 		Texts.OpenWriter(W);
 		Texts.WriteObj(W, obj);
@@ -485,7 +483,7 @@ MODULE Books0;	(** portable *)
 					IF (M.F = NIL) OR (M.F = F) THEN
 						x := M.x + F.X; y := M.y + F.Y; w := F.W; h := F.H;
 						IF M IS Display.DisplayMsg THEN
-							WITH M: Display.DisplayMsg  DO
+							WITH M: Display.DisplayMsg DO
 								IF M.device = Display.screen THEN
 									IF (M.id = Display.full) OR (M.F = NIL) THEN
 										Gadgets.MakeMask(F, x, y, M.dlink, R);

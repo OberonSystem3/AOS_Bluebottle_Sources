@@ -196,7 +196,7 @@ TYPE
 		END SetRootDirectoryX;
 	
 		(* Create a new file with the specified name.  End users use AosFS.New instead. *)
-		PROCEDURE New0(name: ARRAY OF CHAR): AosFS.File;
+		PROCEDURE New0*(name: ARRAY OF CHAR): AosFS.File;
 		VAR path, filename: Filename; dir: Directory; f: File;
 		BEGIN {EXCLUSIVE}
 			IF UTF8Strings.Valid(name) THEN
@@ -225,7 +225,7 @@ TYPE
 		END New0;
 		
 		(* Open an existing file. The same file descriptor is returned if a file is opened multiple times.  End users use AosFS.Old instead. *)
-		PROCEDURE Old0(name: ARRAY OF CHAR): AosFS.File;
+		PROCEDURE Old0*(name: ARRAY OF CHAR): AosFS.File;
 		BEGIN {EXCLUSIVE} RETURN OldX(name)
 		END Old0;
 		
@@ -310,7 +310,7 @@ TYPE
 		END Delete0X;
 		
 		(* Rename a file. res = 0 indicates success.  End users use AosFS.Rename instead. *)
-		PROCEDURE Rename0(old, new: ARRAY OF CHAR; f: AosFS.File; VAR res: LONGINT);
+		PROCEDURE Rename0*(old, new: ARRAY OF CHAR; f: AosFS.File; VAR res: LONGINT);
 		VAR oldpath, oldname, newpath, newname: Filename; r: File; dir: Directory; s: SearchByName;
 		BEGIN {EXCLUSIVE}
 			res := ErrInvalidFilename;
@@ -330,7 +330,7 @@ TYPE
 								IF (s.found = NIL) THEN r.DeleteClusterChain(res) END; (* file not open, remove cluster chain (ignore res) *)
 															
 								IF r.registered THEN	(* remove file header *)
-									dir := GetDirectory(r.parent);
+									dir := GetDirectoryX(r.parent);
 									dir.RemoveFileHeader(r)
 								END
 							END
@@ -363,7 +363,7 @@ TYPE
 			END
 		END Enumerate;
 		
-		PROCEDURE Enumerate0(mask: ARRAY OF CHAR; flags: SET; enum: AosFS.Enumerator);
+		PROCEDURE Enumerate0*(mask: ARRAY OF CHAR; flags: SET; enum: AosFS.Enumerator);
 		VAR d: Directory; path: Filename; par: EnumParam;
 		BEGIN {EXCLUSIVE}
 			IF UTF8Strings.Valid(mask) THEN
@@ -386,7 +386,7 @@ TYPE
 		END Enumerate0;
 		
 		(* Return the unique non-zero key of the named file, if it exists. *)
-		PROCEDURE FileKey(name: ARRAY OF CHAR): LONGINT;
+		PROCEDURE FileKey*(name: ARRAY OF CHAR): LONGINT;
 		VAR s: SearchByName; path, filename: Filename; dir: Directory; f: File; key: LONGINT;
 		BEGIN {EXCLUSIVE}
 			IF UTF8Strings.Valid(name) THEN
@@ -484,7 +484,7 @@ TYPE
 						IF (res = Ok) THEN
 							key := f.key;
 							f.DeleteClusterChain(res);
-							parent := GetDirectory(f.parent);
+							parent := GetDirectoryX(f.parent);
 							parent.RemoveFileHeader(f);
 							openFiles.Remove(f);
 							anonymousFiles.Remove(f)
@@ -572,6 +572,11 @@ TYPE
 		END FindDirectory;
 		
 		PROCEDURE GetDirectory(cluster: Address): Directory;
+		BEGIN {EXCLUSIVE}
+			RETURN GetDirectoryX(cluster)
+		END GetDirectory;
+		
+		PROCEDURE GetDirectoryX(cluster: Address): Directory;
 		VAR dir: Directory; r: AosFS.Rider; dotdot: ARRAY 3 OF CHAR; s: SearchByCluster;
 		BEGIN {}
 			IF (cluster = rootDir.cluster) OR (cluster = 0) THEN dir := rootDir
@@ -592,7 +597,7 @@ TYPE
 				END
 			END;
 			RETURN dir
-		END GetDirectory;
+		END GetDirectoryX;
 	END FileSystem;
 
 TYPE
@@ -666,17 +671,49 @@ TYPE
 		*)
 		PROCEDURE ReadBuffer(buffer: Buffer; pos: LONGINT);
 		VAR last: Address; i, res: LONGINT;
+			bp, bc, ctrlflow, stopc: LONGINT; 
 		BEGIN {}
+			bp := buffer.pos; bc := buffer.cluster;
 			IF (buffer.pos # NotAssigned) & (buffer.pos <= pos) THEN last := buffer.cluster
+				;ctrlflow := 1
 			ELSE buffer.pos := 0; buffer.cluster := cluster; last := cluster
+				;ctrlflow := 2
 			END;
 			IF (pos = buffer.pos + 1) & buffer.eoc THEN buffer.pos := pos; buffer.cluster := EOC
+				;ctrlflow := ctrlflow + 10
 			ELSE
 				WHILE (buffer.pos < pos) & (buffer.cluster >= 2) DO
 					last := buffer.cluster;
 					buffer.cluster := fs.vol(AosFATVolumes.Volume).ReadFATEntry(last);
 					INC(buffer.pos)
 				END
+				;ctrlflow := ctrlflow + 20;
+				IF (buffer.pos < pos) THEN stopc := 1 END;
+				IF (buffer.cluster >= 2) THEN stopc := stopc + 10 END
+			END;
+						
+			IF (pos # buffer.pos) THEN	(* we are going to TRAP, give some additional info to track down the bug *)
+				AosOut.Enter;
+				AosOut.String("ReadBuffer failed"); AosOut.Ln;
+				AosOut.String("  file: "); AosOut.String(long); AosOut.Ln;
+				AosOut.String("  size: "); AosOut.Int(size, 0); AosOut.Ln;
+				AosOut.String("  cluster: "); AosOut.Int(cluster, 0); AosOut.Ln;
+				AosOut.String("  parent: "); AosOut.Int(parent, 0); AosOut.Ln;
+				AosOut.String("  requested position: "); AosOut.Int(pos, 0); AosOut.Ln;
+				AosOut.String("  buffer.pos on entry: "); AosOut.Int(bp, 0); AosOut.Ln;
+				AosOut.String("  control flow: "); AosOut.Int(ctrlflow, 0); AosOut.Ln;
+				AosOut.String("  stop condition: "); AosOut.Int(stopc, 0); AosOut.Ln;
+				AosOut.String("  buffer.pos: "); AosOut.Int(buffer.pos, 0); AosOut.Ln;
+				AosOut.String("  buffer.cluster: "); AosOut.Int(buffer.cluster, 0); AosOut.Ln;
+				AosOut.String("  last: "); AosOut.Int(last, 0); AosOut.Ln;
+				AosOut.String("  cluster chain:"); AosOut.Int(cluster, 0); AosOut.Char(" ");
+				bp := cluster;
+				WHILE (bp >= 2) DO
+					bp := fs.vol(AosFATVolumes.Volume).ReadFATEntry(bp);
+					AosOut.Int(bp, 0); AosOut.Char(" ")
+				END;
+				AosOut.Ln;
+				AosOut.Exit
 			END;
 			
 			ASSERT(pos = buffer.pos);
@@ -717,7 +754,7 @@ TYPE
 		END WriteBuffer;
 		
 		(* Read a byte from a file, advancing the Rider one byte further.  R.eof indicates if the end of the file has been passed. *)
-		PROCEDURE Read(VAR r: AosFS.Rider; VAR x: CHAR);
+		PROCEDURE Read*(VAR r: AosFS.Rider; VAR x: CHAR);
 		BEGIN {EXCLUSIVE} ReadX(r, x)
 		END Read;
 		
@@ -761,7 +798,7 @@ TYPE
 		END ReadBytesX;
 
 		(* Write a byte into the file at the Rider position, advancing the Rider by one. *)
-		PROCEDURE Write(VAR r: AosFS.Rider; x: CHAR);
+		PROCEDURE Write*(VAR r: AosFS.Rider; x: CHAR);
 		BEGIN {EXCLUSIVE} WriteX(r, x)
 		END Write;
 		
@@ -810,11 +847,14 @@ TYPE
 
 		(* Return the current length of a file. *)
 		PROCEDURE Length(): LONGINT;
-		BEGIN RETURN size
+		BEGIN 
+			(* Length() should in principle be exlusive, however it won't do any harm if it is not, it just reflects the
+				current size if called from outside. Internal methods that call Length() are exclusive whenever needed *)
+			RETURN size
 		END Length;
 		
 		(* Return the time (t) and date (d) when a file was last modified. *)
-		PROCEDURE GetDate(VAR t, d: LONGINT);
+		PROCEDURE GetDate*(VAR t, d: LONGINT);
 		BEGIN {EXCLUSIVE}
 			t := writeTime; d := writeDate;
 		END GetDate;
@@ -858,11 +898,8 @@ TYPE
 		END ExclAttribute;
 
 		(* Return the canonical name of a file. *)
-		PROCEDURE GetName(VAR name: ARRAY OF CHAR);
-		BEGIN (*{EXCLUSIVE}*)
-			(*
-			COPY(long, name);
-			*)
+		PROCEDURE GetName*(VAR name: ARRAY OF CHAR);
+		BEGIN (* {GetFullName is EXCLUSIVE} *)
 			GetFullName(name, TRUE)
 		END GetName;
 
@@ -872,7 +909,7 @@ TYPE
 		VAR dir: Directory; old: File; s: SearchByName;
 		BEGIN {EXCLUSIVE}
 			IF ~registered THEN
-				dir := fs(FileSystem).GetDirectory(parent);
+				dir := fs(FileSystem).GetDirectoryX(parent);
 				IF (dir = NIL) THEN HALT(ErrParentNotFound) END; (* uaahhh...this is bad *)
 				old := dir.Find(long);
 				IF (old # NIL) THEN
@@ -912,7 +949,7 @@ TYPE
 		VAR dir: Directory;
 		BEGIN {}
 			IF registered & modH THEN
-				dir := fs(FileSystem).GetDirectory(parent);
+				dir := fs(FileSystem).GetDirectoryX(parent);
 				IF (dir = NIL) THEN HALT(ErrParentNotFound) END; (* uaahhh...this is bad *)
 				dir.WriteFileHeader(SELF)
 			END
@@ -931,7 +968,7 @@ TYPE
 			PROCEDURE Get(directory: Address);
 			VAR dir: Directory; k: LONGINT;
 			BEGIN
-				dir := fs(FileSystem).GetDirectory(directory);
+				dir := fs(FileSystem).GetDirectoryX(directory);
 				IF ~(dir = fs(FileSystem).rootDir) THEN 
 					dir.Initialize;
 					Get(dir.parent)
@@ -1183,10 +1220,10 @@ TYPE
 			ASSERT(firstFreePos MOD 32 = 0)
 		END EnumerateX;
 		
-		(* TailGeneration - generates a short name that does not collides with an existing long or short name *)
+		(* TailGeneration - generates a short name that does not collide with an existing long or short name *)
 		PROCEDURE TailGenHandler(f: File; p: Parameter): BOOLEAN;
 		VAR i,k: INTEGER;
-			tail,idx,ofs,offset,delta: LONGINT;
+			tail: LONGINT;
 		BEGIN {}
 			WITH p: TailGenParam DO
 				(* compare names *)
@@ -1196,26 +1233,19 @@ TYPE
 					IF (i = 8) THEN INCL(p.tails[0], 0) (* identical filename *)
 					ELSE
 						IF (f.short[i] = "~") THEN
-							INCL(p.tails[0], 0); (* identical filename *)
+							INCL(p.tails[0], 0); (* identical filename flag *)
 							(* extract tail value and calculate offset in bit array *)
-							tail := 0; k := i+1; offset := 0; delta := 1;
+							tail := 0; k := i+1; 
 							WHILE (k < 8) & (f.short[k] >= "0") & (f.short[k] <= "9") DO
 								tail := 10*tail + ORD(f.short[k]) - ORD("0");
-								IF ~(k-i-1 IN p.tailmask) THEN (* k-i-1 is the length of the tail - 1 *)
-									(* ajust offset to bit-array *)
-									offset := offset - delta + delta DIV 10 
-								END; 
-								delta := delta * 10;
 								INC(k)
 							END;
 							(* set bit in bitmask *)
-							IF (k-i-1 IN p.tailmask) THEN	(* k-i-1 is the length of the tail *)
-								(* check tail range. If the tail is outside the range we can ignore it since we won't generate a conflicting tail *)
-								IF (delta DIV 10 <= tail) & (tail < delta) THEN
-									idx := (offset + tail) DIV 32;
-									ofs := (offset + tail) MOD 32;
-									INCL(p.tails[idx], ofs)
-								END
+							IF (tail DIV 32 < LEN(p.tails)) THEN
+								(* tails of the form [0]+[1-9]+ will be mapped to the same spot as
+									the tail without the leading 0. We do not generate tails with 
+									leading zeros, so we can safely ignore that here. *)
+								INCL(p.tails[tail DIV 32], tail MOD 32)
 							END
 						END
 					END
@@ -1225,15 +1255,16 @@ TYPE
 		END TailGenHandler;
 		
 		PROCEDURE TailFinder(p: TailGenParam; VAR tail: LONGINT): BOOLEAN;
-		VAR delta,i,idx,l,ofs,offset,rlow,t: LONGINT;
+		VAR delta,i,l,max: LONGINT;
 		BEGIN {}
 			(* calculate size of bit-array and initialize it *)
-			offset := 1; delta := 10;
+			max := 0; delta := 10;
 			FOR l := 1 TO 6 DO
-				IF (l IN p.tailmask) THEN offset := offset + delta - (delta DIV 10) END;
+				IF (l IN p.tailmask) THEN max := delta END;
 				delta := delta * 10
 			END;
-			NEW(p.tails, (offset + 31) DIV 32);
+
+			NEW(p.tails, (max + 31) DIV 32);
 			FOR i := 0 TO LEN(p.tails)-1 DO p.tails[i] := {} END;
 		
 			(* seach directory *)	
@@ -1242,24 +1273,15 @@ TYPE
 			
 			(* try to find a free tail number *)
 			tail := 0;
-			IF (0 IN p.tails[0]) THEN
-				rlow := 1; (* range is rlow....10*rlow-1 *)
-				delta := 10; offset := 0;
-				FOR l := 1 TO  6 DO
-					IF (l IN p.tailmask) THEN
-						FOR t := offset+rlow TO offset+10*rlow-1 DO
-							idx := t DIV 32;
-							ofs := t MOD 32;
-							IF ~(ofs IN p.tails[idx]) THEN 
-								(* we have found a free tail number, exit *)
-								tail := t - offset; RETURN TRUE
+			IF (0 IN p.tails[0]) THEN	(* bit 0 in p.tails[0] indicates wheter we have found a tail or not *)
+				FOR i := 0 TO LEN(p.tails)-1 DO
+					IF (p.tails[i] # {0..31}) THEN
+						FOR l := 0 TO 31 DO
+							IF ~(l IN p.tails[i]) THEN
+								tail := i*32+l; RETURN TRUE
 							END
 						END
-					ELSE
-						offset := offset - delta;
-					END;
-					delta := delta * 10;
-					rlow := rlow * 10
+					END
 				END
 			ELSE RETURN TRUE
 			END;
@@ -1267,19 +1289,16 @@ TYPE
 		END TailFinder;
 		
 		PROCEDURE TailGeneration(VAR shortname: Shortname; TailNeeded: BOOLEAN);
-		VAR tp: TailGenParam; l, len, max, pos, tail: LONGINT;
+		VAR tp: TailGenParam; len, max, pos, tail: LONGINT; dummy: BOOLEAN;
 		BEGIN
 			NEW(tp);
 			tp.short := shortname;
-			(* first, we look for tails with lengths 1,2 or 3 (~x, ~xx, ~xxx) *)
-			tp.tailmask := {1, 2, 3};
+			(* first, we look for tails with lengths 1,2,3, or 4 (~x, ~xx, ~xxx, ~xxxx) *)
+			tp.tailmask := {1, 2, 3, 4};
 			IF ~TailFinder(tp, tail) THEN
-				(* now look at each tail length seperately *)
-				l := 4;
-				REPEAT
-					tp.tailmask := {l};
-					INC(l)
-				UNTIL TailFinder(tp, tail) OR (l = 7)
+				(* wow, more than 10'000 files with the same shortname in one directory.... *)
+				tp.tailmask := {5,6};
+				dummy := TailFinder(tp, tail)
 			END;
 			IF TailNeeded OR (0 IN tp.tails[0]) THEN
 				IF (tail = 0) & TailNeeded THEN tail := 1 END;
@@ -1332,6 +1351,10 @@ TYPE
 			END;
 			(* numeric tail generation *)
 			TailGeneration(shortname, TRUE (*lossy OR sameName*));
+			(*
+			AosOut.String(moduleName); AosOut.String("GetShortName(): '"); AosOut.String(name); 
+			AosOut.String("' ==> '"); AosOut.String(shortname); AosOut.Char("'"); AosOut.Ln;
+			*)
 			checksum := CheckSum(shortname)
 		END GetShortName;
 		
@@ -1489,7 +1512,7 @@ TYPE
 		BEGIN {EXCLUSIVE}
 			IF UTF8Strings.Valid(name) & ValidateName(name) THEN
 				UTF8Strings.UpperCase(name, upName);
-				f := Find(upName);
+				f := FindX(upName);
 				IF (f = NIL) THEN
 					NEW(dir, fs);
 					COPY(name, dir.long); dir.attr := {faDirectory}; dir.NTres := 0X;
@@ -1575,6 +1598,11 @@ TYPE
 		END FindCallback;
 		
 		PROCEDURE Find(VAR filename: ARRAY OF CHAR): File;
+		BEGIN  {EXCLUSIVE} 
+			RETURN FindX(filename)
+		END Find;
+		
+		PROCEDURE FindX(VAR filename: ARRAY OF CHAR): File;
 		VAR par: NameParam; f: File;
 		BEGIN {}
 			IF (filename # "") THEN
@@ -1583,7 +1611,7 @@ TYPE
 				f := par.file
 			END;
 			RETURN f
-		END Find;
+		END FindX;
 		
 		PROCEDURE FindByClusterCallback(f: File; par: Parameter): BOOLEAN;
 		BEGIN {}
@@ -1596,7 +1624,7 @@ TYPE
 		
 		PROCEDURE FindByCluster(cluster: Address): File;
 		VAR par: ClusterParam;
-		BEGIN {}
+		BEGIN {EXCLUSIVE}
 			NEW(par); par.cluster := cluster; par.file := NIL;
 			EnumerateX(FindByClusterCallback, TRUE, par);
 			RETURN par.file
@@ -1635,7 +1663,7 @@ TYPE
 			size := fs.vol(AosFATVolumes.FAT1216Volume).numRootSectors*AosFATVolumes.BS
 		END InitSize;
 		
-		PROCEDURE ReadBuffer(buffer: Buffer; pos: LONGINT);
+		PROCEDURE ReadBuffer*(buffer: Buffer; pos: LONGINT);
 		VAR vol: AosFATVolumes.FAT1216Volume; res: LONGINT;
 		BEGIN
 			vol := fs.vol(AosFATVolumes.FAT1216Volume);
@@ -1645,7 +1673,7 @@ TYPE
 			IF (res # Ok) THEN HALT(ErrIOError) END
 		END ReadBuffer;
 		
-		PROCEDURE WriteBuffer(buffer: Buffer);
+		PROCEDURE WriteBuffer*(buffer: Buffer);
 		VAR vol: AosFATVolumes.FAT1216Volume; res: LONGINT;
 		BEGIN
 			vol := fs.vol(AosFATVolumes.FAT1216Volume);
@@ -1687,7 +1715,7 @@ BEGIN
 		
 		AosFS.Add(fs, p.prefix)
 	ELSE
-		AosOut.Enter; AosOut.String("AosFATFiles: "); AosOut.String(p.prefix); AosOut.String(" already in use"); AosOut.Exit
+		AosOut.Enter; AosOut.String(moduleName); AosOut.String(p.prefix); AosOut.String(" already in use"); AosOut.Exit
 	END;
 	RETURN NIL
 END NewFS;

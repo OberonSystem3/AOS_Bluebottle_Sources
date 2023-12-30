@@ -1,6 +1,6 @@
 (* Aos, Copyright 2001, Pieter Muller, ETH Zurich *)
 
- MODULE AosDisplays; (** AUTHOR "pjm"; PURPOSE "Abstract display device driver"; *)
+MODULE AosDisplays; (** AUTHOR "pjm"; PURPOSE "Abstract display device driver"; *)
 
 IMPORT SYSTEM, AosPlugins;
 
@@ -35,10 +35,10 @@ TYPE
 		BEGIN
 			IF w > 0 THEN
 				ASSERT(fbadr # 0);
-				w := w * format;	(* convert to bytes *)
 				bufadr := SYSTEM.ADR(buf[ofs]);
 				dispadr := fbadr + ((y*width)+x)*format;
-				ASSERT((dispadr >= fbadr) & (dispadr-fbadr+h*fbstride <= fbsize));	(* display index check *)
+				ASSERT((dispadr >= fbadr) & ((((y+h-1)*width)+x+ w)*format <=  fbsize));	(* display index check *)
+				w := w * format;	(* convert to bytes *)
 				CASE op OF
 					set:
 						WHILE h > 0 DO

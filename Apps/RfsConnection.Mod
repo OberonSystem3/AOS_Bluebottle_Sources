@@ -29,7 +29,7 @@ TYPE
 		
 		(** res = 0 if Connection opened *)
 		PROCEDURE Open*(VAR res: LONGINT);
-			VAR ip: LONGINT;
+			VAR ip: AosIP.Adr;
 		BEGIN
 			IF rpcConn.state = AosTCP.Unused THEN
 				AosDNS.HostByName(host, ip, res);

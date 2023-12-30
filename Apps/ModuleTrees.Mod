@@ -1,14 +1,14 @@
 MODULE ModuleTrees;
 
 IMPORT
-	WMStandardComponents, WMGraphics, WMComponents, WMRectangles,
-	WMTextView, WMEditors, Utilities, AosTextUtilities, AosTexts, WMBitmapFont,
-	WMWindowManager, MultiLogger, WMGrids, WMTrees,
-	StringPool, PCS, ModuleParser, UTF8Strings;
+	WMStandardComponents, WMGraphics, WMComponents,
+	WMTextView, WMEditors, Utilities, AosTexts,
+	WMTrees,
+	PCS, ModuleParser;
 	
 CONST
-	TreeLabelCaption = "Tree View";
-	TreeLabelCaptionError = "Tree View (Parse Error)";
+	TreeLabelCaption = "Program Structure";
+	TreeLabelCaptionError = "Program Structure (Errors)";
 
 TYPE
 	TextInfo = OBJECT
@@ -27,13 +27,15 @@ TYPE
 			treeView: WMTrees.TreeView;
 			tree: WMTrees.Tree;
 			editor: WMEditors.Editor;
+			highlight : WMTextView.Highlight;
 			
 		PROCEDURE & Init*();
 		BEGIN
 			Init^;
 			
 			NEW(label); label.alignment.Set(WMComponents.AlignTop);
-			label.SetCaption(TreeLabelCaption); label.bounds.SetWidth(40); label.bounds.SetHeight(20);
+			label.fillColor.Set(0CCCCCCFFH);
+			label.SetCaption(TreeLabelCaption); label.bounds.SetHeight(20);
 			SELF.AddContent(label);
 			
 			NEW(toolbar); toolbar.alignment.Set(WMComponents.AlignTop);
@@ -61,7 +63,15 @@ TYPE
 		
 		PROCEDURE SetEditor*(e: WMEditors.Editor);
 		BEGIN
+			IF e = editor THEN RETURN END;
+			IF (highlight # NIL) & (editor # NIL) THEN 
+				editor.tv.RemoveHighlight(highlight);
+				highlight := NIL
+			END;
 			editor := e;
+			highlight := editor.tv.CreateHighlight();
+			highlight.SetColor(0DDDD0060H);
+			highlight.SetKind(WMTextView.HLOver)
 		END SetEditor;
 		
 		PROCEDURE Erase*;
@@ -106,7 +116,6 @@ TYPE
 		END RefreshHandler;
 		
 		PROCEDURE SortHandler(sender, data: ANY);
-			VAR rootNode: WMTrees.TreeNode;
 		BEGIN
 			tree.Acquire;
 			SortTree(tree.GetRoot());
@@ -175,7 +184,7 @@ TYPE
 		END SwapSiblings;
 		
 		PROCEDURE DrawNode(canvas: WMGraphics.Canvas; w, h: LONGINT; node: WMTrees.TreeNode; state: SET);
-		VAR i, dx, tdx, tdy : LONGINT; f : WMGraphics.Font;
+		VAR dx, tdx, tdy : LONGINT; f : WMGraphics.Font;
 			caption: Utilities.String;
 			ptr: ANY;
 		BEGIN
@@ -204,15 +213,22 @@ TYPE
 		VAR
 			d: ANY;
 			textInfo: TextInfo;
+			a, b  : LONGINT;
+			text : AosTexts.Text;
 		BEGIN
 			IF (data # NIL) & (data IS WMTrees.TreeNode) THEN
 				tree.Acquire;
 				d := tree.GetNodeData(data(WMTrees.TreeNode));
 				tree.Release;
 				IF (d # NIL) & (d IS TextInfo) THEN
+					text := editor.text;
+					text.AcquireRead;
 					textInfo := d(TextInfo);
 					editor.tv.cursor.SetPosition(textInfo.pos.GetPosition());
 					editor.tv.cursor.SetVisible(TRUE);
+					editor.tv.FindCommand(textInfo.pos.GetPosition(), a, b);
+					highlight.SetFromTo(a, b);
+					text.ReleaseRead;
 					editor.SetFocus();
 				END
 			END
@@ -498,7 +514,6 @@ TYPE
 		
 		PROCEDURE AddArray(parent: WMTrees.TreeNode; array: ModuleParser.Array);
 		VAR newNode: WMTrees.TreeNode;
-			caption: Utilities.String;
 		BEGIN
 			IF array # NIL THEN
 				newNode := NewNode(parent, Utilities.NewString("ARRAY "));
@@ -669,3 +684,4 @@ BEGIN
 	treeFontOberon10Bold := WMGraphics.GetFont("Oberon", 10, {WMGraphics.FontBold});
 	treeFontOberon10Italic := WMGraphics.GetFont("Oberon", 10, {WMGraphics.FontItalic});
 END ModuleTrees.
+

@@ -83,7 +83,7 @@ TYPE
 		
 		(* ReceiveAck - receives a server answer *)
 		PROCEDURE ReceiveAck(socket: AosUDP.Socket; VAR fip: AosIP.Adr; VAR fport: LONGINT; blockNr: LONGINT; VAR ack: ARRAY OF CHAR): BOOLEAN;
-		VAR ip, port, len, ofs, res, wait: LONGINT; acked: BOOLEAN; msg: ARRAY 256 OF CHAR;
+		VAR ip: AosIP.Adr; port, len, ofs, res, wait: LONGINT; acked: BOOLEAN; msg: ARRAY 256 OF CHAR;
 		BEGIN
 			wait := 0;
 			REPEAT
@@ -98,7 +98,7 @@ TYPE
 				IF (res = AosUDP.Timeout) THEN Log(3, "timeout")
 				ELSIF (res = AosUDP.BufferOverflow) THEN Log(3, "buffer overflow ("); LogInt(3, -len); Log(3, " bytes)")
 				ELSIF (res = Ok) THEN
-					acked := (PacketType(ack) = ACK) & (Get2(ack, 2) = blockNr)  & (ip = fip) & ((fport = port) OR (fport = -1));
+					acked := (PacketType(ack) = ACK) & (Get2(ack, 2) = blockNr)  & (AosIP.AdrsEqual(ip, fip)) & ((fport = port) OR (fport = -1));
 					IF acked THEN Log(3, "got ack") ELSE Log(3, "ack failed") END;
 					IF (PacketType(ack) = ERROR) THEN
 						wait := MaxWait + 1;
@@ -264,7 +264,7 @@ TYPE
 						
 						IF (res = Ok) THEN
 							res := -1;
-							IF (ip = fip) & ((fport = port) OR (fport = -1)) THEN
+							IF (AosIP.AdrsEqual(ip, fip)) & ((fport = port) OR (fport = -1)) THEN
 								IF (fport = -1) THEN fport := port END;
 								IF (PacketType(buf) = DATA) THEN
 									IF (Get2(buf, 2) = blockNr) THEN

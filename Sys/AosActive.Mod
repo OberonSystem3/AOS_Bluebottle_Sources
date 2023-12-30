@@ -1,6 +1,6 @@
 (* Aos, Copyright 2001, Pieter Muller, ETH Zurich *)
 
- MODULE AosActive; (** AUTHOR "pjm"; PURPOSE "Active object runtime support"; *)
+MODULE AosActive; (** AUTHOR "pjm"; PURPOSE "Active object runtime support"; *)
 
 IMPORT SYSTEM, AosBoot, AosLocks, AosOut, AosMemory, AosHeap, AosInterrupts, AosModules;
 
@@ -9,9 +9,12 @@ CONST
 	Restart* = 0;	(* Restart/Destroy process on exception *)
 	Preempted* = 27;	(* Has been preempted. *)
 	Resistant* = 28;	(* Can only be destroyed by itself *)
-	PleaseHalt* = 30;	(* Process requested to Halt itself soon *)
-	PleaseStop* = 31;	(* Process requested to Terminate or Halt itself soon *)
+	PleaseStop* = 31;	(* Process requested to Terminate or Halt itself soon *)	
 
+	PleaseHalt* = 10;	(* Process requested to Halt itself soon *)
+	Unbreakable*= 11;
+	SelfTermination*=12;
+	
 		(** Process modes *)
 	Unknown* = 0; Ready* = 1; Running* = 2; AwaitingLock* = 3;
 	AwaitingCond* = 4; AwaitingEvent* = 5; Terminated* = 6;
@@ -27,15 +30,19 @@ CONST
 	
 	Second* = 1000;	(* frequency of ticks increments in Hz *)
 	
-	Stats = FALSE;	(* maintain statistical counters *)
+	Stats* = FALSE;	(* maintain statistical counters *)
 	Trace = FALSE;	(* write out verbose trace info *)
 	StrongChecks = FALSE;	(* strong sanity checks *)
 	VeryConservative = FALSE;	(* temp - be very conservative about stack-based pointers *)
 	ObjectLock = TRUE;	(* use object-level fine-grained locks *)
 	YieldTrick = FALSE;	(* avoid yield when no ready process available *)
-	HandleInvPriority = FALSE;
+	HandleInvPriority = FALSE;	
 	
-TYPE
+	(* Process termination halt codes *)	
+	halt* = 2222;
+	haltUnbreakable* = 2223;
+	
+TYPE		
 	ProtectedObject = POINTER TO RECORD END;	(* protected object (10000) *)
 	ObjectHeader = POINTER TO RECORD	(* header of a protected object (0000X) - cf. AosHeap.NewType *)
 			(* should not be used as global variable or record field, because of AosHeap.Mark *)
@@ -84,7 +91,7 @@ TYPE
 (** All exported fields and variables should be considered read-only. *)
 
 TYPE
-	Process* = OBJECT (AosHeap.RootObject)
+	 Process* = OBJECT (AosHeap.RootObject)
 		VAR
 			next: Process;	(* in some ProcessQueue *)
 			prev: Process;
@@ -103,43 +110,77 @@ TYPE
 			priority*: LONGINT;	(** process priority *)	(* exported for AosExceptions *)
 			currPri: LONGINT;
 			stack*: AosMemory.Stack;	(** user-level stack of process *)
-			handler-: ExceptionHandler;	(** user-level exception handler (e.g. for Jaos) *)
 			restartPC-: LONGINT;	(** entry point of body, for SAFE exception recovery *)
 			restartSP-: LONGINT;	(** stack level at start of body, for SAFE exception recovery *)
 			perfCyc*: ARRAY AosBoot.MaxCPU OF HUGEINT;
 			priInvCnt: LONGINT; (* counts the nummber of object locks hold that increased currPri of the process *)
+			exp*: AosInterrupts.ExceptionState;
+			oldReturnPC: LONGINT;
 	
-		PROCEDURE FindRoots;	(* override *)
-		VAR esp: LONGINT; id, mode: LONGINT;
+		PROCEDURE FindRoots; (* override *)
+		VAR pc, bp, curbp : LONGINT; id, mode: LONGINT;
 		BEGIN
 			id := SELF.id; mode := SELF.mode;	(* debugging *)
 				(* process snapshot *)
 			IF traceProcess # NIL THEN traceProcess(SELF) END;
 			IF snapshotEnabled THEN link := snapshot; snapshot := SELF END;
 				(* stack garbage collection *)
-			IF VeryConservative THEN
-				(*AosOut.String("[ST"); AosOut.Hex(stack.adr, 9); AosOut.Hex(stack.high, 9); AosOut.Char("]");*)
-				AosHeap.RegisterCandidates(stack.adr, stack.high-stack.adr)
-			ELSE
-				esp := state.ESP;	(* cf. Enter *)
-				IF esp # 0 THEN
-					IF AosMemory.ValidStack(stack, esp) THEN
-						AosHeap.RegisterCandidates(esp, stack.high - esp)
-					ELSE
-						(* no need for AosOut.Enter, because this is only called from garbage collector *)
-(*
-						AosOut.String(" Invalid stack:");
-						AosOut.Int(mode, 2); AosOut.Int(id, 4);
-						AosOut.Hex(esp, 9); AosOut.Hex(stack.high, 9); 
-						AosOut.Char(" "); AosOut.Int(stack.high-esp, 1); AosOut.Ln
-*)
-					END
+			bp := state.EBP; pc := state.EIP;
+			WHILE (bp # AosHeap.NilVal) & (stack.adr <= bp) & (bp < stack.high) DO  
+ 				FindPointers(bp, pc);
+				curbp := bp;
+				SYSTEM.GET(curbp, bp);
+				SYSTEM.GET(curbp+4, pc);
+			END;
+		END FindRoots;	
+		
+		PROCEDURE FindPointers(bp, pc : LONGINT);   (* ug *)
+		VAR m : AosModules.Module; cbase, base, x, i, l, r, ptr : LONGINT; found, isHit : BOOLEAN;
+		BEGIN
+			m := AosModules.root; found := FALSE;
+			WHILE (m # NIL) & ~found DO
+				cbase := SYSTEM.ADR(m.code[0]);
+				(* include 1 byte after module in module, therefore <= below *)    (* see AosModules.ThisModuleByAdr *)
+				IF (cbase <= pc) & (pc <= cbase + LEN(m.code^)) THEN 
+					found := TRUE
 				ELSE
-					AosOut.String("[AosActive.FindRoots esp=0]")
+					m := m.next
+				END
+			END;
+			IF found & (m.maxPtrs > 0) THEN
+				(* binary search algorithm *)
+				l := 0; r := LEN(m.procTable) - 1;
+				REPEAT
+					x := (l + r) DIV 2;
+					IF pc < m.procTable[x].pcFrom THEN r := x - 1 ELSE l := x + 1 END;
+					isHit := ((m.procTable[x].pcFrom <= pc) & ((x = m.procTableLen - 1) & (pc <= cbase + LEN(m.code^)) 
+					                                                             OR (x + 1 < LEN(m.procTable)) & (pc < m.procTable[x + 1].pcFrom)));
+				UNTIL isHit OR (l > r);
+				IF isHit & (m.procTable[x].noPtr > 0) & (pc >= m.procTable[x].pcStatementBegin) & (pc <= m.procTable[x].pcStatementEnd) THEN
+					base := x * m.maxPtrs;
+					FOR i := 0 TO m.procTable[x].noPtr - 1 DO
+						SYSTEM.GET(bp + m.ptrTable[base + i], ptr);
+						IF ptr # AosHeap.NilVal THEN
+							IF AosHeap.CheckPointer(ptr) THEN
+								AosHeap.Mark(SYSTEM.VAL(PTR, ptr));
+							ELSE
+(* ug *)							AosOut.String("AosActive: FindRoots - CheckPointer for offset "); AosOut.Int(m.ptrTable[base+i], 0); AosOut.String(" failed");
+(* ug *)							AosOut.String(" stack adr = "); AosOut.Hex(bp + m.ptrTable[base + i], 8);
+(* ug *)							AosOut.String(" pointer value = "); AosOut.Hex(ptr, 8); AosOut.Ln;
+(* ug *)							AosOut.String("in module = "); AosOut.String(m.name); AosOut.String(" bp = "); AosOut.Hex(bp, 10); 
+(* ug *)							AosOut.String(" pc = "); AosOut.Int(pc, 0); AosOut.String(" relative pc = "); AosOut.Int(pc - SYSTEM.ADR(m.code[0]), 0); AosOut.Ln;
+(* ug *)							AosOut.String("in procedure: ");
+(* ug *)							AosOut.Int(m.procTable[x].pcFrom - SYSTEM.ADR(m.code[0]), 0); AosOut.String(" "); 
+(* ug *)							AosOut.Int(m.procTable[x].pcStatementBegin - SYSTEM.ADR(m.code[0]), 0); AosOut.String(" "); 
+(* ug *)							AosOut.Int(m.procTable[x].pcStatementEnd - SYSTEM.ADR(m.code[0]), 0); 
+(* ug *)							AosOut.String(" noPtr = "); AosOut.Int(m.procTable[x].noPtr, 0); AosOut.Ln;
+							END
+						END
+					END
 				END
 			END
-		END FindRoots;
-		
+		END FindPointers;	(* ug *)			
+	
 	END Process;
 
 	TraceProcess* = PROCEDURE(p: Process);
@@ -186,6 +227,7 @@ TYPE
 	Interrupter = OBJECT (ProtectedObject)	(* to do: like Timer *)
 	END Interrupter;
 	
+	
 VAR
 	ready: ARRAY NumPriorities OF ProcessQueue;
 	maxReady: LONGINT;	(* for all i : MinPriority <= maxReady < i < NumPriorities : Empty(ready[i]) *)
@@ -195,27 +237,29 @@ VAR
 	interrupt: ARRAY NumIRQ OF RECORD
 		root: InterruptList;
 		process: Process
-	END;
+	END;	
 	event: Timer;	(* list of events *)
 	timer: Process;	(* suspended timer process *)
 	ticks*: LONGINT;	(** timer ticks *)	(* temporarily defined here until timing moved up to AosKernel *)
-	terminate, trap: PROCEDURE;
+	terminate: PROCEDURE;	
+	trap, trapReturn: ARRAY 2 OF PROCEDURE;
 	snapshotEnabled*: BOOLEAN;	(** for System.ShowTasks *)
 	snapshot*: Process;	(** for System.ShowTasks *)
 	stats: BOOLEAN;	(* enable statistical counters *)
-	Nlock, Nunlock, Nawait, NawaitNoIF, NawaitTrue, Ncreate, Nterminate, 
-		Ncondition, Ncondition1True, Ncondition2, Ncondition2True, 
-		Ntimeslice, NtimesliceTaken, NtimesliceNothing, NtimesliceIdle, 
-		NtimesliceKernel, NtimesliceV86, NtimesliceCritical, 
-		Npreempt, NpreemptTaken, NpreemptNothing, 
-		NpreemptKernel, NpreemptV86, NpreemptCritical, 
-		Nenter, NenterHigherRunningPriority, NenterHigherCurrentPriority, 
-		NenterHigherIdlePriority: LONGINT;
+	Nlock-, Nunlock-, Nawait-, NawaitNoIF-, NawaitTrue-, Ncreate-, Nterminate-, 
+		Ncondition-, Ncondition1True-, Ncondition2-, Ncondition2True-, 
+		Ntimeslice-, NtimesliceTaken-, NtimesliceNothing-, NtimesliceIdle-, 
+		NtimesliceKernel-, NtimesliceV86-, NtimesliceCritical-, 
+		Npreempt-, NpreemptTaken-, NpreemptNothing-, 
+		NpreemptKernel-, NpreemptV86-, NpreemptCritical-, 
+		Nenter-, NenterHigherRunningPriority-, NenterHigherCurrentPriority-, 
+		NenterHigherIdlePriority-: LONGINT;
 	ProcessorHLT*: PROCEDURE;	(** installable procedure to halt the current processor while idle *)
 	entry: LONGINT;
 	init: Process;
 	traceProcess*: TraceProcess;	(** for debugging purposes (see AosInfo.Active) *)
 	idlecount*: ARRAY AosBoot.MaxCPU OF LONGINT;	(** count of idle process timeslice interrupts *)
+	idleCycles- : ARRAY AosBoot.MaxCPU OF HUGEINT; (** CPU cycles of idle threads *)
 	perfTsc: ARRAY AosBoot.MaxCPU OF HUGEINT;
 
 (* Get a process from a queue (NIL if none).  Caller must hold lock for specific queue. *)
@@ -339,6 +383,13 @@ CODE {SYSTEM.i386}
 	MOV EAX, 4[EBP]
 END CallerEIP;
 
+(* Return current instruction pointer *)
+
+PROCEDURE CurrentEIP(): LONGINT;
+CODE {SYSTEM.i386}
+	MOV EAX, 4[EBP]
+END CurrentEIP;
+
 (* Return CS. *)
 
 PROCEDURE -CS(): LONGINT;
@@ -458,7 +509,11 @@ BEGIN
 	ASSERT(CS() MOD 4 = AosInterrupts.UserLevel);	(* registers hold user state *)
 	id := AosBoot.ID();
 	running.perfCyc[id] := AosBoot.AddH(AosBoot.SubH(AosBoot.GetTimer(), perfTsc[id]), running.perfCyc[id]);
-	SYSTEM.GETREG(SYSTEM.ESP, running.state.ESP);	(* for GC *)
+	IF running.priority = MinPriority THEN (* Special treatment for idle threads *)
+		idleCycles[id] := AosBoot.AddH(idleCycles[id], AosBoot.SubH(AosBoot.GetTimer(), perfTsc[id]));
+	END;
+	running.state.EIP := CurrentEIP();						(* for GC *) (* ug *)
+	SYSTEM.GETREG(SYSTEM.ESP, running.state.ESP);		(* for GC *)
 	SYSTEM.GETREG(SYSTEM.EBP, running.state.EBP);	(* save state *)
 	IF AosBoot.SSESupport THEN SSESaveMin(running.sseAdr) 
 	ELSE FPUSaveMin(running.sse)
@@ -467,37 +522,25 @@ BEGIN
 	IF Preempted IN new.flags THEN
 		ASSERT(new.state.CS MOD 4 = AosInterrupts.UserLevel);	(* switching to user mode *)
 		EXCL(new.flags, Preempted);
+		perfTsc[id] := AosBoot.GetTimer();
 		SYSTEM.PUTREG(SYSTEM.ESP, new.state.ESP);	(* for UpdateState - run on new stack (EBP on old) *)
-			(* to do: is this really the new stack? *)
-(*
-		PushState(new.state.EFLAGS, new.state.CS, new.state.EIP, SYSTEM.ADR(new.state.EDI), new.fpu);
-*)
 		PushState(new.state.EFLAGS, new.state.CS, new.state.EIP, 
 			new.state.EAX, new.state.ECX, new.state.EDX, new.state.EBX, 
-			0, new.state.EBP, new.state.ESI, new.state.EDI);
+			0, new.state.EBP, new.state.ESI, new.state.EDI);			
 		IF AosBoot.SSESupport THEN SSERestoreFull(new.sseAdr)
 		ELSE FPURestoreFull(new.sse)
 		END;
-		perfTsc[id] := AosBoot.GetTimer();
-		AosLocks.Release(AosLocks.AosActive);	(* UpdateState race! - probably no race, as we are on new stack. it is ok for another processor to use our old stack. *)
-(*
-		PopState
-*)
-		JumpState
+		AosLocks.Release(AosLocks.AosActive);
+		JumpState										(* pops the state parameter from the stack and returns from interrupt *)
 	ELSE
 		IF AosBoot.SSESupport THEN SSERestoreMin(new.sseAdr)
 		ELSE FPURestoreMin(new.sse)
 		END;
-			(* UpdateState can not be called, because we hold the lock, and GC acquires all locks. *)
-		SYSTEM.PUTREG(SYSTEM.ESP, new.state.EBP);	(* run on new stack *)
-			(* to do: is this really the new stack? *)
 		perfTsc[id] := AosBoot.GetTimer();
+		SYSTEM.PUTREG(SYSTEM.ESP, new.state.ESP);	(* run on new stack *)
+		SYSTEM.PUTREG(SYSTEM.EBP, new.state.EBP);
 		AosLocks.Release(AosLocks.AosActive);
-		(* what if interrupt happens here? should be ok, as we are on new stack *)
-		(* to do: what if preemption happens here?  EBP still points to old stack! *)
-			(* now old stack can be rescheduled on another processor => local variables and parameters no longer available *)
-		AssignSPtoFP	(* MOV EBP, ESP *)
-	END
+	END;
 (*
 	MOV ESP, EBP	; exit code generated by compiler
 	POP EBP
@@ -525,7 +568,7 @@ BEGIN
 		AosLocks.Acquire(AosLocks.AosActive);
 		Select(new, r.currPri);
 		IF new # NIL THEN	(* found another process *)
-			r.state.EIP := CallerEIP();	(* for tracing *)
+(*			r.state.EIP := CallerEIP();	(* for tracing *) *) (* ug *)
 			Enter(r);
 			new.procID := AosBoot.ID();
 			SwitchTo(running[new.procID], new)
@@ -543,7 +586,7 @@ BEGIN
 	id := AosBoot.ID();
 	Select(new, running[id].currPri);
 	IF new # NIL THEN	(* found another process *)
-		running[id].state.EIP := CallerEIP();	(* for tracing *)
+(*		running[id].state.EIP := CallerEIP();	(* for tracing *)  *) (* ug *)
 		Enter(running[id]);
 		new.procID := id;
 		SwitchTo(running[id], new)
@@ -617,7 +660,7 @@ BEGIN (* {interrupts on & interrupts were on in "user" mode, because timeslice i
 		IF ~(AosInterrupts.VMBit IN state.EFLAGS) THEN	(* not V86 mode *)
 			IF state.CS MOD 4 = AosInterrupts.UserLevel THEN	(* not kernel mode (used during initialization or interrupts) *)
 				IF running[id].priority # MinPriority THEN	(* idle processes are not timesliced *)
-					Select(new, running[id].currPri);
+					Select(new, running[id].currPri);					
 					IF new # NIL THEN
 						ASSERT(CS() MOD 4 = AosInterrupts.KernelLevel);	(* otherwise we can not change state.ESP *)
 						running[id].perfCyc[id]:= AosBoot.AddH(AosBoot.SubH(AosBoot.GetTimer(), perfTsc[id]), running[id].perfCyc[id]);
@@ -630,9 +673,10 @@ BEGIN (* {interrupts on & interrupts were on in "user" mode, because timeslice i
 						Enter(running[id]);
 						running[id] := new;
 						new.mode := Running; new.procID := id;
+						
 						IF Preempted IN new.flags THEN
 							EXCL(new.flags, Preempted);
-							CopyState(new.state, state);
+							CopyState(new.state, state);							
 							IF AosBoot.SSESupport THEN SSERestoreFull(new.sseAdr)
 							ELSE FPURestoreFull(new.sse)
 							END
@@ -641,11 +685,28 @@ BEGIN (* {interrupts on & interrupts were on in "user" mode, because timeslice i
 							IF AosBoot.SSESupport THEN SSERestoreMin(new.sseAdr) 
 							ELSE FPURestoreMin(new.sse)
 							END
-						END;
+						END;												
+						
 						perfTsc[id] := AosBoot.GetTimer()
 					ELSE
-						IF Stats & stats THEN AosBoot.Inc(NtimesliceNothing) END	(* nothing available *)
-					END
+						IF Stats & stats THEN AosBoot.Inc(NtimesliceNothing) END	(* nothing available *)												
+					END;				
+					
+					(* Check if the process has the PleasHalt flag and handle it. *)					
+					IF PleaseHalt IN running[id].flags THEN							
+						(* Simulate procedure call: Increase stack & put return PC *)
+						DEC(state.ESP, 4);
+						SYSTEM.PUT(state.ESP, state.EIP); (* Here an stack overflow could happen! *)
+
+						(* Set the right halt procedure *)
+						IF (Unbreakable IN running[id].flags) THEN
+							state.EIP := SYSTEM.VAL(LONGINT, trap[1]);  						
+						ELSE
+							state.EIP := SYSTEM.VAL(LONGINT, trap[0]);  						
+						END;
+						
+					END;
+					
 				ELSE
 					INC(idlecount[id]);
 					IF Stats & stats THEN AosBoot.Inc(NtimesliceIdle) END	(* idle process *)
@@ -690,14 +751,17 @@ END POPFD;
 
 (** Return the active object currently executing. *)
 
+(* ug: the following optimized assembler version of ActiveObject does not work for the new GC that uses meta data for stack inspection. 
+          For this reason, the slower version of procedure ActiveObect is used. *)
+(*
 PROCEDURE ActiveObject*(): PTR;
 VAR r: Process;
 BEGIN
 	r := SYSTEM.VAL(Process, AosMemory.GetProcessPtr());
 	RETURN r.obj
 END ActiveObject;
+*)
 
-(*
 PROCEDURE ActiveObject*(): PTR;
 VAR pid: LONGINT; t: PTR;
 BEGIN
@@ -709,7 +773,6 @@ BEGIN
 	(*AosLocks.ReleasePreemption;*)
 	RETURN t
 END ActiveObject;
-*)
 
 (** Set the current process' priority. *)
 
@@ -724,20 +787,10 @@ BEGIN
 	(* to do: re-establish global priority invariant *)
 END SetPriority;
 
-(** Set the current process' exception handler (NIL to disable).  The exception handler gets called in kernel mode when an exception occurs, in the context of the faulting process.  It may modify the PC, FP and SP values in the passed interrupt state and set return = TRUE to restart the process causing the exception.  If it sets return = FALSE, the default handler is invoked (restart the object body or terminate the process). *)
-
-PROCEDURE SetExceptionHandler*(h: ExceptionHandler);
-VAR id: LONGINT;
-BEGIN
-	id := AosLocks.AcquirePreemption();
-	running[id].handler := h;
-	AosLocks.ReleasePreemption
-END SetExceptionHandler;
-
 (** Return TRUE iff the specified protected object is locked exclusive to the current process. *)
 
 PROCEDURE LockedByCurrent*(obj: PTR): BOOLEAN;
-VAR hdr: ObjectHeader; id: LONGINT; res: BOOLEAN;
+VAR hdr [UNTRACED]: ObjectHeader; id: LONGINT; res: BOOLEAN;
 BEGIN
 	ASSERT(SYSTEM.VAL(SET, obj) * AosHeap.FlagBits = {AosHeap.ProtObjBit});	(* protected object *)
 	hdr := SYSTEM.VAL(ObjectHeader, SYSTEM.VAL(LONGINT, obj)-AosHeap.ProtOfs);
@@ -799,6 +852,9 @@ BEGIN
 						ASSERT(CS() MOD 4 = AosInterrupts.KernelLevel);	(* otherwise we can not change state.ESP *)
 						running[id].perfCyc[id] :=
 							AosBoot.AddH(AosBoot.SubH(AosBoot.GetTimer(), perfTsc[id]), running[id].perfCyc[id]);
+						IF running[id].priority = MinPriority THEN (* Special treatment for idle threads *)
+							idleCycles[id] := AosBoot.AddH(idleCycles[id], AosBoot.SubH(AosBoot.GetTimer(), perfTsc[id]));
+						END;
 						IF Stats & stats THEN AosBoot.Inc(NpreemptTaken) END;	(* preempts taken *)
 						INCL(running[id].flags, Preempted);
 						CopyState(state, running[id].state);
@@ -941,6 +997,26 @@ BEGIN
 	AosLocks.Release(AosLocks.AosActive)
 END SetTimeout;
 
+(** Set (or reset) an event handler object's timeout value. Here ms is absolute *)
+
+PROCEDURE SetTimeoutAt*(t: Timer; h: EventHandler; ms: LONGINT);
+VAR e: Timer; trigger: LONGINT;
+BEGIN
+	ASSERT(Second= 1000);	(* assume milliseconds for now *)
+	AosLocks.Acquire(AosLocks.AosActive);
+	trigger := ms;	(* ignore overflow *)
+	IF t.tnext # NIL THEN	(* cancel previous timeout *)
+		t.tnext.tprev := t.tprev; t.tprev.tnext := t.tnext
+	END;
+	t.trigger := trigger; t.handler := h;
+	e := event.tnext;	(* performance: linear search! *)
+	WHILE (e # event) & (e.trigger - trigger <= 0) DO e := e.tnext END;
+	t.tprev := e.tprev; e.tprev := t; t.tnext := e; t.tprev.tnext := t;
+	(*AosOut.String("SetTimeout"); AosOut.Hex(SYSTEM.VAL(LONGINT, t), 9);
+	AosOut.Char(" "); AosOut.Int(trigger, 1); AosOut.Ln;*)
+	AosLocks.Release(AosLocks.AosActive)
+END SetTimeoutAt;
+
 (** Cancel an event handler object's timeout, if any.  It is possible that the timer has expired, but not yet been scheduled to run. *)
 
 PROCEDURE CancelTimeout*(t: Timer);
@@ -962,25 +1038,68 @@ BEGIN
 	IF Stats & stats THEN AosBoot.Inc(Nterminate) END;
 	AosLocks.Acquire(AosLocks.AosActive);
 	id := AosBoot.ID();
-	(*running[id].state.EIP := CallerEIP();*)	(* for tracing *)
+	(*running[id].state.EIP := CallerEIP();*)	(* for tracing *) 
 	running[id].mode := Terminated;	(* a process can also be "terminated" if the queue containing it is garbage collected *)
 	SwitchToNew;
 	HALT(2201)	(* process resurrected *)
 END Terminate;
 
-(* Induced halt. *)
 
-PROCEDURE Halt;
-CODE {SYSTEM.i386}
-	POP EBP
-	PUSH 2202	(* process halted *)
-	INT 3
+PROCEDURE Halt*;
+BEGIN
+	HALT(halt);	(* process halted *)
 END Halt;
 
-(** Attempt to terminate a specific process (mostly ignoring its locks). DEPRECATED *)
+PROCEDURE HaltUnbreakable*;
+BEGIN
+	HALT(haltUnbreakable);	(* process halted *)
+END HaltUnbreakable;
 
+(* Set the return PC which is saved in the process and set it to -1 *)
+PROCEDURE HaltAltPC(haltCode: LONGINT);
+VAR
+	fp: LONGINT;
+	p: Process;	
+BEGIN
+	p := running[AosBoot.ID()];
+	ASSERT(p.oldReturnPC # -1);
+	SYSTEM.GETREG(SYSTEM.EBP, fp); 	(* MOV		fp, EBP *)
+	SYSTEM.PUT(fp + 4, p.oldReturnPC); 	(* MOV		4[fp], oldReturnPC *)
+	CASE haltCode OF
+		halt: 
+			HALT(halt);		
+		|haltUnbreakable: 
+			HALT(haltUnbreakable);		
+	END;
+END HaltAltPC;
+
+
+PROCEDURE HaltReturn*;
+VAR
+	fp: LONGINT;
+BEGIN
+	SYSTEM.GETREG(SYSTEM.EBP, fp);
+	SYSTEM.GET(fp, fp); (* Get the dynamic link *)
+	SYSTEM.PUTREG(SYSTEM.EBP, fp); (* Undo the actual paf *)
+	HaltAltPC(halt);
+END HaltReturn;
+
+PROCEDURE HaltUnbreakableReturn*;
+VAR
+	fp: LONGINT;
+BEGIN
+	SYSTEM.GETREG(SYSTEM.EBP, fp);
+	SYSTEM.GET(fp, fp); (* Get the dynamic link *)
+	SYSTEM.PUTREG(SYSTEM.EBP, fp); (* Undo the actual paf *)
+	HaltAltPC(haltUnbreakable);
+END HaltUnbreakableReturn;
+
+
+
+(** Attempt to terminate a specific process (mostly ignoring its locks). DEPRECATED *)
+(*
 PROCEDURE TerminateThis*(t: Process; halt: BOOLEAN);
-VAR hdr: ObjectHeader;
+VAR hdr [UNTRACED]: ObjectHeader;
 BEGIN
 	IF ~(Resistant IN t.flags) THEN
 		AosLocks.Acquire(AosLocks.AosActive);
@@ -1015,6 +1134,88 @@ BEGIN
 		AosLocks.Release(AosLocks.AosActive)
 	END
 END TerminateThis;
+*)
+
+PROCEDURE TerminateThis*(t: Process; unbreakable: BOOLEAN);
+VAR 
+	hdr [UNTRACED]: ObjectHeader;
+	p: Process;
+	hasLocks, selfTerm: BOOLEAN;		
+	pc, fp, id: LONGINT;
+	m: AosModules.Module;
+	obj: ProtectedObject;
+BEGIN	
+	id := AosLocks.AcquirePreemption();		
+	p := running[id];
+	AosLocks.ReleasePreemption();
+	selfTerm := (p = t);			
+	
+	IF PleaseHalt IN t.flags THEN
+		IF Trace THEN
+			AosOut.Enter; AosOut.String("Process (ID="); AosOut.Int(t.id, 0); AosOut.String(") is already halting!"); AosOut.Exit
+		END;
+		RETURN
+	ELSE
+		IF selfTerm THEN
+			INCL(t.flags, SelfTermination)
+		END;
+		AosLocks.Acquire(AosLocks.AosActive);			
+			IF Trace THEN
+				AosOut.Enter; AosOut.String(" Kill "); AosOut.Int(t.id, 1); AosOut.Char(" "); AosOut.Int(t.mode, 1); AosOut.Exit;
+			END;
+			CASE t.mode OF				
+				 Running:				 	 				 
+					INCL(t.flags, PleaseHalt);						
+					IF unbreakable THEN INCL(t.flags, Unbreakable) END								
+				|Ready:								
+					DEC(t.state.ESP, 4);	SYSTEM.PUT(t.state.ESP, t.state.EIP);
+					IF unbreakable THEN t.state.EIP := SYSTEM.VAL(LONGINT, trap[1])  		
+					ELSE t.state.EIP := SYSTEM.VAL(LONGINT, trap[0]) END					
+				|AwaitingLock, AwaitingCond:		
+					ASSERT(SYSTEM.VAL(SET, t.waitingOn) * AosHeap.FlagBits = {AosHeap.ProtObjBit});
+					hdr := SYSTEM.VAL(ObjectHeader, SYSTEM.VAL(LONGINT, t.waitingOn)-AosHeap.ProtOfs);	
+					IF ~hdr.locked THEN
+						AosLocks.AcquireObject(hdr.locked); 			
+						IF t.mode = AwaitingLock THEN
+							fp := t.state.EBP;			(* SwitchTo PAF *)
+							SYSTEM.GET(fp, fp);	 		 (* SwitchToNew PAF *)						
+							SYSTEM.GET(fp, fp);	 		 (* Lock PAF*)						
+							SYSTEM.GET(fp + 4, pc);     	 (* Get the return address*)
+							IF ~AosModules.IsExceptionHandled(pc, fp, FALSE) THEN		
+								Remove(hdr.awaitingLock, t);
+								t.waitingOn := NIL; SYSTEM.GET(t.state.EBP + 4, t.oldReturnPC);					
+								IF unbreakable THEN 
+									SYSTEM.PUT(t.state.EBP + 4, SYSTEM.VAL(LONGINT, trapReturn[1]))
+								ELSE 
+									SYSTEM.PUT(t.state.EBP + 4, SYSTEM.VAL(LONGINT, trapReturn[0])) 
+								END;					
+								Enter(t)															
+							ELSE
+								AosOut.Enter; AosOut.String(" Not allowed to kill "); AosOut.Int(t.id, 1); AosOut.Char(" "); AosOut.Int(t.mode, 1); AosOut.Exit				
+							END
+						ELSIF t.mode = AwaitingCond THEN
+							SYSTEM.GET(t.state.EBP, fp);
+							SYSTEM.GET(t.state.EIP, pc);
+							IF ~AosModules.IsExceptionHandled(pc, fp, TRUE) THEN		
+								Remove(hdr.awaitingCond, t);
+								t.waitingOn := NIL; SYSTEM.GET(t.state.EBP + 4, t.oldReturnPC);					
+								IF unbreakable THEN 
+									SYSTEM.PUT(t.state.EBP + 4, SYSTEM.VAL(LONGINT, trapReturn[1]))
+								ELSE 
+									SYSTEM.PUT(t.state.EBP + 4, SYSTEM.VAL(LONGINT, trapReturn[0])) 
+								END;					
+								Enter(t)															
+							ELSE
+								AosOut.Enter; AosOut.String(" Not allowed to kill "); AosOut.Int(t.id, 1); AosOut.Char(" "); AosOut.Int(t.mode, 1); AosOut.Exit				
+							END
+						END;
+						AosLocks.ReleaseObject(hdr.locked)										
+					END
+				| AwaitingEvent, Unknown, Terminated:	(* skip *)
+			END;
+		AosLocks.Release(AosLocks.AosActive)		
+	END
+END TerminateThis;
 
 (* Finalize a process. *)
 
@@ -1035,7 +1236,7 @@ VAR t: Process; sp, id: LONGINT; fn: AosHeap.FinalizerNode;
 BEGIN
 	NEW(t); NEW(fn);	(* implicit call AosHeap.NewRec *)
 	t.next := NIL; t.prev := NIL; t.waitingOn := NIL; t.flags := flags;
-	t.obj := obj; t.mode := Unknown; t.handler := NIL;
+	t.obj := obj; t.mode := Unknown;
 		(* initialize the stack *)
 	AosMemory.NewStack(t.stack, t, sp);
 	IF VeryConservative THEN
@@ -1105,9 +1306,8 @@ BEGIN
 END CreateProcess;
 
 (* Lock a protected object (kernel call). *)
-
 PROCEDURE Lock(obj: ProtectedObject; exclusive: BOOLEAN);
-VAR hdr, h: ObjectHeader; r, p: Process; id: LONGINT; o: ProtectedObject;
+VAR hdr [UNTRACED], h [UNTRACED]: ObjectHeader; r, p: Process; id: LONGINT; o: ProtectedObject;
 BEGIN	(* {called from user level} *)
 	IF Stats & stats THEN AosBoot.Inc(Nlock) END;
 	IF StrongChecks THEN
@@ -1144,7 +1344,7 @@ BEGIN	(* {called from user level} *)
 					EXIT
 				ELSIF h.count = 0 THEN
 					AosLocks.ReleaseObject(h.locked);
-					r.state.EIP := CallerEIP();	(* for tracing only *)
+(*					r.state.EIP := CallerEIP();	(* for tracing only *)  *) (* ug *)
 					AosLocks.ReleaseObject(hdr.locked);	(* lock release order? *)
 					AosLocks.ReleasePreemption;
 					SwitchToNew;
@@ -1164,12 +1364,13 @@ BEGIN	(* {called from user level} *)
 		ELSE
 			Put(hdr.awaitingLock, r)
 		END;
-		r.state.EIP := CallerEIP();	(* for tracing only *)
+(*		r.state.EIP := CallerEIP();	(* for tracing only *) *) (* ug *)
 		AosLocks.ReleaseObject(hdr.locked);	(* lock release order? *)
 		AosLocks.ReleasePreemption;
 		SwitchToNew
 	END
 END Lock;
+
 
 (*
 PROCEDURE Lock(obj: ProtectedObject; exclusive: BOOLEAN);
@@ -1222,7 +1423,7 @@ BEGIN	(* {called from user level} *)
 		ASSERT(r.waitingOn = NIL);
 		r.waitingOn := obj; r.mode := AwaitingLock;
 		Put(hdr.awaitingLock, r);
-		r.state.EIP := CallerEIP();	(* for tracing only *)
+(*		r.state.EIP := CallerEIP();	(* for tracing only *) *) (* ug *)
 		IF ObjectLock THEN
 			AosLocks.ReleaseObject(hdr.locked);	(* lock release order? *)
 			AosLocks.ReleasePreemption
@@ -1259,7 +1460,7 @@ END FindCondition;
 (* Unlock a protected object (kernel call). *)
 
 PROCEDURE Unlock(obj: ProtectedObject; dummy: LONGINT);
-VAR hdr: ObjectHeader; t, c, r: Process; hlp: LONGINT;
+VAR hdr [UNTRACED]: ObjectHeader; t, c, r: Process; hlp: LONGINT;
 BEGIN
 	IF Stats & stats THEN AosBoot.Inc(Nunlock) END;
 	IF StrongChecks THEN
@@ -1283,7 +1484,9 @@ BEGIN
 			IF r.priInvCnt = 0 THEN r.currPri := r.priority END
 		END
 	END;
-	IF StrongChecks THEN
+	IF hdr.lockedBy # r THEN
+		AosLocks.ReleaseObject(hdr.locked);
+		POPFD;
 		ASSERT(hdr.lockedBy = r)
 	END;
 	IF c = NIL THEN	(* no true condition found, check the lock queue *)
@@ -1306,12 +1509,13 @@ BEGIN
 		c.waitingOn := NIL; hdr.lockedBy := c;
 		t := NIL
 	END;
+	
 	AosLocks.ReleaseObject(hdr.locked);
 	IF (c # NIL) OR (t # NIL) THEN
 		IF AosLocks.AcquirePreemption() = 0 THEN END;	(* required? *)
 		POPFD;
 		AosLocks.Acquire(AosLocks.AosActive);
-		IF c # NIL THEN Enter(c) END;
+		IF c # NIL THEN Enter(c)  END;
 		IF t # NIL THEN Enter(t) END;
 		AosLocks.Release(AosLocks.AosActive);
 		AosLocks.ReleasePreemption()
@@ -1388,7 +1592,7 @@ END Unlock;
 (* Await a condition (kernel call). *)
 
 PROCEDURE Await(cond: Condition; slink: LONGINT; obj: ProtectedObject; flags: SET);
-VAR hdr: ObjectHeader; r, t: Process; id: LONGINT;
+VAR hdr [UNTRACED]: ObjectHeader; r, t: Process; id: LONGINT;
 BEGIN
 	IF Trace THEN
 		AosOut.Enter; AosOut.String("Await"); AosOut.Hex(SYSTEM.VAL(LONGINT, cond), 9);
@@ -1444,7 +1648,7 @@ BEGIN
 	r.condition := cond; r.condFP := slink;
 	r.waitingOn := obj; r.mode := AwaitingCond;
 	Put(hdr.awaitingCond, r);
-	r.state.EIP := CallerEIP();	(* for tracing *)
+(*	r.state.EIP := CallerEIP();	(* for tracing *) *) (* ug *)
 	IF ObjectLock THEN
 		AosLocks.ReleaseObject(hdr.locked);
 		AosLocks.ReleasePreemption()
@@ -1460,15 +1664,16 @@ END Await;
 
 (** Update the state snapshot of the current process for GC.  (for AosProcessors) *)
 
-PROCEDURE UpdateState*(eip: LONGINT);
+PROCEDURE UpdateState*(VAR state: AosInterrupts.State);
 VAR t: Process;
 BEGIN (* interrupts off *)
 	t := running[AosBoot.ID()];
 	IF t # NIL THEN
-		t.state.EIP := eip;	(* for tracing *)
-		AosMemory.GetUserStack(t.state.ESP)
+ 		t.state.EIP := state.EIP; (* ug: required information for GC with meta data for stack inspection *)
+ 		t.state.ESP := state.ESP; (* ug: not necessarily needed for GC *)
+ 		t.state.EBP := state.EBP; (* ug: necessary information for GC with meta data for stack inspection *)
 	ELSE
-		(* This can happen during startup.  Another processor has initiated the garbage collector before we have had a chance to start running processes, most likely because of the AosOut.Enter lock in AosProcessors.StartMP . *)
+		(* This can happen during startup. Another processor has initiated the garbage collector before we have had a chance to start running processes, most likely because of the AosOut.Enter lock in AosProcessors.StartMP . *)
 	END
 END UpdateState;
 
@@ -1514,7 +1719,13 @@ BEGIN
 	AosModules.kernelProc[4] := SYSTEM.VAL(LONGINT, await);	(* 249 *)
 	AosModules.kernelProc[6] := SYSTEM.VAL(LONGINT, lock);	(* 247 *)
 	AosModules.kernelProc[7] := SYSTEM.VAL(LONGINT, unlock);	(* 246 *)
-	terminate := Terminate; trap := Halt
+	terminate := Terminate; 
+
+	trap[0] := Halt;
+	trap[1] := HaltUnbreakable;
+
+	trapReturn[0] := HaltReturn;
+	trapReturn[1] := HaltUnbreakableReturn;
 END Init;
 
 PROCEDURE InitEventHandling;
@@ -1611,16 +1822,11 @@ END AosActive.
 17.10.2000	pjm	Priorities
 22.10.2003	mib	SSE2 extension
 24.10.2003	phk	Priority inversion / cycle counters
-
-Stack invariant for GC:
-o if process is running, the processor registers contain its state
-o if process is not running, at least state.ESP is valid, and between stack.adr and stack.high (for GC)
-
-o when releasing the Ready lock, make sure the process state is up to date 
+19.06.2007	ug	Garbage Collector using meta data for stack inspection
 *)
 
 (*
-Location	Stack
+Location	Stack
 Lock	Current process
   SwitchTo.A	Current process
   SwitchTo.B	

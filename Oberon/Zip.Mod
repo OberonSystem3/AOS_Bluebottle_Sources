@@ -168,7 +168,7 @@ BEGIN
 			ent.support := IncompatibleVersion
 		END;
 		Files.ReadInt(r, ent.genPurpBitFlag);	(* general purpose bit flag *)
-		IF ODD(intDummy) THEN
+		IF ODD(ent.genPurpBitFlag) THEN
 			ent.support := Encrypted	(* bit 0: if set, file encrypted *)
 		END;
 		ent.dataDescriptor := ODD(intDummy DIV 8);	(* bit 3: data descriptor after (compressed) file data *)

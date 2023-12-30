@@ -6,7 +6,7 @@ Refer to the "General ETH Oberon System Source License" contract available at: h
 
 
 MODULE OPV;	(** non-portable *)
-	IMPORT OPS, OPT, OPL, OPO, OPC, OPM, Oberon, SYSTEM;
+	IMPORT OPS, OPT, OPL, OPO, OPC, OPM, Oberon, SYSTEM, Out;
 
 
 	CONST
@@ -51,6 +51,7 @@ MODULE OPV;	(** non-portable *)
 		Nifelse =20; Ncase = 21; Nwhile = 22; Nrepeat = 23; Nloop = 24; Nexit = 25;
 		Nreturn = 26; Nwith = 27; Ntrap = 28; Nassembler = 29;
 		Nret = 32;
+		Nfinally = 40;
 
 (*
    Syntax Tree  (in construction)
@@ -435,7 +436,7 @@ Statements
 		END
 	END ProcSize;
 	
-	PROCEDURE FindMth(curmod: SHORTINT; VAR name: OPS.Name; typ: OPT.Struct; VAR res: OPT.Object);	(*has a semantic different from OPT.FindField: the viewpoint is not (always) the current module*)
+	PROCEDURE FindMth(curmod: LONGINT; VAR name: OPS.Name; typ: OPT.Struct; VAR res: OPT.Object);	(*has a semantic different from OPT.FindField: the viewpoint is not (always) the current module*)
 		VAR obj: OPT.Object;
 	BEGIN res:=NIL;
 		WHILE ((typ # NIL) & (typ # OPT.ToBeFixed) & (typ # OPT.undftyp)) & (res=NIL) DO obj := typ^.link;
@@ -1277,7 +1278,9 @@ END TypeName;
 			  | Ntrap:
 					OPC.Trap (n.right.conval.intval, n)
 			  | Nassembler:
-			  	 OPC.GenAsm(n)
+				  	OPC.GenAsm(n);
+			  | Nfinally:
+					OPC.DefFinallyLabel(n);			
 			END;
 			n := n.link
 		END; 

@@ -25,14 +25,55 @@ TYPE
 			Raster.Fill(placeholderimg, 0, 0, 15, 15, pix, mode)
 		END Init;
 		
+		(* map unicode to oberon *)
+		PROCEDURE MapChars(VAR ch : LONGINT);
+		BEGIN
+	
+			CASE ch OF
+				0C4H :	 ch := 128;
+			|	0D6H :	 ch := 129;
+			|	0DCH :	 ch := 130;
+			|	0E4H :	 ch := 131;
+			|	0F6H :	 ch := 132;
+			|	0FCH :	 ch := 133;
+			|	0E2H :	 ch := 134;
+			|	0EAH :	 ch := 135;
+			|	0EEH :	 ch := 136;
+			|	0F4H :	 ch := 137;
+			|	0FBH :	 ch := 138;
+			|	0E0H :	 ch := 139;
+			|	0E8H :	 ch := 140;
+			|	0ECH :	 ch := 141;
+			|	0F2H :	 ch := 142;
+			|	0F9H :	 ch := 143;
+			|	0E9H :	 ch := 144;
+			|	0EBH :	 ch := 145;
+			|	0EFH :	 ch := 146;
+			|	0E7H :	 ch := 147;
+			|	0E1H :	 ch := 148;
+			|	0F1H :	 ch := 149;
+			|	0DFH :	 ch := 150;
+			|	0A3H :	 ch := 151;
+			|	0B6H :	 ch := 152;
+			|	0C7H :	 ch := 153;
+			ELSE
+				IF ch = 2030H THEN ch := 154
+				ELSIF ch = 2013H THEN ch := 155
+				END
+			END;
+				
+		END MapChars;		
+		
 		PROCEDURE HasChar*(code : LONGINT) : BOOLEAN;
 		BEGIN
+			MapChars(code);
 			RETURN (code >= 0) & (code < 256) & (glyphs[code].available)
 		END HasChar;
 		
 		PROCEDURE GetGlyphMap*(code : LONGINT; VAR map : Graphics.Image);
 		VAR g : Glyph;
 		BEGIN
+			MapChars(code);
 			IF (code >= 0) & (code < 256) & (glyphs[code].available) & (glyphs[code].img # NIL) THEN
 				map := glyphs[code].img
 			ELSE map := placeholderimg
@@ -41,6 +82,7 @@ TYPE
 		
 		PROCEDURE GetGlyphSpacings*(code : LONGINT; VAR glyphSpacings : Graphics.GlyphSpacings);
 		BEGIN
+			MapChars(code);
 			IF (code >= 0) & (code < 256) & (glyphs[code].available) THEN
 				glyphSpacings.width := glyphs[code].w; 
 				glyphSpacings.bearing.l := glyphs[code].x; 
@@ -274,7 +316,7 @@ BEGIN
 	Graphics.InstallDefaultFont(LoadDefaultFont());
 	AosOut.String("Default font installed");
 END WMDefaultFont.
- 
+
 
 System.Free WMDefaultFont ~
 Aos.Call WMDefaultFont.Load ~

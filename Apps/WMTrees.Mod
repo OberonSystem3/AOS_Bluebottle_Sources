@@ -1,19 +1,21 @@
 MODULE WMTrees;	(** AUTHOR "TF"; PURPOSE "Tree component"; *)
 
 IMPORT
-	WMWindowManager, AosOut, AosActive, AosModules, WMComponents, WMGraphics, UTF8Strings,
+	WMWindowManager, AosOut, AosActive, AosModules, WMComponents, WMGraphics, UTF8Strings, AosKernel,
 	WMStandardComponents, WMMessages, WMProperties, WMEvents, Rect := WMRectangles, Utilities, AosInputs;
 
 CONST
 	NodeExpanded* = 0;
 	NodeSubnodesUnknown* = 1;
 	NodeAlwaysExpanded* = 2;
+	NodeHidden * = 3;
 	
 	StateSelected* = 0;
 	StateHover* = 1;
 	StateHasSubNodes* = 2;
 	
 	DefaultHeight = 25;
+	DragDist = 10;
 
 TYPE
 	String = Utilities.String;
@@ -324,19 +326,20 @@ TYPE
 TYPE
 	TreeView* = OBJECT (WMComponents.VisualComponent)
 	VAR tree : Tree;
-		firstLine, lines : LONGINT;
+		downX, downY, firstLine, lines : LONGINT;
 		vscrollbar, hscrollbar : WMStandardComponents.Scrollbar;
 		drawNode : DrawNodeProc;
 		measureNode : MeasureNodeProc;
 		selectedNode, hoverNode : TreeNode;
-		selecting : BOOLEAN;
+		overNodeTimer : AosKernel.MilliTimer;
+		draggedNode -: TreeNode;
+		selecting, dragPossible : BOOLEAN;
 		cs : WMGraphics.CanvasState;
 		hindent, indent, hdelta : LONGINT;
 		onSelectNode-, onExpandNode-, onClickNode- : WMEvents.EventSource;
-		clHover*, clSelected*, 
-		clTextDefault*, clTextHover*, clTextSelected* : WMProperties.ColorProperty;
-		fontHeight* : WMProperties.Int32Property;
-		
+		clHover-, clSelected-, 
+		clTextDefault-, clTextHover-, clTextSelected- : WMProperties.ColorProperty;
+		fontHeight- : WMProperties.Int32Property;
 	
 		PROCEDURE &Init;
 		VAR root, t, t1, t2 : TreeNode;
@@ -440,7 +443,7 @@ TYPE
 		BEGIN
 			Acquire;
 			drawNode := x;
-			Acquire;
+			Release;
 			Invalidate
 		END SetDrawNodeProc;
 		
@@ -448,7 +451,7 @@ TYPE
 		BEGIN
 			Acquire;
 			measureNode := x;
-			Acquire;
+			Release;
 			Invalidate
 		END SetMeasureNodeProc;
 
@@ -517,8 +520,31 @@ TYPE
 		END MeasureNode;
 		
 		PROCEDURE RenderTreeNode(canvas : WMGraphics.Canvas; y, h : LONGINT; node : TreeNode; level : LONGINT);
-		VAR x, i, px, py : LONGINT; t : TreeNode;  height, color : LONGINT;
+		VAR x, i, px, py : LONGINT; t, u : TreeNode;  height, color : LONGINT;
 			state : SET;
+		
+			PROCEDURE HasMoreVisibleNodes(node : TreeNode): BOOLEAN;
+			VAR u : TreeNode; hasMore : BOOLEAN;
+			BEGIN
+				u := tree.GetNextSibling(node); hasMore := FALSE;
+				WHILE (u # NIL) & ~hasMore DO
+					IF (~(NodeHidden IN tree.GetNodeState(u))) THEN hasMore := TRUE END;
+					u := tree.GetNextSibling(u)
+				END;				
+				RETURN hasMore
+			END HasMoreVisibleNodes;
+			
+			PROCEDURE HasVisibleChilds(node : TreeNode): BOOLEAN;
+			VAR u : TreeNode; hasMore : BOOLEAN;
+			BEGIN
+				u := tree.GetChildren(node); hasMore := FALSE;
+				WHILE (u # NIL) & ~hasMore DO
+					IF (~(NodeHidden IN tree.GetNodeState(u))) THEN hasMore := TRUE END;
+					u := tree.GetNextSibling(u)
+				END;				
+				RETURN hasMore
+			END HasVisibleChilds;
+		
 		BEGIN
 			canvas.RestoreState(cs);
 			i := level; height := h;
@@ -529,14 +555,14 @@ TYPE
 			(* on each level *)
 			WHILE i > 0 DO
 				(* vertical line is needed if node/parent on level has a next sibling *)
-				IF tree.GetNextSibling(t) # NIL THEN canvas.Line(x, y, x, y + height, 0FFH, WMGraphics.ModeCopy) END;
+				IF HasMoreVisibleNodes(t) THEN canvas.Line(x, y, x, y + height, 0FFH, WMGraphics.ModeCopy) END;
 				t := tree.GetParent(t);
 				ASSERT(t # NIL);
 				DEC(i); DEC(x, indent) 
 			END;
 			x := level * indent - hdelta;
 			(* if the current node is the last in chain it needs half a vertical line *)
-			IF tree.GetNextSibling(node) = NIL THEN 
+			IF ~HasMoreVisibleNodes(node) THEN 
 				canvas.Line(x - hindent, y, x - hindent, y + height DIV 2, 0FFH, WMGraphics.ModeCopy)
 			END;
 			(* draw small horizontal line if not root node *)			
@@ -544,7 +570,7 @@ TYPE
 			
 			IF level > 0 THEN 
 				state := tree.GetNodeState(node);
-				IF ((tree.GetChildren(node) # NIL) OR (NodeSubnodesUnknown IN state)) & ~(NodeAlwaysExpanded IN state) THEN
+				IF (HasVisibleChilds(node)) & ((tree.GetChildren(node) # NIL) OR (NodeSubnodesUnknown IN state)) & ~(NodeAlwaysExpanded IN state) THEN
 					(* draw a plus sign *)
 					px := x - hindent; py := y + height DIV 2;
 					IF ~(NodeSubnodesUnknown IN state) THEN color := 0FFFFFFFFH ELSE color := 0808080FFH END;
@@ -577,20 +603,22 @@ TYPE
 				IF x = NIL THEN RETURN END;
 				INC(i);
 				IF y > height THEN RETURN END;
-				IF i > firstLine THEN
-					h := DefaultHeight; w := bounds.GetWidth();
-					IF measureNode # NIL THEN measureNode(x, w, h) END;
-					t := Rect.MakeRect(0, y, w, y + h);
-					IF Rect.Intersect(clip, t) THEN
-						RenderTreeNode(canvas, y, h, x, level);
-					END;	
-					INC(y, h)
-				END;
-				IF NodeExpanded IN x.state THEN 
-					a := tree.GetChildren(x);
-					WHILE a # NIL DO
-						RenderTree(a, level + 1);
-						a := tree.GetNextSibling(a)
+				IF (~(NodeHidden IN x.state)) THEN
+					IF i > firstLine THEN
+						h := DefaultHeight; w := bounds.GetWidth();
+						IF measureNode # NIL THEN measureNode(x, w, h) END;
+						t := Rect.MakeRect(0, y, w, y + h);
+						IF Rect.Intersect(clip, t) THEN
+							RenderTreeNode(canvas, y, h, x, level);
+						END;	
+						INC(y, h)
+					END;
+					IF NodeExpanded IN x.state THEN 
+						a := tree.GetChildren(x);
+						WHILE a # NIL DO
+							RenderTree(a, level + 1);
+							a := tree.GetNextSibling(a)
+						END
 					END
 				END	
 			END RenderTree;
@@ -617,19 +645,21 @@ TYPE
 			BEGIN
 				IF x = NIL THEN RETURN END;	
 				INC(i); IF cury > height THEN RETURN END;
-				IF i > firstLine THEN
-					h := DefaultHeight; w := bounds.GetWidth();
-					IF measureNode # NIL THEN measureNode(x, w, h) END;
-					INC(cury, h)
-				END;
-				IF cury >= y THEN found := x; RETURN END;
-				IF NodeExpanded IN x.state THEN 
-					a := tree.GetChildren(x);
-					WHILE a # NIL DO
-						IF found = NIL THEN RenderTree(a, level + 1) END;
-						a := tree.GetNextSibling(a)
+				IF (~(NodeHidden IN x.state)) THEN
+					IF i > firstLine THEN
+						h := DefaultHeight; w := bounds.GetWidth();
+						IF measureNode # NIL THEN measureNode(x, w, h) END;
+						INC(cury, h)
+					END;
+					IF cury >= y THEN found := x; RETURN END;
+					IF NodeExpanded IN x.state THEN 
+						a := tree.GetChildren(x);
+						WHILE a # NIL DO
+							IF found = NIL THEN RenderTree(a, level + 1) END;
+							a := tree.GetNextSibling(a)
+						END
 					END
-				END	
+				END
 			END RenderTree;
 			
 		BEGIN
@@ -705,16 +735,27 @@ TYPE
 		BEGIN
 			ASSERT(IsCallFromSequencer());
 			selecting := 0 IN keys;
-			IF keys = {2} THEN ShowContextMenu(x, y) END
+			IF keys = {2} THEN ShowContextMenu(x, y) END;
+			dragPossible := TRUE;
+			downX := x;
+			downY := y
 		END PointerDown;
 		
 		PROCEDURE PointerMove(x, y : LONGINT; keys : SET);
 		VAR new : TreeNode;
 		BEGIN
 			new := GetNodeAtPos(x, y);
-			IF new # hoverNode THEN
-				hoverNode := new;
-				Invalidate
+			IF dragPossible THEN
+				IF (ABS(x - downX) > DragDist) OR (ABS(y - downY) > DragDist) THEN 
+					dragPossible := FALSE;
+					draggedNode := new;
+					AutoStartDrag()
+				END
+			ELSE
+				IF new # hoverNode THEN
+					hoverNode := new;
+					Invalidate
+				END	
 			END	
 		END PointerMove;
 		
@@ -757,7 +798,9 @@ TYPE
 					END	
 				END
 			END;
-			tree.Release
+			tree.Release;
+			dragPossible := FALSE;
+			draggedNode := NIL;
 		END PointerUp;
 		
 		PROCEDURE DragOver(x, y : LONGINT; dragInfo : WMWindowManager.DragInfo);
@@ -765,11 +808,15 @@ TYPE
 		BEGIN
 			tree.Acquire;
 			node := GetNodeAtPos(x, y);
-			IF ~(NodeExpanded IN tree.GetNodeState(node)) THEN 
-				onExpandNode.Call(node);
-				tree.InclNodeState(node, NodeExpanded) 
+			
+			IF (node = hoverNode) & ~(NodeExpanded IN tree.GetNodeState(node)) THEN 
+				IF AosKernel.Expired(overNodeTimer) THEN
+					onExpandNode.Call(node);
+					tree.InclNodeState(node, NodeExpanded) 
+				END	
 			END;
 			IF node # hoverNode THEN
+				AosKernel.SetTimer(overNodeTimer, 500);
 				hoverNode := node;
 				Invalidate
 			END;
@@ -808,6 +855,7 @@ TYPE
 	END TreeView;
 
 VAR
+	 ColorPrototype : WMProperties.ColorProperty;
 	 PrototypeTclHover*, PrototypeTclSelected*, PrototypeTclTextDefault*, 
 	 PrototypeTclTextHover*, PrototypeTclTextSelected* : WMProperties.ColorProperty; 
 	 PrototypeTfontHeight* : WMProperties.Int32Property;
@@ -815,27 +863,25 @@ VAR
 PROCEDURE InitPrototypes;
 VAR plTreeView : WMProperties.PropertyList;
 BEGIN
-	NEW(plTreeView);
-	NEW(PrototypeTclHover, NIL, NewString("ClHover"), NewString("color of the tree item, if the mouse is over it"));
-	plTreeView.Add(PrototypeTclHover);
-	NEW(PrototypeTclSelected, NIL, NewString("ClSelected"), NewString("color of the the tree item, if it is selected"));
-	plTreeView.Add(PrototypeTclSelected);
-	NEW(PrototypeTclTextDefault, NIL, NewString("ClTextDefault"), NewString("default text color of the tree item"));
-	plTreeView.Add(PrototypeTclTextDefault);
-	NEW(PrototypeTclTextHover, NIL, NewString("ClTextHover"), NewString("text color of the tree item, if the mouse is over it"));
-	plTreeView.Add(PrototypeTclTextHover);
-	NEW(PrototypeTclTextSelected, NIL, NewString("ClTextSelected"), NewString("text color of the tree item, when selected"));
-	plTreeView.Add(PrototypeTclTextSelected);
+	NEW(plTreeView); WMComponents.propertyListList.Add("TreeView", plTreeView);
+	
+	(* background colors *)
+	NEW(ColorPrototype, NIL, NewString("ClHover"), NewString("color of the tree item, if the mouse is over it")); ColorPrototype.Set(0FFFF0080H);
+	NEW(PrototypeTclHover, ColorPrototype, NIL, NIL); plTreeView.Add(PrototypeTclHover);
+	NEW(ColorPrototype, NIL, NewString("ClSelected"), NewString("color of the the tree item, if it is selected")); ColorPrototype.Set(00000FF80H);
+	NEW(PrototypeTclSelected, ColorPrototype, NIL, NIL); plTreeView.Add(PrototypeTclSelected);
+	(* font colors *)	
+	NEW(ColorPrototype, NIL, NewString("ClTextDefault"), NewString("default text color of the tree item")); ColorPrototype.Set(0000000FFH);
+	NEW(PrototypeTclTextDefault, ColorPrototype, NIL, NIL); plTreeView.Add(PrototypeTclTextDefault);
+	NEW(ColorPrototype, NIL, NewString("ClTextHover"), NewString("text color of the tree item, if the mouse is over it")); ColorPrototype.Set(00000FFFFH);
+	NEW(PrototypeTclTextHover, ColorPrototype, NIL, NIL); plTreeView.Add(PrototypeTclTextHover);
+	NEW(ColorPrototype, NIL, NewString("ClTextSelected"), NewString("text color of the tree item, when selected")); ColorPrototype.Set(0FFFFFFFFH);
+	NEW(PrototypeTclTextSelected, ColorPrototype, NIL, NIL); plTreeView.Add(PrototypeTclTextSelected);
+		
 	NEW(PrototypeTfontHeight, NIL, NewString("FontHeight"), NewString("height of the tree item text"));
-	plTreeView.Add(PrototypeTfontHeight);
-	PrototypeTclHover.Set(0FFFF00FFH);
-	PrototypeTclSelected.Set(00000FFFFH);
-	PrototypeTclTextDefault.Set(0000000FFH);
-	PrototypeTclTextHover.Set(00000FFFFH);
-	PrototypeTclTextSelected.Set(0FFFFFFFFH);
-	PrototypeTfontHeight.Set(12);
-	WMComponents.propertyListList.Add("TreeView", plTreeView);
-	WMComponents.propertyListList.UpdateStyle;
+	plTreeView.Add(PrototypeTfontHeight); 	PrototypeTfontHeight.Set(12);
+	
+	WMComponents.propertyListList.UpdateStyle
 END InitPrototypes;	
 
 PROCEDURE TreeViewGen*(ptr : PTR):PTR;

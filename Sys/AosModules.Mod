@@ -1,6 +1,6 @@
 (* Aos, Copyright 2001, Pieter Muller, ETH Zurich *)
 
- MODULE AosModules; (** AUTHOR "pjm"; PURPOSE "Modules and types"; *)
+MODULE AosModules; (** AUTHOR "pjm"; PURPOSE "Modules and types"; *)
 
 IMPORT SYSTEM, AosBoot, AosLocks, AosOut, AosHeap;
 
@@ -40,6 +40,7 @@ TYPE
 		exports*: LONGINT;
 		dsc*: ExportArray
 	END;
+	ExportPtr* = POINTER TO ExportDesc; (* ug *)
 	ExportArray* = POINTER TO ARRAY OF ExportDesc;
 	
 	Bytes* = POINTER TO ARRAY OF CHAR;
@@ -71,7 +72,24 @@ TYPE
 		(* ptrOfs: ARRAY N OF LONGINT *)
 		(* sentinel: LONGINT *)	(* = MPO-4*(N+1) *)
 	END;
-		
+	
+	ExceptionTableEntry* = RECORD
+		pcFrom*: LONGINT;
+		pcTo*: LONGINT;
+		pcHandler*: LONGINT;
+	END;
+
+	ExceptionTable* = POINTER TO ARRAY OF ExceptionTableEntry;
+	
+	ProcTableEntry* = RECORD  (* ug *)
+		pcFrom*, pcStatementBegin*, pcStatementEnd*: LONGINT;
+		noPtr*: LONGINT;
+	END;
+	
+	ProcTable* = POINTER TO ARRAY OF ProcTableEntry; (* ug *)
+	
+	PtrTable* = POINTER TO ARRAY OF LONGINT; (* ug *)
+	
 TYPE
 	Module* = OBJECT (AosHeap.RootObject)	(* cf. AosLinker0 & AosHeap.WriteType *)
 		VAR
@@ -86,7 +104,7 @@ TYPE
 			ptrAdr*: POINTER TO ARRAY OF LONGINT;
 			type*: POINTER TO ARRAY OF TypeTag;	(* traced explicitly in FindRoots *)
 			module*: POINTER TO ARRAY OF Module;
-			data*, code*, refs*: Bytes;
+			data*, code*, refs*: Bytes; (** code must be at least one byte long *)
 				(* slim binary support *)
 			publics*, privates*: LONGINT;	(* should also be marked (slim binaries?) *)
 			imports*: LONGINT;
@@ -98,6 +116,12 @@ TYPE
 			export*: ExportDesc;
 				(* termination handler *)
 			term*: TerminationHandler;
+			exTable*: ExceptionTable;
+			exTableLen*: LONGINT;
+			procTable*: ProcTable;	(* ug *)
+			procTableLen*: LONGINT;	(* ug *)
+			ptrTable*: PtrTable;	(* ug *)
+			maxPtrs*: LONGINT;	(* ug *)
 		
 		PROCEDURE FindRoots;	(* override *)
 		VAR i: LONGINT;  ptr: SYSTEM.PTR;
@@ -115,6 +139,7 @@ TYPE
 				END
 			END
 		END FindRoots;
+		
 	END Module;
 
 	LoaderProc* = PROCEDURE (name, fileName: ARRAY OF CHAR;  VAR res: LONGINT;  
@@ -186,6 +211,7 @@ END Append;
 PROCEDURE Publish*(VAR m: Module;  VAR new: BOOLEAN);
 VAR n: Module;  i: LONGINT;
 BEGIN
+	ASSERT((m.code # NIL) & (LEN(m.code^) > 0));
 	AosLocks.Acquire(AosLocks.AosModules);
 	n := root;  WHILE (n # NIL) & (n.name # m.name) DO n := n.next END;
 	IF n # NIL THEN	(* module with same name exists, return it and ignore new m *)
@@ -439,7 +465,8 @@ BEGIN
 				(* do not clear m.type or m.module, as old heap block tags might reference type descs indirectly. *)
 				(* do not clear m.data or m.code, as they are used in ThisModuleByAdr (for debugging). *)
 				(* do not clear m.refs, as they are used in AosTrap (for debugging). *)
-			m.import := NIL; m.struct := NIL; m.reimp := NIL; m.export.dsc := NIL
+			m.import := NIL; m.struct := NIL; m.reimp := NIL; m.export.dsc := NIL; m.exTable := NIL; 
+			m.procTable := NIL; m.ptrTable := NIL; (* ug *)
 		ELSE
 			res := 1901;	(* can not free module in use *)
 			COPY(name, msg);  Append(" reference count not zero", msg)
@@ -490,6 +517,68 @@ BEGIN
 		AosBoot.Shutdown(code = Reboot)	(* does not return *)
 	END
 END Shutdown;
+
+(* Is this PC handled in the corresponding module. deep = scan the whole stack. *)
+PROCEDURE IsExceptionHandled*(VAR pc: LONGINT; VAR fp: LONGINT; deep: BOOLEAN): BOOLEAN;
+VAR
+	handler: LONGINT;
+BEGIN
+	IF deep THEN
+		handler := GetExceptionHandler(pc);
+		IF handler # -1 THEN (* Handler in the current PAF *)
+			RETURN TRUE
+		ELSE			
+			WHILE (fp # 0) & (handler = -1) DO				
+				SYSTEM.GET(fp + 4, pc);
+				pc := pc - 1; (*  CALL instruction, machine dependant!!! *)				
+				handler := GetExceptionHandler(pc);				
+				SYSTEM.GET(fp, fp) (* Unwind PAF *)
+			END;	
+			IF handler = -1 THEN RETURN FALSE 	ELSE pc := handler; RETURN TRUE END
+		END
+	ELSE
+		RETURN GetExceptionHandler(pc) # -1	
+	END
+END IsExceptionHandled;
+
+(* Is this PC handled in the corresponding module. If the PC is handled the PC of the 
+	handler is return else -1 is return. There is no problem concurrently accessing this
+	procedure, there is only reading work. *)
+PROCEDURE GetExceptionHandler*(pc: LONGINT): LONGINT;
+VAR
+	m: Module;
+	i : LONGINT;
+	
+	PROCEDURE BinSearch(exTable: ExceptionTable; key: LONGINT): LONGINT;
+	VAR
+		x, l, r: LONGINT;
+	BEGIN
+		l := 0; r:=LEN(exTable) - 1;
+		REPEAT
+			x := (l + r) DIV 2;
+			IF key < exTable[x].pcFrom THEN r := x - 1 ELSE l := x + 1 END;
+		UNTIL ((key >= exTable[x].pcFrom) & (key < exTable[x].pcTo) ) OR (l > r);
+
+		IF (key >= exTable[x].pcFrom) & (key < exTable[x].pcTo) THEN
+			RETURN exTable[x].pcHandler;
+		ELSE
+			RETURN -1;
+		END
+	END BinSearch;
+	
+BEGIN
+	m := ThisModuleByAdr(pc);
+	IF (m # NIL) & (m.exTable # NIL) & (m.exTableLen > 0) THEN			
+		RETURN BinSearch(m.exTable, pc);		
+	END;		
+	RETURN -1;	
+END GetExceptionHandler;
+
+(** fof: to make custom solutions to the race process, described below,  possible. This is not a solution to the generic problem !! *) 
+PROCEDURE Initialized*(m: Module): BOOLEAN;
+BEGIN
+	RETURN m.init; 
+END Initialized;
 
 (** Return the specified kernel procedure address. *)
 

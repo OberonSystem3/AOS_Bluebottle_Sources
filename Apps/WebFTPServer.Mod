@@ -380,7 +380,10 @@ TYPE
 		END Store;
 			
 		PROCEDURE Execute(VAR cmd, param: ARRAY OF CHAR);
-		VAR tmp, filename, str: ARRAY dirLen OF CHAR; i, code, lastState, res: LONGINT;
+		VAR 
+			tmp, filename, str: ARRAY dirLen OF CHAR; 
+			i, j, count, code, lastState, res: LONGINT;
+			
 		BEGIN
 			lastState := state; state := Ok;
 		
@@ -431,7 +434,8 @@ TYPE
 				IF cmd = "CWD" THEN	(* change working directory  *)
 					ComposeDirectory(workDir, param, tmp);
 					IF CheckDirectory(tmp) THEN
-						COPY(tmp, workDir); IF (workDir # "") THEN AosFS.ForceTrailingDelimiter(workDir) END;
+						COPY(tmp, workDir); 
+						IF (workDir # "") THEN AosFS.ForceTrailingDelimiter(workDir) END;
 						code := 250; GetWorkingDirMsg(str)
 					ELSE
 						code := 550; Utilities.Concat(param, ": no such file or directory.", str)
@@ -499,6 +503,21 @@ TYPE
 						code := 227						
 					ELSE	(* 425 is not an official reply, but the only one that makes sense *)
 						code := 425; COPY("Can't open data connection.", str)
+					END
+				ELSIF cmd = "EPSV" THEN
+					mode := Passive;
+					NEW(pasvListener);
+					pasvListener.Open(AosTCP.NilPort, AosIP.NilAdr, AosTCP.NilPort, res);
+					logEntry.result := res;
+					IF (res = AosIP.Ok) THEN
+						str := "";
+						Utilities.IntToStr(pasvListener.lport, tmp);
+						Utilities.Append(str, "Entering Extended Passive Mode (|||");
+						Utilities.Append(str, tmp);
+						Utilities.Append(str, "|)");					
+						code := 229;
+					ELSE	
+						code := 500; COPY("Can't open data connection.", str)
 					END				
 				ELSIF cmd = "SYST" THEN
 					code := 215; COPY(Msg215, str)
@@ -520,6 +539,9 @@ TYPE
 				ELSIF cmd = "PORT" THEN
 					SplitPort(param, dataAdr, dataPort);
 					code := 200; COPY("PORT command successful.", str)
+				ELSIF cmd = "EPRT" THEN
+					SplitEPRT(param, dataAdr, dataPort);
+					code := 200; COPY("EPRT command successful.", str);				
 				ELSIF cmd = "SIZE" THEN
 					IF (read IN user.permissions) THEN
 						Size(param); code := -1
@@ -571,7 +593,13 @@ TYPE
 				ELSIF cmd = "RNTO" THEN
 					IF (lastState = RNFR) THEN
 						IF (Utilities.Pos(PathDelimiter, param) = -1) THEN	(* path in filename not allowed *)
-							AosFS.SplitPath(rnfrName, filename, tmp); Utilities.Append(filename, "/"); Utilities.Append(filename, param);
+							AosFS.SplitPath(rnfrName, filename, tmp); 
+							IF (Utilities.Pos(":", filename) = -1) THEN
+								Utilities.Append(filename, ":"); 
+							ELSE
+								Utilities.Append(filename, "/"); 
+							END;
+							Utilities.Append(filename, param);
 							AosFS.Rename(rnfrName, filename, res);
 							logEntry.result := res;
 							IF (res = 0) THEN
@@ -728,6 +756,56 @@ BEGIN
 	port := port+StrToIntPos(parm, pos)
 END SplitPort;
 
+
+(* Parses the EPRT command *)
+PROCEDURE SplitEPRT(param: ARRAY OF CHAR; VAR adr: AosIP.Adr; VAR port: LONGINT);
+VAR
+	i: LONGINT;
+	protocol: LONGINT;
+	tempString: ARRAY 128 OF CHAR;
+	j: LONGINT;
+	
+BEGIN
+	(* read protocol *)		
+	i := 0;
+	WHILE (i < LEN(param)) & (param[i] # "|") DO
+		INC(i);
+	END;
+	IF i < LEN(param) THEN
+		protocol := ORD(param[i+1]) - ORD("0");
+	END;
+	
+	(* parse IP address *)
+	i := i+3;
+	j := i;
+	WHILE (i < LEN(param)) & ((param[i] # "|") & (param[i] # "%")) DO
+		INC(i);
+	END;
+	IF i < LEN(param) THEN
+		Utilities.Copy(param, j, i-j, tempString);
+	END;
+	adr := AosIP.StrToAdr(tempString);
+	
+	(* port *)
+	IF param[i] = "%" THEN
+		WHILE (i < LEN(param)) & (param[i] # "|") DO
+			INC(i);
+		END;
+	END;
+	IF i < LEN(param) THEN
+		INC(i);
+		j := i;
+		WHILE (i < LEN(param)) & (param[i] # "|") DO
+			INC(i);
+		END;
+		IF i < LEN(param) THEN
+			Utilities.Copy(param, j, i-j, tempString);
+			StrToInt(tempString, port);			
+		END;
+	END;
+END SplitEPRT;
+
+
 PROCEDURE BinaryTransfer(r: AosIO.Reader;  w: AosIO.Writer);
 VAR buf: ARRAY BufSize OF CHAR; len: LONGINT;
 BEGIN
@@ -768,16 +846,18 @@ BEGIN
 END Code;
 
 PROCEDURE ComposeDirectory(path, name: ARRAY OF CHAR; VAR res: ARRAY OF CHAR);
-VAR prefix: AosFS.Prefix; tmp: ARRAY dirLen OF CHAR; p: LONGINT; 
+VAR 
+	prefix: AosFS.Prefix; tmp: ARRAY dirLen OF CHAR; p: LONGINT; 
+	absolute : BOOLEAN; 
 BEGIN
-	COPY(path, res);
+	COPY(path, res); absolute :=  PathDelimiter = name[0];
 	Utilities.TrimRight(res, PathDelimiter);
 	Utilities.TrimRight(name, PathDelimiter);
 	
 	AosFS.SplitName(name, prefix, tmp);
-	IF (prefix # "") OR (name[0] = PathDelimiter) THEN (* absolute path *)
+	IF (prefix # "") OR absolute THEN (* absolute path *)
 		COPY(name, res); Utilities.TrimLeft(res, PathDelimiter)
-	ELSE (* relative path *)
+	ELSE (* relative path *)		
 		WHILE (name # "") DO
 			p := Utilities.Pos(PathDelimiter, name);
 			IF (p >= 0) THEN 
@@ -814,6 +894,7 @@ END NewFTPAgent;
 
 PROCEDURE Start*(par: PTR): PTR; (** ["\l:" log file] *)
 VAR p: AosCommands.Parameters; r: AosIO.StringReader; c, opt: CHAR; str, log: ARRAY 1024 OF CHAR;
+	res : LONGINT;
 BEGIN
 	IF ftp = NIL THEN
 		p := par(AosCommands.Parameters);
@@ -843,7 +924,7 @@ BEGIN
 		shutdown := FALSE;
 		NclientsTotal := 0; NclientsActive := 0; NbytesReceived := 0; NbytesSent := 0;
 		OpenW3CLog(log);
-		AosTCPServices.OpenService(ftp, FTPControlPort, NewFTPAgent);
+		NEW(ftp, FTPControlPort, NewFTPAgent, res);
 		AosOut.Enter; AosOut.String("WebFTPServer open"); AosOut.Exit
 	END;
 	RETURN NIL
@@ -853,7 +934,7 @@ PROCEDURE Stop*(par: PTR): PTR;
 BEGIN
 	IF ftp # NIL THEN
 		shutdown := TRUE;
-		AosTCPServices.CloseService(ftp);
+		ftp.Stop; ftp := NIL;
 		AosOut.Enter; AosOut.String("WebFTPServer closed"); AosOut.Exit
 	END;
 	RETURN NIL
@@ -1163,12 +1244,12 @@ END WebFTPServer.
 
 Aos.Call WebFTPServer.Start ~\l:FAT:/logs/FTP.Log~
 Aos.Call WebFTPServer.Stop
-Aos.Call NetTracker.CloseAll
+NetTracker.CloseAll
 System.Free WebFTPServer ~
 ET.OpenAscii FTP.Log ~
 
 
-Aos.Call WebFTPServer.AddUser user password -1 rwp  AOS:~
+Aos.Call WebFTPServer.AddUser user password -1 rwp  FAT:~
 Aos.Call WebFTPServer.AddUser anonymous none 3 rwpm FAT:/ftproot/ ~
 Aos.Call WebFTPServer.RemoveUser begger ~
 Aos.Call WebFTPServer.ListUsers

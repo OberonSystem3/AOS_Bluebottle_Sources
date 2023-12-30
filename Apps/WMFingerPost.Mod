@@ -1,18 +1,18 @@
 MODULE WMFingerPost;	(** AUTHOR "TF"; PURPOSE "Navigation in the Screenspace"; *)
 
 IMPORT
-		AosOut, AosModules, AosCommands, AosIO, WM := WMWindowManager, WMStandardComponents, 
-		Utilities,  WMComponents, WMGraphics, TFClasses;
+	AosCommands, AosIO, AosModules,
+	WMStandardComponents, WMComponents, WMGraphics, TFClasses,
+	WM := WMWindowManager;
 
 TYPE
-	String = Utilities.String;
 	FingerPost = OBJECT(WMComponents.FormWindow)
-	VAR 
+	VAR
 		panel : WMStandardComponents.Panel;
 		goButton : WMStandardComponents.Button;
 		destx, desty, destw, desth : LONGINT;
 		doTransition : BOOLEAN;
-		
+
 		PROCEDURE &New(destName : ARRAY OF CHAR; x, y, w, h, destx, desty, destw, desth : LONGINT; transition : BOOLEAN);
 		BEGIN
 			(* add a panel *)
@@ -35,7 +35,7 @@ TYPE
 			manager.Add(x, y, SELF, {WM.FlagStayOnTop});
 			manager.SetWindowSize(SELF, w, h)
 		END New;
-	
+
 		PROCEDURE Go(sender, data : PTR);
 		VAR view : WM.ViewPort; w, h : REAL; originator : PTR;
 		BEGIN
@@ -48,39 +48,36 @@ TYPE
 			END
 		END Go;
 	END FingerPost;
-	
+
 VAR windowList : TFClasses.List;
 	followPointer : WM.PointerInfo;
 
 PROCEDURE Add*(par : PTR) : PTR;
-VAR manager : WM.WindowManager;
-	fp : FingerPost;
-	img : WMGraphics.Image;
-	x, y, w, h, destx, desty, destw, desth : LONGINT;
-	name : ARRAY 256 OF CHAR;
-	s : AosCommands.Parameters;
+VAR fp : FingerPost;
+	fn : ARRAY 33 OF CHAR;
 	sr : AosIO.StringReader;
-	done : BOOLEAN;
-	ptr : PTR;
-	i, count : LONGINT;
-	snap : BOOLEAN;
+
+	(* Assign an integer  value to a variable: extracted from the command parameter if present or
+		else a default one *)
+	PROCEDURE SetVal(def : LONGINT) : LONGINT;
+	VAR int : LONGINT;
+	BEGIN
+		int := def;
+		IF (sr.Peek() >= '0') & (sr.Peek() <= '9') OR (sr.Peek() = '-') THEN
+			AosCommands.GetInt(sr, int, TRUE);
+		END;
+		RETURN int;
+	END SetVal;
+
 BEGIN {EXCLUSIVE}
-	s := par(AosCommands.Parameters);
-	NEW(sr, LEN(s.str^)); sr.Set(s.str^);
-	sr.String(name); sr.SkipWhitespace();
-	x := 0; IF (sr.Peek() >= '0') & (sr.Peek() <= '9') OR (sr.Peek() = '-') THEN sr.Int(x, TRUE) END; sr.SkipWhitespace();
-	y := 0; IF (sr.Peek() >= '0') & (sr.Peek() <= '9') OR (sr.Peek() = '-') THEN sr.Int(y, TRUE) END; sr.SkipWhitespace();
-	w := 0; IF (sr.Peek() >= '0') & (sr.Peek() <= '9') OR (sr.Peek() = '-') THEN sr.Int(w, TRUE) END; sr.SkipWhitespace();
-	h := 0; IF (sr.Peek() >= '0') & (sr.Peek() <= '9') OR (sr.Peek() = '-') THEN sr.Int(h, TRUE) END; sr.SkipWhitespace();
-	destx := 0; IF (sr.Peek() >= '0') & (sr.Peek() <= '9') OR (sr.Peek() = '-') THEN sr.Int(destx, TRUE) END; sr.SkipWhitespace();
-	desty := 0; IF (sr.Peek() >= '0') & (sr.Peek() <= '9') OR (sr.Peek() = '-') THEN sr.Int(desty, TRUE) END; sr.SkipWhitespace();
-	destw := 70; IF (sr.Peek() >= '0') & (sr.Peek() <= '9') OR (sr.Peek() = '-') THEN sr.Int(destw, TRUE) END; sr.SkipWhitespace();
-	desth := 20; IF (sr.Peek() >= '0') & (sr.Peek() <= '9') OR (sr.Peek() = '-') THEN sr.Int(desth, TRUE) END; sr.SkipWhitespace();
-	snap := sr.Get() = "S";
-	NEW(fp, name, x, y, w, h, destx, desty, destw, desth, ~snap);
+	AosCommands.PosPar(par, sr);
+	AosCommands.GetTok(sr, fn);
+	(* Enumeration of the integer values appearing in the command parameters: origin and destination *)
+	(*                x		   y			w		   h			destx	    desty		 destw		desth		snap	*)
+	NEW(fp, fn, SetVal(0), SetVal(0), SetVal(0), SetVal(0), SetVal(0), SetVal(0), SetVal(70), SetVal(20), (sr.Get() # "S"));
 	windowList.Add(fp);
 	RETURN NIL
-END Add;		
+END Add;
 
 PROCEDURE Cleanup;
 VAR manager : WM.WindowManager;
@@ -89,9 +86,9 @@ VAR manager : WM.WindowManager;
 BEGIN
 	manager := WM.GetDefaultManager();
 	windowList.Lock;
-	FOR i := 0 TO windowList.GetCount() - 1 DO 
-		ptr := windowList.GetItem(i); 
-		manager.Remove(ptr(WM.Window))
+	FOR i := 0 TO windowList.GetCount() - 1 DO
+		ptr := windowList.GetItem(i);
+		manager.Remove(ptr(WM.Window));
 	END;
 	windowList.Unlock;
 END Cleanup;
@@ -99,23 +96,22 @@ END Cleanup;
 PROCEDURE RemoveAll*(par : PTR) : PTR;
 BEGIN
 	Cleanup;
-	RETURN NIL
+	RETURN NIL;
 END RemoveAll;
 
 BEGIN
 	WM.LoadCursor("traditional.arrow.png", 0, 0, followPointer);
-	
 	NEW(windowList);
-	AosModules.InstallTermHandler(Cleanup)
+	AosModules.InstallTermHandler(Cleanup);
 END WMFingerPost.
 
-System.Free WMFingerPost ~
-Configuration.DoCommands
-Aos.Call WMBackdrop.AddBackdropImage BluebottlePic0.png 0 0 1280 1024~
-Aos.Call WMBackdrop.AddBackdropImage AosBackdrop.png 1280 0 ~
-	üAos.Call WMBackdrop.AddBackdropImage paper.gif 0 1024 1280 1024 ~
-Aos.Call WMFingerPost.Add Oberon 2480 1000 0 0 1280 1024
-Aos.Call WMFingerPost.Add "Windows" 1200 1000 1280 0 1280 1024
-Aos.Call WMFingerPost.Add "Home" 1200 980 0 0 1280 1024
-~
-System.Free WMBackdrop ~
+S.Free WMFingerPost ~
+
+WMBackdrop.AddBackdropImage BluebottlePic0.png 0 0 1280 1024~
+WMBackdrop.AddBackdropImage AosBackdrop.png 1280 0 ~
+WMBackdrop.AddBackdropImage paper.gif 0 1024 1280 1024 ~
+WMFingerPost.Add Oberon 2480 1000 0 0 1280 1024 ~
+WMFingerPost.Add "Windows" 1200 1000 1280 0 1280 1024 ~
+WMFingerPost.Add 	"Home" 	1200 980 0 0 1280 1024 ~
+
+WMFingerPost.RemoveAll ~

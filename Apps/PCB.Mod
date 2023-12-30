@@ -4,8 +4,8 @@ MODULE PCB; (** AUTHOR "prk"; PURPOSE "Parallel Compiler: semantic checker"; *)
 
 
 IMPORT
-		SYSTEM, AosOut,
-		StringPool, PCDebug, PCM, PCS, PCT, PCC, PCLIR, PCBT;
+	SYSTEM, AosOut,
+	StringPool, PCDebug, PCM, PCS, PCT, PCC, PCLIR, PCBT;
 
 
 CONST
@@ -68,16 +68,41 @@ CONST
 	assertfn* = 157; copyfn* = 158; exclfn* = 159; inclfn* = 160; portinfn* = 161; 
 	portoutfn* = 162; getregfn* = 163; putregfn* = 164; getfn* = 165; 
 	putfn* = 166; put8fn* = 167; put16fn* = 168; put32fn* = 169; sysnewfn* = 170; 
-	movefn* = 171; newfn* = 172; 
+	movefn* = 171; newfn* = 172; get64fn* = 173; put64fn* = 174;
 	
 
 	NoPosition = -1;
 	
+	(* SYSTEM registers *)
+	regEAX* = 8; regECX = 9; regEDX = 10; regEBX = 11;
+	regESP = 12; regEBP = 13; regESI = 14; regEDI* = 15;
+
+	regAX* = 16; regCX = 17; regDX = 18; regBX* = 19;
 	
+	regAL* = 24; regCL = 25; regDL = 26; regBL* = 27;
+	regAH* = 28; regCH = 29; regDH = 30; regBH* = 31;
+	
+	regRAX* = 32; regRCX = 33; regRDX = 34; regRBX = 35;
+	regRSP = 36; regRBP = 37; regRSI = 38; regRDI* = 39;
+	
+	regR8* = 40; regR9 = 41; regR10 = 42; regR11= 43;
+	regR12 = 44; regR13 = 45; regR14 = 46; regR15* = 47;
+
+	regR8D* = 48; regR9D = 49; regR10D = 50; regR11D= 51;
+	regR12D = 52; regR13D = 53; regR14D = 54; regR15D* = 55;
+	
+	regR8W* = 56; regR9W = 57; regR10W = 58; regR11W = 59;
+	regR12W = 60; regR13W = 61; regR14W = 62; regR15W* = 63;
+	
+	regR8B* = 64; regR9B = 65; regR10B = 66; regR11B = 67;
+	regR12B = 68; regR13B = 69; regR14B = 70; regR15B* = 71;
+	
+	regLast = regR15B;
+			
 TYPE
 	DynSizedArray = OBJECT(PCT.Array)
 		VAR
-			dlen: Expression;
+			dlen: Expression
 	END DynSizedArray;
 
 	StringBuf = ARRAY 256 OF CHAR;
@@ -181,7 +206,7 @@ TYPE
 			CASE op OF
 			| adrfn:
 					PCC.SYSaddress(code, i)
-			| get8fn, get16fn, get32fn:
+			| get8fn, get16fn, get32fn, get64fn:
 					PCC.GetMemory(code, i, type)
 			| typecodefn:
 					t := opd.type;
@@ -190,7 +215,7 @@ TYPE
 					ELSE
 						PCC.MakeTD(i, t(PCT.Record))
 					END;
-					PCC.Convert(code, i, PCT.Int32, TRUE);
+					PCC.Convert(code, i, PCT.Address, TRUE);
 			ELSE
 				PCC.MOp(code, op, i);
 			END;
@@ -271,7 +296,7 @@ TYPE
 				p := p.link;
 				o := o.nextPar;
 			END;
-		END DoOpenAryParams;
+		END DoOpenAryParams;				
 		
 		PROCEDURE Emit*(code: PCC.Code);
 		VAR p, p0: Expression; i: PCC.Item; pos, cnt, ofs, parSize, rSize, parNbr: LONGINT;  o: PCT.Parameter; vstat: Var;
@@ -310,8 +335,8 @@ TYPE
 						p.Emit(code, i);
 					ELSE
 						PCC.PushOpenAryParams(code, o.type, p.type, ofs, parNbr);
-						DEC(parNbr);					
-					END;							
+						DEC(parNbr);
+					END
 				ELSE
 					p0 := p;
 					IF o.name = PCT.SelfName THEN
@@ -332,7 +357,7 @@ TYPE
 							p0 := NewConversion(p0.pos, p0, o.type)
 						END;
 						p0.Emit(code, i);
-						PCC.Param(code, i, o.type, o.ref)
+						PCC.Param(code, i, o.type, o.ref, PCT.CParam IN o.flags) (* ejz *)
 					END
 				END;
 
@@ -393,7 +418,8 @@ TYPE
 *)
 		PROCEDURE & InitEL*(pos: LONGINT; rType: PCT.Struct);
 		BEGIN  first := NIL; last := NIL; SELF.pos:=pos; SELF.rType := rType;
-		END InitEL;
+		END InitEL;		
+		
 	END ExprList;
 	
 	BuiltInEl = OBJECT (ExprList)		(*not exported, for internal use only*)
@@ -425,8 +451,8 @@ TYPE
 							ELSE PCM.Error(53, stat.pos, "")
 							END
 						END
-				| get8fn, get16fn, get32fn:
-						IF PCT.IsCardinalType(stat.type) THEN first := NewConversion(stat.pos, stat, PCT.Int32)
+				| get8fn, get16fn, get32fn, get64fn:
+						IF PCT.IsCardinalType(stat.type) THEN first := NewConversion(stat.pos, stat, PCT.Address)
 						ELSE  PCM.Error(113, stat.pos, "");  first := InvalidExpr
 						END
 				| PCC.absfn, PCC.capfn, PCC.oddfn, lenfn, PCC.bitfn, PCC.ashfn, PCC.rotfn, PCC.lshfn, adrfn:		(*params are checked in MOp/DOp or any pars*)
@@ -506,15 +532,15 @@ TYPE
 						ELSIF (stat IS Const) & (stat.type = PCT.Int32) THEN  PCM.Error(203, stat.pos, "")
 						ELSE  first := NewConversion(stat.pos, stat, PCT.Int16)
 						END
-				| getfn, putfn, put8fn, put16fn, put32fn, movefn:
+				| getfn, putfn, put8fn, put16fn, put32fn, put64fn, movefn:
 						IF ~PCT.IsCardinalType(stat.type) & ~PCT.IsPointer(stat.type) THEN  PCM.Error(111, stat.pos, "")
-						ELSE first:=NewConversion(stat.pos, stat, PCT.Int32)  END
+						ELSE first:=NewConversion(stat.pos, stat, PCT.Address)  END
 				| getregfn, putregfn:
 						first := Zero;
 						IF ~(stat IS Const) OR ~PCT.IsCardinalType(stat.type) THEN  PCM.Error(51, stat.pos, "")
 						ELSE
 							i := stat(Const).con.int;
-							IF (i < 0) OR (i > SYSTEM.DH) THEN  PCM.Error(220  , stat.pos, "")
+							IF (i < 0) OR (i > regLast) THEN  PCM.Error(220  , stat.pos, "")
 							ELSE first:=stat  END
 						END
 				| inclfn, exclfn:
@@ -610,12 +636,46 @@ TYPE
 							PCM.Error(113, stat.pos, ""); first.link := InvalidExpr
 						END
 				| put32fn:
-						IF (stat.type = PCT.Int32) OR PCT.IsPointer(stat.type) OR (stat.type = PCT.Set) THEN
+						IF (stat.type = PCT.Int32) THEN
 							first.link := stat
-						ELSIF stat.type IS PCT.Delegate THEN
+						ELSIF PCT.IsPointer(stat.type) THEN
+							IF PCT.AddressSize = 4 THEN
+								first.link := stat
+							ELSE
+								first.link := Project(stat.pos, stat, PCT.Int32)
+							END;
+						ELSIF stat.type = PCT.Set THEN
+							IF PCT.SetSize = 4 THEN
+								first.link := stat
+							ELSE
+								first.link := Project(stat.pos, stat, PCT.Int32)
+							END;
+						ELSIF (stat.type IS PCT.Delegate) & (PCT.AddressSize = 4) THEN
 							first.link := Project(stat.pos, stat, PCT.Int32)
 						ELSIF PCT.IsCardinalType(stat.type) THEN
 							first.link := NewConversion(stat.pos, stat, PCT.Int32)
+						ELSE
+							PCM.Error(113, stat.pos, ""); first.link := InvalidExpr
+						END
+				| put64fn:
+						IF (stat.type = PCT.Int64) THEN
+							first.link := stat
+						ELSIF PCT.IsPointer(stat.type) THEN
+							IF PCT.AddressSize = 8 THEN
+								first.link := stat
+							ELSE
+								first.link := Project(stat.pos, stat, PCT.Int64)
+							END;
+						ELSIF stat.type = PCT.Set THEN
+							IF PCT.SetSize = 8 THEN
+								first.link := stat
+							ELSE
+								first.link := Project(stat.pos, stat, PCT.Int64)
+							END;
+						ELSIF (stat.type IS PCT.Delegate) & (PCT.AddressSize = 8) THEN
+							first.link := Project(stat.pos, stat, PCT.Int64)
+						ELSIF PCT.IsCardinalType(stat.type) THEN
+							first.link := NewConversion(stat.pos, stat, PCT.Int64)
 						ELSE
 							PCM.Error(113, stat.pos, ""); first.link := InvalidExpr
 						END
@@ -626,28 +686,38 @@ TYPE
 				| putregfn, getregfn:
 						IF (fnr = getregfn) & ~IsVariable(stat) THEN PCM.Error(112, stat.pos, "") END;
 						i := first(Const).con.int;
-						IF (i >= SYSTEM.EAX) & (i <= SYSTEM.EDI) THEN
-							IF (stat.type = PCT.Int32) OR (stat.type = PCT.Set) OR (stat.type IS PCT.Pointer) OR (stat.type IS PCT.Delegate) THEN
+						IF ((i >= regEAX) & (i <= regEDI)) OR ((i >= regR8D) & (i <= regR15D)) THEN
+							IF (stat.type = PCT.Int32) OR ((PCLIR.Address = PCLIR.Int32) & ((stat.type = PCT.Set) OR (stat.type IS PCT.Pointer) OR (stat.type IS PCT.Delegate))) THEN
 							ELSIF PCT.IsCardinalType(stat.type) THEN
 								stat := NewConversion(stat.pos, stat, PCT.Int32)
 							ELSE
 								PCM.Error(113, stat.pos, "")
 							END
-						ELSIF (i >= SYSTEM.AX) & (i <= SYSTEM.DX) THEN
+						ELSIF ((i >= regAX) & (i <= regDX)) OR ((i >= regR8W) & (i <= regR15W)) THEN
 							IF stat.type = PCT.Int8 THEN
 								stat := NewConversion(stat.pos, stat, PCT.Int16)
 							ELSIF stat.type # PCT.Int16 THEN PCM.Error(113, stat.pos, "")
 							END
-						ELSIF  (i >= SYSTEM.AL) & (i <= SYSTEM.DH) THEN
+						ELSIF  ((i >= regAL) & (i <= regDH)) OR ((i >= regR8B) & (i <= regR15B)) THEN
 							IF stat.type # PCT.Int8 THEN PCM.Error(113, stat.pos, "") END
+						ELSIF  (i >= regRAX) & (i <= regR15) THEN
+							IF (stat.type = PCT.Int64) OR ((PCLIR.Address = PCLIR.Int64) & ((stat.type = PCT.Set) OR (stat.type IS PCT.Pointer) OR (stat.type IS PCT.Delegate))) THEN
+							ELSIF PCT.IsCardinalType(stat.type) THEN
+								stat := NewConversion(stat.pos, stat, PCT.Int64)
+							ELSE
+								PCM.Error(113, stat.pos, "")
+							END
 						END;
 						first.link:=stat
 				| portinfn, getfn:
 						IF ~IsVariable(stat) THEN PCM.Error(112, stat.pos, "")
 						ELSE  first.link:=stat  END;
-				| inclfn, exclfn, movefn:
+				| movefn:
 						IF ~PCT.IsCardinalType(stat.type) THEN  PCM.Error(113, stat.pos, "")
-						ELSE  first.link:=NewConversion(stat.pos, stat, PCT.Int32)  END
+						ELSE  first.link:=NewConversion(stat.pos, stat, PCT.Address)  END
+				| inclfn, exclfn:
+						IF ~PCT.IsCardinalType(stat.type) THEN  PCM.Error(113, stat.pos, "")
+						ELSE  first.link:=NewConversion(stat.pos, stat, PCT.SetType)  END
 				| copyfn:
 						IF ~IsVariable(stat) THEN PCM.Error(112, stat.pos, "")
 						ELSIF (stat.type IS PCT.Array) & PCT.IsCharType(stat.type(PCT.Array).base) THEN  first.link:=stat
@@ -659,7 +729,7 @@ TYPE
 				END
 			ELSIF (pnr=3) & (fnr=movefn) THEN
 				IF ~PCT.IsCardinalType(stat.type) THEN  PCM.Error(113, stat.pos, "")
-				ELSE  first.link.link:=NewConversion(stat.pos, stat, PCT.Int32)  END
+				ELSE  first.link.link:=NewConversion(stat.pos, stat, PCT.Address)  END
 			ELSE  PCM.Error(64, stat.pos, "")
 			END
 		END Append;
@@ -678,8 +748,8 @@ TYPE
 			END;
 			RETURN
 				(pnr = 0) & (fnr>=stifn) & (fnr<=clifn) OR
-				(pnr = 1) & ((fnr>=sizefn) & (fnr<=haltfn) OR (fnr >= PCC.absfn) & (fnr <= PCC.oddfn)) OR
-				(pnr = 2) & ((fnr>=valfn) & (fnr<=sysnewfn) OR (fnr >= PCC.ashfn) & (fnr <= PCC.rotfn) OR (fnr = PCC.bitfn)) OR
+				(pnr = 1) & ((fnr>=sizefn) & (fnr<=haltfn) OR (fnr >= PCC.absfn) & (fnr <= PCC.oddfn)) OR (fnr = get64fn) OR
+				(pnr = 2) & ((fnr>=valfn) & (fnr<=sysnewfn) OR (fnr >= PCC.ashfn) & (fnr <= PCC.rotfn) OR (fnr = PCC.bitfn) OR (fnr = put64fn)) OR
 				(pnr = 3) & (fnr=movefn) OR
 				(fnr=newfn) & (~usearray OR (array = NIL))
 		END NothingLeft;
@@ -696,8 +766,8 @@ TYPE
 		VAR  lev: SHORTINT;  pos: LONGINT;  p: AnyProc;  scope: PCT.Scope;
 		BEGIN
 			pos := SELF.pos;
-			IF TraceEmit THEN DebugEnter(aFunCall) END;
-			PCC.SaveRegisters(code);
+			IF TraceEmit THEN DebugEnter(aFunCall) END;			
+			PCC.SaveRegisters(code);			
 			params.Emit(code);
 			IF (proc IS AnyProc) THEN
 				p := proc(AnyProc); lev := p.proc.level;
@@ -707,7 +777,7 @@ TYPE
 				scope := p.proc.scope;
 				IF scope.code = NIL THEN scope.Await(PCT.complete) END;
 				Inline(code, scope.code)
-			ELSE
+			ELSE			
 				proc.Emit(code, i); PCC.Call(code, i);
 			END;
 			PCC.Result(code, i, type);
@@ -783,6 +853,7 @@ TYPE
 	END SProc;
 	
 	
+	
 	(**basic designators*)
 	Var* = OBJECT (Designator)
 		VAR obj*: PCT.Variable;  deltaLevel: SHORTINT;
@@ -826,8 +897,8 @@ TYPE
 		BEGIN
 			ASSERT(resolved);
 			IF self # NIL THEN
-				self.Emit(code, i);
-				PCC.Method(code, i, i, method, supercall);
+					self.Emit(code, i);
+					PCC.Method(code, i, i, method, supercall);
 			ELSE
 				PCC.MakeItem(i, proc, 0)
 			END
@@ -836,11 +907,11 @@ TYPE
 		PROCEDURE IsCallable*(): BOOLEAN;
 		BEGIN RETURN TRUE
 		END IsCallable;
-		
+
 		PROCEDURE Resolve(el: ExprList;  list: PCT.Parameter);
 			VAR count: LONGINT;  parlist: ARRAY 32 OF PCT.Struct; res, selfo: PCT.Symbol;
 		BEGIN
-			IF ~(PCT.Overloading IN scope.module.scope.flags) & ~(PCT.Operator IN o.flags) THEN
+			IF ~(PCT.Overloading IN scope.module.scope.flags) & ~(PCT.Operator IN o.flags) OR (PCT.Indexer IN o.flags)  THEN
 				res := o
 			ELSE
 				IF el # NIL THEN
@@ -855,6 +926,7 @@ TYPE
 				END;
 				res := PCT.FindProcedure(scope, scope, o.name, count, parlist, (el = NIL), TRUE)
 			END;
+			
 			IF res = NIL THEN
 				PCM.Error(0, pos, "no matching procedure found")
 			ELSIF res IS PCT.Method THEN
@@ -877,7 +949,13 @@ TYPE
 					proc := res
 				END
 			END;
-			IF el # NIL THEN  el.params := list  END;
+			IF el # NIL THEN				
+				IF (list # NIL) & (PCT.CParam IN list.flags) THEN (* ejz *)
+					RevertExprList(el);
+					list := res(PCT.Proc).scope.firstPar
+				END;
+				el.params := list
+			END;
 			resolved := TRUE
 		END Resolve;
 		
@@ -1012,7 +1090,11 @@ TYPE
 		in, out: PCC.Label;
 		true, false: BOOLEAN;	(*result of last test, used for dead code elimination*)
 	END;
-
+	
+	FinallyInfo*= RECORD
+		pc*: PCC.Label;
+	END;	
+	
 	CaseRange = POINTER TO RECORD 
 		min, max: LONGINT;
 		next: CaseRange
@@ -1101,6 +1183,21 @@ BEGIN
 	RETURN ret # NIL
 END GetProcedureInfo;
 
+PROCEDURE IsProcReturningPointer*(d: Designator; VAR rtype: PCT.Struct): BOOLEAN;
+BEGIN
+	rtype := NIL;
+	IF (d IS AnyProc) THEN
+		rtype := d(AnyProc).o.type (* ug: the value d.type is unassigned, thus the value d(AnyProc).o.type is retrieved *)		
+	ELSIF d.type IS PCT.Delegate THEN
+		rtype := d.type(PCT.Delegate).return
+	END;
+	IF rtype # NIL THEN
+		RETURN PCT.ContainsPointer(rtype)
+	ELSE
+		RETURN FALSE
+	END
+END IsProcReturningPointer;
+
 PROCEDURE ConstExpression*(pos: LONGINT; e: Expression): Const;
 	VAR c: Const;
 BEGIN
@@ -1150,10 +1247,10 @@ BEGIN
 		WITH Tf: PCT.Array DO
 			RETURN
 			(*rule 1*)					(Ta = Tf) OR
-			(*common for 2&3*)	(Tf.mode = PCT.open) &
+			(*common for 2&3*)			(Tf.mode = PCT.open) &
 			(*rule 2*)					((Ta IS PCT.Array) & ArrayCompatible(Ta(PCT.Array).base, Tf.base) OR
 			(*rule 3*)					(Tf.base = PCT.Char8) & (Ta = PCT.String) OR
-			(*special rule*)			(Tf.base = PCT.Byte))
+			(*special rule*)				(Tf.base = PCT.Byte))
 		END
 	ELSE
 		RETURN  (Ta = Tf)
@@ -1190,25 +1287,6 @@ BEGIN
 						PCM.Error(200, e.pos, "destination is no delegate type")
 					ELSIF (e.method # NIL) & (e.method.self.type IS PCT.Record) THEN
 						PCM.Error(249, e.pos, "")
-						
-					(**
-					ELSIF e.type # Tv.return THEN
-(*
-						PCT.GetTypeName(e.type, name);
-PCM.LogWLn; PCM.LogWStr(name); PCM.LogWHex(SYSTEM.VAL(LONGINT, e.type));
-PCM.LogWStr0(e.type.owner.name);
-PCM.LogWStr0(e.type.owner.inScope.module.name);
-						PCT.GetTypeName(Tv.return, name);
-PCM.LogWLn; PCM.LogWStr(name); PCM.LogWHex(SYSTEM.VAL(LONGINT, Tv.return));
-PCM.LogWStr0(Tv.return.owner.name);
-PCM.LogWStr0(Tv.return.owner.inScope.module.name);
-*)
-
-						PCM.Error(117, e.pos, "return type")
-											ELSIF ~PCT.ParameterMatch(e.proc.scope.firstPar, Tv.scope.firstPar, faulty) THEN
-						IF faulty = NIL THEN PCM.Error(116, e.pos, "") ELSE PCM.ErrorN(115, e.pos, faulty.name) END
-					**)
-					
 					ELSIF ~TypeCompatible0(e.type, Tv.return) THEN
 						PCM.Error(117, e.pos, "return type");
 						(* parameter types of Tv can be extensions of parameter types of e *)
@@ -1222,9 +1300,8 @@ PCM.LogWStr0(Tv.return.owner.inScope.module.name);
 		ELSIF e.type IS PCT.Delegate THEN
 			res := TypeCompatible0(Te, Tv);
 			IF ~res THEN PCM.Error(113, e.pos, "") END;
-			(* IF Tv # Te THEN PCM.Error(113, e.pos, "") ELSE  res := TRUE  END *)
-		ELSE PCM.Error(113, e.pos, "") END
-		
+		ELSE PCM.Error(113, e.pos, "") 
+		END
 	ELSIF (Tv IS PCT.Array) THEN
 		WITH Tv: PCT.Array DO
 			IF ArrayCompatible(Te, Tv) THEN
@@ -1237,7 +1314,9 @@ PCM.LogWStr0(Tv.return.owner.inScope.module.name);
 				ELSE  PCM.Error(114, e.pos, "")  END
 			ELSIF (e IS Const) & (Te = PCT.Char8) THEN	(* char consts are equivalent to a string of length 1 *)
 				res := TRUE
-			ELSE  PCM.Error(113, e.pos, "")  END
+			ELSE  
+				PCM.Error(113, e.pos, "")  
+			END
 		END
 	ELSE  PCM.Error(113, e.pos, "") END;
 	RETURN res
@@ -1266,10 +1345,12 @@ PROCEDURE ParameterCompatible(e: Expression; par: PCT.Parameter):BOOLEAN;
 (* can e be assigned to par?*)
 VAR res: BOOLEAN;
 BEGIN
-	res := FALSE;
+	res := FALSE;	
 	IF (par.type IS PCT.Record) & TypeExtension(par.type, e.type) THEN  res := TRUE	(*rule3, true for par and value parms*)
-	ELSIF par.ref THEN	(*VAR-Parameter*)
-		IF ~IsVariable(e) THEN PCM.Error(122, e.pos, "")
+	ELSIF par.ref THEN	(* VAR-Parameter*)
+		IF (e.type = PCT.NilType) & (PCT.CParam IN par.flags) THEN (* ejz *)
+			res := TRUE
+		ELSIF ~IsVariable(e) THEN PCM.Error(122, e.pos, "")
 		ELSIF (par.type = PCT.Byte) & ((e.type = PCT.Int8) OR (e.type = PCT.Char8)) THEN res := TRUE
 		ELSIF ArrayCompatible(e.type, par.type) THEN  res := TRUE
 (*
@@ -1277,7 +1358,10 @@ BEGIN
 *)
 		ELSE  PCM.Error(113, e.pos, "")
 		END
-	ELSE  res := ArrayCompatible(e.type, par.type) OR TypeCompatible(e, par.type)
+	ELSIF (e.type = PCT.NilType) & (PCT.CParam IN par.flags) & (par.type IS PCT.Array) THEN (* ejz *)
+		res := TRUE
+	ELSE
+		res := ArrayCompatible(e.type, par.type) OR TypeCompatible(e, par.type)
 	END;
 	RETURN res
 END ParameterCompatible;
@@ -1289,8 +1373,8 @@ BEGIN
 	IF ((from = NIL) OR (from.name = PCT.SelfName)) & ((to = NIL) OR (to.name = PCT.SelfName)) THEN RETURN TRUE END;
 	res := FALSE;
 	WHILE (from # NIL) & (to # NIL) DO
-		res := TypeCompatible0(from.type, to.type);
-		IF res THEN res := (from.ref = to.ref) END;
+		res := TypeCompatible0(from.type, to.type) OR (from.name = PCT.PtrReturnType) & (to.name = PCT.PtrReturnType);
+		IF res THEN res := (from.ref = to.ref) & ((PCT.CParam IN from.flags) = (PCT.CParam IN to.flags)) END; (* ejz *)
 		IF ~res THEN RETURN FALSE END;
 		from := from.nextPar; to := to.nextPar;
 	END;
@@ -1358,7 +1442,7 @@ END TypeCompatible0;
 	
 	PROCEDURE NewNILValue*(pos: LONGINT): Const;
 		VAR con: Const;
-	BEGIN  con:=NewIntValue(pos, PCM.nilval, PCT.Int32);  con.type:= PCT.NilType;  RETURN con
+	BEGIN  con:=NewIntValue(pos, PCM.nilval, PCT.Address);  con.type:= PCT.NilType;  RETURN con
 	END NewNILValue;
 	
 
@@ -1440,6 +1524,7 @@ END TypeCompatible0;
 			IF type = PCT.Int8 THEN	exp := NewIntValue(pos, SYSTEM.VAL(SHORTINT, buf), type)
 			ELSIF type = PCT.Int16  THEN	 exp := NewIntValue(pos, SYSTEM.VAL(INTEGER, buf), type)
 			ELSIF type = PCT.Int32  THEN	exp := NewIntValue(pos, buf, type)
+			ELSIF type = PCT.Int64  THEN	exp := NewIntValue(pos, buf, type)
 			ELSIF type = PCT.Char8  THEN	exp := NewIntValue(pos, SYSTEM.VAL(SHORTINT, buf), PCT.Char8)
 			ELSIF type = PCT.Float32  THEN	exp := NewFloatValue(pos, SYSTEM.VAL(REAL, buf), PCT.Float32)
 			ELSIF type = PCT.Float64  THEN	exp := NewFloatValue(pos, SYSTEM.VAL(LONGREAL, buf), PCT.Float64)
@@ -1453,7 +1538,19 @@ END TypeCompatible0;
 		RETURN exp
 	END Project;
 
-	
+	PROCEDURE RevertExprList(el: ExprList); (* ejz *)
+	VAR e, link: Expression;
+	BEGIN
+		ASSERT(el # NIL);		
+		IF el.first = el.last THEN RETURN END;
+		e := el.first; el.first := NIL; el.last := e;
+		WHILE e # NIL DO
+			link := e.link;
+			e.link := el.first; el.first := e;
+			e := link
+		END
+	END RevertExprList;
+
 	PROCEDURE NewFuncCall*(pos: LONGINT; proc: Designator;  params: ExprList;  curlevel: SHORTINT): Expression;
 		VAR fc: FunCall; type: PCT.Struct; fnr: LONGINT; first: Expression;
 	BEGIN
@@ -1475,7 +1572,7 @@ END TypeCompatible0;
 (* < bootstrap 1 *)
 						ELSIF type=PCT.Float32 THEN RETURN NewFloatValue(pos, MAX(REAL), PCT.Float32)
 						ELSIF type=PCT.Float64 THEN RETURN NewFloatValue(pos, MAX(LONGREAL), PCT.Float64)
-						ELSIF type=PCT.Set THEN RETURN NewIntValue(pos, MAX(SET), PCT.Int8)
+						ELSIF type=PCT.Set THEN RETURN NewIntValue(pos, PCT.SetSize * 8 - 1, PCT.Int8)
 						ELSE  PCM.Error(64, first.pos, "");  RETURN InvalidExpr  END
 				|  minfn:
 						IF type=PCT.Char8 THEN RETURN NewIntValue(pos, ORD(MIN(CHAR)), PCT.Char8)
@@ -1489,9 +1586,9 @@ END TypeCompatible0;
 (* < bootstrap 1 *)
 						ELSIF type=PCT.Float32 THEN RETURN NewFloatValue(pos, MIN(REAL), PCT.Float32)
 						ELSIF type=PCT.Float64 THEN RETURN NewFloatValue(pos, MIN(LONGREAL), PCT.Float64)
-						ELSIF type=PCT.Set THEN RETURN NewIntValue(pos, MIN(SET), PCT.Int8)
+						ELSIF type=PCT.Set THEN RETURN NewIntValue(pos, 0, PCT.Int8)
 						ELSE  PCM.Error(64, first.pos, "");  RETURN InvalidExpr  END
-				|  sizefn .. get32fn,  PCC.absfn .. PCC.oddfn:
+				|  sizefn .. get32fn,  get64fn,  PCC.absfn .. PCC.oddfn:
 						RETURN  NewMOp(pos, NIL, fnr, params.first)
 				|  ordfn .. shortfn, valfn:
 						RETURN params.first
@@ -1509,6 +1606,9 @@ END TypeCompatible0;
 				END
 			END
 		ELSIF proc.type IS PCT.Delegate THEN
+			IF (proc.type(PCT.Delegate).scope.firstPar # NIL) & (PCT.CParam IN proc.type(PCT.Delegate).scope.firstPar.flags) THEN
+				RevertExprList(params)
+			END;
 			NEW(fc, pos, proc, params, curlevel);
 			RETURN fc
 		ELSE  PCM.Error(121, proc.pos, "")
@@ -1538,7 +1638,7 @@ END TypeCompatible0;
 	END NewExprList;
 	
 	PROCEDURE NewMOp*(pos: LONGINT; scope: PCT.Scope; op: Operator; opd: Expression): Expression;
-		VAR	mop: MOp;
+		VAR mop: MOp;
 			i: LONGINT; r: REAL; lr: LONGREAL; restyp: PCT.Struct; const: BOOLEAN;  type: PCT.Struct; c: PCT.Const;
 	BEGIN
 		IF IsInvalid(opd) THEN  RETURN InvalidExpr  END;
@@ -1547,7 +1647,7 @@ END TypeCompatible0;
 		const := opd IS Const;
 		IF const THEN c := opd(Const).con END;
 		IF (op = adrfn) THEN
-			restyp := PCT.Int32
+			restyp := PCT.Address
 		ELSIF (op = sizefn) THEN
 			type := opd.type;
 			IF type.size # NIL THEN
@@ -1556,13 +1656,15 @@ END TypeCompatible0;
 				PCM.Error(200, pos, "");  RETURN InvalidExpr;
 			END;
 		ELSIF (op = typecodefn) THEN
-			restyp := PCT.Int32
+			restyp := PCT.Address
 		ELSIF (op = get8fn) THEN
 			restyp := PCT.Int8
 		ELSIF (op = get16fn) THEN
 			restyp := PCT.Int16
 		ELSIF (op = get32fn) THEN
 			restyp := PCT.Int32
+		ELSIF (op = get64fn) THEN
+			restyp := PCT.Int64
 		ELSIF op = PCC.setfn THEN
 			IF ~PCT.IsCardinalType(type) THEN PCM.Error(111, pos, ""); RETURN InvalidExpr
 			ELSIF const THEN
@@ -1767,7 +1869,7 @@ END TypeCompatible0;
 				IF const THEN RETURN
 					NewBoolValue(pos, lc.int IN rc.set)
 				ELSE
-					IF lopd.type # PCT.Int32 THEN lopd := NewConversion(lopd.pos, lopd, PCT.Int32) END;
+					IF lopd.type # PCT.SetType THEN lopd := NewConversion(lopd.pos, lopd, PCT.SetType) END;
 					restyp:=PCT.Bool
 				END
 			ELSE  PCM.Error(111, pos, ""); RETURN InvalidExpr  END
@@ -1869,9 +1971,9 @@ END TypeCompatible0;
 				IF lopd.type # ropd.type THEN  PCM.Error(111, pos, ""); RETURN InvalidExpr  END;
 			END;
 			IF PCT.IsCardinalType(lopd.type) THEN
-				IF (lopd.type = PCT.Int64) & ((op = PCS.div) OR (op = PCS.mod)) THEN
+(*				IF (lopd.type = PCT.Int64) & ((op = PCS.div) OR (op = PCS.mod)) THEN
 					PCM.Error(111, pos, "64-bit DIV/MOD not implemented yet"); RETURN InvalidExpr
-				ELSIF op=PCS.comma THEN
+				ELS *) IF op=PCS.comma THEN
 					lopd.link := ropd;  RETURN lopd
 				ELSIF (lopd.type # PCT.Int64) & const THEN
 					i1 := lc.int;  i2 := rc.int;
@@ -2030,11 +2132,20 @@ END TypeCompatible0;
 	BEGIN
 		IF ~suppress THEN
 			p.Emit(code, i);
-			PCC.Param(code, i, p.type, FALSE);
+			PCC.Param(code, i, p.type, FALSE, FALSE);
 			NEW(temp, -1, p.type);
 			p := temp;
 		END
 	END MakeTemp;
+	
+	PROCEDURE Finally*(pos: LONGINT; code: PCC.Code; obj: PCT.Symbol);
+	BEGIN		
+		IF (obj IS PCT.Proc) OR (obj IS PCT.Module) THEN
+			PCC.DefFinallyLabel(code, obj);
+		ELSE			
+		END;
+	END Finally;
+	
 	
 	PROCEDURE MakeNode*(pos: LONGINT; scope: PCT.Scope; obj: PCT.Symbol): Designator;
 	VAR	v: Var; s: SProc; t: Type; self: Designator; selfo: PCT.Symbol;  level: SHORTINT; d: Designator; ss: PCT.Scope;
@@ -2058,9 +2169,10 @@ END TypeCompatible0;
 		ELSIF obj IS PCT.Alias THEN
 			self := MakeNode(pos, scope, obj(PCT.Alias).obj);
 			self.type := obj.type;  d := self
-		ELSIF (obj IS PCT.Variable) THEN
+		ELSIF (obj IS PCT.Variable) THEN			
 			IF scope IS PCT.ProcScope THEN  level := scope(PCT.ProcScope).ownerO.level  END;
-			NEW(v, pos, obj(PCT.Variable), level, (obj.inScope.module # scope.module) & ({PCT.PublicW, PCT.ProtectedW} * obj.vis = {}));
+			NEW(v, pos, obj(PCT.Variable), level, ((obj.inScope = NIL) OR (obj.inScope.module # scope.module)) & ({PCT.PublicW, PCT.ProtectedW} * obj.vis = {}));
+												(* ug:  obj.inScope = NIL for hidden variables *) 
 (*
 			NEW(v, pos, obj(PCT.Variable), level, scope.imported & (obj.vis = PCT.readonly));
 *)
@@ -2297,7 +2409,7 @@ END TypeCompatible0;
 			| copyfn:
 					par0.Emit(code, i);  par1.Emit(code, j);
 					PCC.MoveString(code, i, j)
-			| getfn, putfn, put8fn, put16fn, put32fn:
+			| getfn, putfn, put8fn, put16fn, put32fn, put64fn:
 					par0.Emit(code, i);  par1.Emit(code, j);
 					PCC.SYScopy(code,  i, j,  fnr = getfn)
 			| assertfn: 
@@ -2372,14 +2484,14 @@ END TypeCompatible0;
 						openDims := 0;
 						IF par1 # NIL THEN
 							par1.Emit(code, j);
-							IF j.type # PCT.Int32 THEN  PCC.Convert(code, j, PCT.Int32, FALSE) END;
-							PCC.Param(code, j, PCT.Int32, FALSE);	(*save on stack*)
+							IF j.type # PCT.Size THEN  PCC.Convert(code, j, PCT.Size, FALSE) END;
+							PCC.Param(code, j, PCT.Size, FALSE, FALSE);	(*save on stack*)
 							INC(openDims);
 							type := type(PCT.Array).base;  par1 := par1.link;
 							WHILE par1 # NIL DO
 								par1.Emit(code, k);
-								IF k.type # PCT.Int32 THEN  PCC.Convert(code, k, PCT.Int32, FALSE) END;
-								PCC.Param(code, k, PCT.Int32, FALSE);	(*save on stack*)
+								IF k.type # PCT.Size THEN  PCC.Convert(code, k, PCT.Size, FALSE) END;
+								PCC.Param(code, k, PCT.Size, FALSE, FALSE);	(*save on stack*)
 								PCC.DOp(code, PCS.times, j, k);
 								INC(openDims);
 								type:= type(PCT.Array).base;  par1 := par1.link
@@ -2394,10 +2506,10 @@ END TypeCompatible0;
 							type := type(PCT.Array).base
 						END;
 						IF (par0.link # NIL) & (size # 1) THEN
-							PCC.MakeIntConst(k, size, PCT.Int32);
+							PCC.MakeIntConst(k, size, PCT.Size);
 							PCC.DOp(code, PCS.times, j, k);
 						ELSIF (size # 1) THEN
-							PCC.MakeIntConst(j, size, PCT.Int32)
+							PCC.MakeIntConst(j, size, PCT.Size)
 						END;
 						PCC.SysNewArray(code, i, type, j, openDims);
 						IF openDims # 0 THEN
@@ -2458,7 +2570,7 @@ END TypeCompatible0;
 	END MakeCall;
 	
 	PROCEDURE CallProc*(code: PCC.Code;  suppress: BOOLEAN;  proc: Designator;  params: ExprList;  curlevel: SHORTINT);
-	VAR p: PCT.Proc;  ret: PCT.Struct;
+	VAR p: PCT.Proc;  ret: PCT.Struct; winapi: BOOLEAN;
 	BEGIN
 		IF IsInvalid(proc) OR  IsInvalid(params.first) THEN RETURN END;
 		IF (proc IS SProc) THEN
@@ -2472,9 +2584,13 @@ END TypeCompatible0;
 				suppress := suppress OR (p = NIL);
 			END
 		ELSIF proc.type IS PCT.Delegate THEN
-			ret := proc.type(PCT.Delegate).return
+			ret := proc.type(PCT.Delegate).return;
+			IF PCT.CParam IN proc.type(PCT.Delegate).flags THEN
+				RevertExprList(params);
+				winapi := TRUE
+			END
 		END;
-		IF (ret # PCT.NoType) THEN
+		IF (ret # PCT.NoType) & ~(winapi) THEN
 			PCM.Error(121, proc.pos, "")
 		ELSIF ~suppress & ~PCM.error THEN
 			MakeCall(code, proc, p, params, curlevel);
@@ -2550,53 +2666,55 @@ END TypeCompatible0;
 		RETURN info.true
 	END Else;
 	
-	PROCEDURE EndIf*(code: PCC.Code;  VAR info: LoopInfo);
+	PROCEDURE EndIf*(code: PCC.Code;  suppress: BOOLEAN; VAR info: LoopInfo);
 	BEGIN
-		PCC.FixJmp(code, info.in);	(*no else*)
-		PCC.FixJmp(code, info.out)
+		IF ~suppress THEN (* ug *)
+			PCC.FixJmp(code, info.in);	(*no else*)
+			PCC.FixJmp(code, info.out)
+		END
 	END EndIf;
 
-	PROCEDURE While*(code: PCC.Code;  suppress: BOOLEAN;  VAR info: LoopInfo;  cond: Expression);
+	PROCEDURE While*(code: PCC.Code; suppress: BOOLEAN;  VAR info: LoopInfo;  cond: Expression);
 	VAR  i: PCC.Item;
 	BEGIN
-		PCC.DefLabel(code, info.in);
-		info.out := PCC.none;
-		IF IsInvalid(cond) THEN
-			(*skip*)
-		ELSIF cond.type # PCT.Bool THEN
-			PCM.Error(120, cond.pos, "")
-		ELSIF suppress THEN
-			(*skip*)
-		ELSIF ~(cond IS Const) THEN
-			cond.Emit(code, i);
-			PCC.MOp(code, PCS.not, i);
-			PCC.Jcc(code, info.out, i)
-		ELSIF (cond(Const).con = PCT.False) THEN
-			PCC.Jmp(code, info.out)
-		(*ELSE
+		IF ~suppress THEN (* ug *)
+			PCC.DefLabel(code, info.in);
+			info.out := PCC.none;
+			IF IsInvalid(cond) THEN
+				(*skip*)
+			ELSIF cond.type # PCT.Bool THEN
+				PCM.Error(120, cond.pos, "")
+			ELSIF ~(cond IS Const) THEN
+				cond.Emit(code, i);
+				PCC.MOp(code, PCS.not, i);
+				PCC.Jcc(code, info.out, i)
+			ELSIF (cond(Const).con = PCT.False) THEN
+				PCC.Jmp(code, info.out)
+			(*ELSE
 				true=>endless loop*)
+			END
 		END
 	END While;
 	
-	PROCEDURE Repeat*(code: PCC.Code;  suppress: BOOLEAN;  VAR info: LoopInfo;  cond: Expression);
+	PROCEDURE Repeat*(code: PCC.Code;  suppress: BOOLEAN;  VAR info: LoopInfo; cond: Expression);
 	VAR  i: PCC.Item;
 	BEGIN
-		ASSERT(info.out = PCC.none);
-		IF IsInvalid(cond) THEN
-			(*skip*)
-		ELSIF cond.type # PCT.Bool THEN
-			PCM.Error(120, cond.pos, "")
-		ELSIF suppress THEN 
-			(*skip*)
-		ELSIF ~(cond IS Const) THEN
-			cond.Emit(code, i);
-			PCC.MOp(code, PCS.not, i);
-			PCC.Jcc(code, info.in, i)
-		ELSIF (cond(Const).con = PCT.False)THEN
+		IF ~suppress THEN (* ug *)
+			ASSERT(info.out = PCC.none);
+			IF IsInvalid(cond) THEN
+				(*skip*)
+			ELSIF cond.type # PCT.Bool THEN
+				PCM.Error(120, cond.pos, "")
+			ELSIF ~(cond IS Const) THEN
+				cond.Emit(code, i);
+				PCC.MOp(code, PCS.not, i);
+				PCC.Jcc(code, info.in, i)
+			ELSIF (cond(Const).con = PCT.False)THEN
 				PCC.Jmp(code, info.in)	(*always jump*)
-		(* ELSE
-			cond=true, never jump*)
-		END;
+			(* ELSE
+				cond=true, never jump*)
+			END
+		END
 	END Repeat;
 	
 	PROCEDURE BeginFor*(code: PCC.Code;  suppress: BOOLEAN;  pos: LONGINT; var: Designator; from, to, by: Expression;  VAR info: LoopInfo);
@@ -2624,16 +2742,18 @@ END TypeCompatible0;
 	
 	PROCEDURE EndFor*(code: PCC.Code;  suppress: BOOLEAN;  pos: LONGINT; var: Designator;  step: Expression;  VAR info: LoopInfo);
 	BEGIN
-		IF IsInvalid(var) OR IsInvalid(step) THEN  RETURN   END;
+		IF IsInvalid(var) OR IsInvalid(step) THEN RETURN END;
 		Assign(code, suppress, var, NewDOp(pos, plus, var, step));
 		EndLoop(code, suppress, info);
 		IF ~suppress THEN PCC.FreeStack(code, var.type) END
 	END EndFor;
 	
-	PROCEDURE BeginLoop*(code: PCC.Code;  VAR info: LoopInfo);
+	PROCEDURE BeginLoop*(code: PCC.Code;  suppress: BOOLEAN (* ug *); VAR info: LoopInfo);
 	BEGIN
-		PCC.DefLabel(code, info.in);
-		info.out := PCC.none;
+		IF ~suppress THEN (* ug *)
+			PCC.DefLabel(code, info.in);
+			info.out := PCC.none
+		END
 	END BeginLoop;
 	
 	PROCEDURE EndLoop*(code: PCC.Code;  suppress: BOOLEAN;  VAR info: LoopInfo);
@@ -2652,8 +2772,10 @@ END TypeCompatible0;
 		END
 	END Exit;
 	
-	PROCEDURE Return*(code: PCC.Code;  suppress: BOOLEAN;  scope: PCT.Scope; pos: LONGINT; expr: Expression;  unlock: BOOLEAN);
-	VAR	rtype: PCT.Struct;  i: PCC.Item;  complex: BOOLEAN;  proc: PCT.Proc;  var: Var;
+	PROCEDURE Return*(code: PCC.Code;  suppress: BOOLEAN;  scope: PCT.Scope; pos: LONGINT; expr: Expression;
+		unlock: BOOLEAN; forlevel: LONGINT);
+	VAR rtype: PCT.Struct;  i: PCC.Item;  complex: BOOLEAN;  proc: PCT.Proc;  var: Var;
+		rtypeAddr: SYSTEM.ADDRESS; par: PCT.Parameter;
 	BEGIN
 		IF scope IS PCT.ProcScope THEN  proc := scope(PCT.ProcScope).ownerO  END;
 		IF IsInvalid(expr) THEN
@@ -2670,24 +2792,35 @@ END TypeCompatible0;
 				END;
 				IF TypeCompatible(expr, rtype) & ~suppress THEN
 					IF (rtype # expr.type) & (expr.type IS PCT.Basic) THEN  expr := NewConversion(expr.pos, expr, rtype)  END;
+					IF PCT.ContainsPointer(rtype) THEN
+						par := scope(PCT.ProcScope).firstPar;
+						WHILE (par # NIL) & (par.name # PCT.PtrReturnType) DO par := par.nextPar END;
+						ASSERT(par # NIL);
+						rtypeAddr := par.adr(PCBT.Variable).offset;
+					END;	
 					IF (rtype IS PCT.Basic) OR (rtype IS PCT.Pointer) OR (rtype IS PCT.Delegate) THEN
 						expr.Emit(code, i);
 						IF unlock THEN
 							PCC.Load(code, i); PCC.SaveRegisters(code); Lock(code, scope, pos, FALSE); PCC.RestoreRegisters(code)
 						END;
-						PCC.Return(code, i, proc);
-						PCC.Leave(code, proc)
+						PCC.Return(code, i, proc, rtypeAddr);
+						IF scope(PCT.ProcScope).cc = PCBT.WinAPICC THEN (* ejz *)
+							WHILE forlevel > 0 DO PCC.FreeStack(code, PCT.Int32); DEC(forlevel) END;
+							PCC.Leave(code, PCBT.WinAPICC, proc, proc.adr)
+						ELSE
+							PCC.Leave(code, PCBT.OberonCC, proc, proc.adr)
+						END
 					ELSIF expr IS FunCall THEN
 						ASSERT((rtype IS PCT.Record) OR (rtype IS PCT.Array));
 						IF (rtype IS PCT.Array) & (rtype(PCT.Array).mode = PCT.open) THEN
 							IF expr(FunCall).type(PCT.Array).mode = PCT.open THEN
 								PCC.PushOpenAryRetDesc(code, rtype);
 								expr.Emit(code, i);
-								PCC.Return(code, i, proc);
+								PCC.Return(code, i, proc, rtypeAddr);
 							ELSE
 								PCC.PushStatAryRetDesc(code, expr(FunCall).type);
 								expr.Emit(code, i);
-								PCC.Return(code, i, proc);
+								PCC.Return(code, i, proc, rtypeAddr);
 							END;
 						ELSE
 							PCC.PushRetDesc2(code, proc);	(* push own return descriptor. No return needed, value copied directly to the caller *)
@@ -2697,15 +2830,25 @@ END TypeCompatible0;
 						IF unlock THEN
 							PCC.SaveRegisters(code); Lock(code, scope, pos, FALSE); PCC.RestoreRegisters(code)
 						END;
-						PCC.Leave(code, proc)
+						IF scope(PCT.ProcScope).cc = PCBT.WinAPICC THEN (* ejz *)
+							WHILE forlevel > 0 DO PCC.FreeStack(code, PCT.Int32); DEC(forlevel) END;
+							PCC.Leave(code, PCBT.WinAPICC, proc, proc.adr)
+						ELSE
+							PCC.Leave(code, PCBT.OberonCC, proc, proc.adr)
+						END
 					ELSE
 						ASSERT((rtype IS PCT.Record) OR (rtype IS PCT.Array));
 						expr.Emit(code, i);
-						PCC.Return(code, i, proc);
+						PCC.Return(code, i, proc, rtypeAddr);
 						IF unlock THEN
 							PCC.SaveRegisters(code); Lock(code, scope, pos, FALSE); PCC.RestoreRegisters(code)
 						END;
-						PCC.Leave(code, proc)
+						IF scope(PCT.ProcScope).cc = PCBT.WinAPICC THEN (* ejz *)
+							WHILE forlevel > 0 DO PCC.FreeStack(code, PCT.Int32); DEC(forlevel) END;
+							PCC.Leave(code, PCBT.WinAPICC, proc, proc.adr)
+						ELSE
+							PCC.Leave(code, PCBT.OberonCC, proc, proc.adr)
+						END
 					END;
 				END
 			END
@@ -2715,28 +2858,25 @@ END TypeCompatible0;
 			IF unlock THEN	(*saveregs not needed, nothing to return*)
 				Lock(code, scope, pos, FALSE)
 			END;
-			PCC.Leave(code, proc);
+			IF scope(PCT.ProcScope).cc = PCBT.WinAPICC THEN (* ejz *)
+				WHILE forlevel > 0 DO PCC.FreeStack(code, PCT.Int32); DEC(forlevel) END;
+				PCC.Leave(code, PCBT.WinAPICC, proc, proc.adr)
+			ELSE
+				PCC.Leave(code, PCBT.OberonCC, proc, proc.adr)
+			END
 		END
 	END Return;
-
-	PROCEDURE Await*(code: PCC.Code;  suppress: BOOLEAN;  scope: PCT.Scope;  pos: LONGINT;  cond: Expression);
-	VAR  skip: PCC.Label;  adr: PCM.Attribute;  i: PCC.Item;  selfo: PCT.Symbol;  self: Designator;
+	
+	PROCEDURE Await*(code: PCC.Code;  suppress: BOOLEAN;  scope: PCT.Scope;  pos: LONGINT;  name: StringPool.Index);
+	VAR  adr: PCM.Attribute;  i: PCC.Item;  selfo, proc: PCT.Symbol;  self: Designator;
 	BEGIN
-		IF cond.type # PCT.Bool THEN
-			PCM.Error(120, cond.pos, "")
-		ELSIF ~suppress THEN
-			skip := PCC.none;  PCC.Jmp(code, skip);
-			
-			PCC.AwaitEnter(code, adr);
-			cond.Emit(code, i);
-			PCC.AwaitExit(code, i);
-			
-			PCC.FixJmp(code, skip);
+		IF ~suppress THEN
 			selfo := PCT.Find(scope, scope, PCT.SelfName, PCT.procdeclared, TRUE);
-			IF selfo = NIL THEN  PCM.Error(999, pos, "");  RETURN  END;
+			IF selfo = NIL THEN PCM.Error(999, pos, ""); RETURN END;
 			self := MakeNode(pos, scope, selfo);
 			self.Emit(code, i);
-			PCC.Await(code, i, adr);
+			proc := PCT.Find(scope, scope, name, PCT.procdeclared, TRUE);
+			PCC.Await(code, i, proc.adr);
 		END;
 	END Await;
 	
@@ -2895,17 +3035,18 @@ END TypeCompatible0;
 	END InitRecords;
 	
 	PROCEDURE Enter*(scope: PCT.Scope): PCC.Code;
-	VAR  code: PCC.Code; owner: PCT.Proc;
+	VAR  code: PCC.Code; owner: PCT.Symbol;
 	BEGIN
 		NEW(code);
 		scope.code := code;
 		IF scope IS PCT.ProcScope THEN
 			owner := scope(PCT.ProcScope).ownerO;
 			StringPool.GetString(owner.name, code.name);	(*debug*)
-			PCC.Enter(code, owner.adr);
-			AllocateArrays(code, owner.scope.firstPar, scope.firstVar)
+			PCC.Enter(code, scope(PCT.ProcScope).cc, owner.adr); (* ejz *)
+			AllocateArrays(code, owner(PCT.Proc).scope.firstPar, scope.firstVar)
 		ELSIF scope IS PCT.ModScope THEN
-			PCC.Enter(code, NIL);
+			owner := scope(PCT.ModScope).owner;
+			PCC.Enter(code, PCBT.OberonCC, owner.adr); (* ejz *)
 			InitRecords(code, scope(PCT.ModScope).records);
 		ELSE
 			HALT(99);
@@ -2928,18 +3069,23 @@ END TypeCompatible0;
 	(** Leave - leave a procedure. Generate a trap for functions (unless noTrap) *)
 	
 	PROCEDURE Leave*(code: PCC.Code; scope: PCT.Scope;  noTrap: BOOLEAN);
-	VAR  owner: PCT.Proc;  name: StringBuf;  dump: BOOLEAN;
+	VAR proc: PCT.Proc; name: StringBuf; adr: PCM.Attribute; dump: BOOLEAN;
 	BEGIN
 		ASSERT(~(scope IS PCT.RecScope));
 		name := "$$";
 		IF scope IS PCT.ProcScope THEN
-			owner := scope(PCT.ProcScope).ownerO;
-			StringPool.GetString(owner.name, name);
+			proc := scope(PCT.ProcScope).ownerO;
+			StringPool.GetString(proc.name, name);
+			adr := proc.adr;
+		ELSIF scope IS PCT.ModScope THEN
+			adr := scope(PCT.ModScope).owner.adr;
 		END;
-		IF (owner # NIL) & (owner.type # PCT.NoType) & ~noTrap THEN
+		IF (proc # NIL) & (proc.type # PCT.NoType) & ~noTrap THEN
 			PCC.GenTrap(code, PCM.ReturnTrap)
+		ELSIF scope IS PCT.ProcScope THEN (* ejz *)
+			PCC.Leave(code, scope(PCT.ProcScope).cc, proc, adr)
 		ELSE
-			PCC.Leave(code, owner)
+			PCC.Leave(code, PCBT.OberonCC, proc, adr)
 		END;
 		dump := (PCM.dump = name) OR (PCM.dump = "*");
 		IF dump THEN  DumpCode(code, name, 0)  END;
@@ -2963,7 +3109,7 @@ END TypeCompatible0;
 		BEGIN
 			StringPool.GetIndex(name, n);
 			c := PCT.NewIntConst(val, PCT.GetIntType(val));
-			m.scope.CreateValue(n, PCT.Public, c, res); ASSERT(res = PCT.Ok)
+			m.scope.CreateValue(n, PCT.Public, c, 0, res); ASSERT(res = PCT.Ok)
 		END NewConst;
 		
 		PROCEDURE MakeInline(name: ARRAY OF CHAR; fnr: LONGINT);
@@ -2979,7 +3125,7 @@ END TypeCompatible0;
 					code.code[0] := 0FBX;  code.len := 1;
 					StringPool.GetIndex(name, idx);
 			END;
-			PCT.System.scope.CreateProc(idx, PCT.Public, {PCT.Inline}, ps, PCT.NoType, res); ASSERT(res = PCT.Ok);
+			PCT.System.scope.CreateProc(idx, PCT.Public, {PCT.Inline}, ps, PCT.NoType, 0, res); ASSERT(res = PCT.Ok);
 			PCT.ChangeState(ps, PCT.complete, -1)
 		END MakeInline;
 		
@@ -3023,18 +3169,42 @@ END TypeCompatible0;
 		PCT.ChangeState(PCT.Universe.scope, PCT.complete, -1);
 		IF Trace THEN PCM.LogWLn; PCM.LogWStr("done ") END;
 		
-		NewConst(PCT.System, "EAX", 8);  NewConst(PCT.System, "ECX", 9);
-		NewConst(PCT.System, "EDX", 10);  NewConst(PCT.System, "EBX", 11);
-		NewConst(PCT.System, "ESP", 12);  NewConst(PCT.System, "EBP", 13);
-		NewConst(PCT.System, "ESI", 14);  NewConst(PCT.System, "EDI", 15);
+		NewConst(PCT.System, "EAX", regEAX);  NewConst(PCT.System, "ECX", regECX);
+		NewConst(PCT.System, "EDX", regEDX);  NewConst(PCT.System, "EBX", regEBX);
+		NewConst(PCT.System, "ESP", regESP);  NewConst(PCT.System, "EBP", regEBP);
+		NewConst(PCT.System, "ESI", regESI);  NewConst(PCT.System, "EDI", regEDI);
 
-		NewConst(PCT.System, "AX", 16);  NewConst(PCT.System, "CX", 17);
-		NewConst(PCT.System, "DX", 18);  NewConst(PCT.System, "BX", 19);
+		NewConst(PCT.System, "AX", regAX);  NewConst(PCT.System, "CX", regCX);
+		NewConst(PCT.System, "DX", regDX);  NewConst(PCT.System, "BX", regBX);
 
-		NewConst(PCT.System, "AL", 24);  NewConst(PCT.System, "CL", 25);
-		NewConst(PCT.System, "DL", 26);  NewConst(PCT.System, "BL", 27);
-		NewConst(PCT.System, "AH", 28);  NewConst(PCT.System, "CH", 29);
-		NewConst(PCT.System, "DH", 30);  NewConst(PCT.System, "BH", 31);
+		NewConst(PCT.System, "AL", regAL);  NewConst(PCT.System, "CL", regCL);
+		NewConst(PCT.System, "DL", regDL);  NewConst(PCT.System, "BL", regBL);
+		NewConst(PCT.System, "AH", regAH);  NewConst(PCT.System, "CH", regCH);
+		NewConst(PCT.System, "DH", regDH);  NewConst(PCT.System, "BH", regBH);
+		
+		NewConst(PCT.System, "RAX", regRAX);  NewConst(PCT.System, "RCX", regRCX);
+		NewConst(PCT.System, "RDX", regRDX);  NewConst(PCT.System, "RBX", regRBX);
+		NewConst(PCT.System, "RSP", regRSP);  NewConst(PCT.System, "RBP", regRBP);
+		NewConst(PCT.System, "RSI", regRSI);  NewConst(PCT.System, "RDI", regRDI);
+		NewConst(PCT.System, "R8", regR8);  NewConst(PCT.System, "R9", regR9);
+		NewConst(PCT.System, "R10", regR10);  NewConst(PCT.System, "R11", regR11);
+		NewConst(PCT.System, "R12", regR12);  NewConst(PCT.System, "R13", regR13);
+		NewConst(PCT.System, "R14", regR14);  NewConst(PCT.System, "R15", regR15);
+
+		NewConst(PCT.System, "R8D", regR8D);  NewConst(PCT.System, "R9D", regR9D);
+		NewConst(PCT.System, "R10D", regR10D);  NewConst(PCT.System, "R11D", regR11D);
+		NewConst(PCT.System, "R12D", regR12D);  NewConst(PCT.System, "R13D", regR13D);
+		NewConst(PCT.System, "R14D", regR14D);  NewConst(PCT.System, "R15D", regR15D);
+
+		NewConst(PCT.System, "R8W", regR8W);  NewConst(PCT.System, "R9W", regR9W);
+		NewConst(PCT.System, "R10W", regR10W);  NewConst(PCT.System, "R11W", regR11W);
+		NewConst(PCT.System, "R12W", regR12W);  NewConst(PCT.System, "R13W", regR13W);
+		NewConst(PCT.System, "R14W", regR14W);  NewConst(PCT.System, "R15W", regR15W);
+
+		NewConst(PCT.System, "R8B", regR8B);  NewConst(PCT.System, "R9B", regR9B);
+		NewConst(PCT.System, "R10B", regR10B);  NewConst(PCT.System, "R11B", regR11B);
+		NewConst(PCT.System, "R12B", regR12B);  NewConst(PCT.System, "R13B", regR13B);
+		NewConst(PCT.System, "R14B", regR14B);  NewConst(PCT.System, "R15B", regR15B);
 
 		NewSProc(PCT.System, "BIT", PCC.bitfn);
 		MakeInline("STI", stifn);
@@ -3048,6 +3218,7 @@ END TypeCompatible0;
 		NewSProc(PCT.System, "GET8", get8fn);
 		NewSProc(PCT.System, "GET16", get16fn);
 		NewSProc(PCT.System, "GET32", get32fn);
+		NewSProc(PCT.System, "GET64", get64fn);
 		NewSProc(PCT.System, "LSH", PCC.lshfn);
 		NewSProc(PCT.System, "MOVE", movefn);
 		NewSProc(PCT.System, "NEW", sysnewfn);
@@ -3055,6 +3226,7 @@ END TypeCompatible0;
 		NewSProc(PCT.System, "PUT8", put8fn);
 		NewSProc(PCT.System, "PUT16", put16fn);
 		NewSProc(PCT.System, "PUT32", put32fn);
+		NewSProc(PCT.System, "PUT64", put64fn);
 		NewSProc(PCT.System, "PORTIN", portinfn);
 		NewSProc(PCT.System, "PORTOUT", portoutfn);
 		NewSProc(PCT.System, "ROT", PCC.rotfn);

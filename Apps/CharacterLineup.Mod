@@ -66,20 +66,17 @@ TYPE
 			paintBox.fillColor.Set(0FFFFFFFFH); paintBox.SetExtDrawHandler(PaintCharacter);
 			bigFont := WMGraphics.GetFont("Single", 256, {});
 			IF bigFont IS WMCCGFonts.Font THEN fontinfo := bigFont(WMCCGFonts.Font).gf END;
-			bigFont := WMGraphics.GetFont("Song", 256, {});
+			bigFont := WMGraphics.GetFont("Cyberbit", 256, {});
 			
 			NEW(textInfoPanel); textInfoPanel.alignment.Set(WMComponents.AlignClient); infobar.AddContent(textInfoPanel);
 			AddLabelEdit(textInfoPanel, characterEdit, "Character : ");
 			characterEdit.SetFont(WMGraphics.GetFont("Single", 20, {}));
 			characterEdit.onEnter.Add(NewCharacter);
 			AddLabelEdit(textInfoPanel, pinyinEdit, "Pinyin : ");
-			pinyinEdit.SetFont(WMBitmapFont.bimbofont);
 			AddLabelEdit(textInfoPanel, mandarinEdit, "Mandarin : ");
-			mandarinEdit.SetFont(WMBitmapFont.bimbofont);
 			AddLabelEdit(textInfoPanel, cantoneseEdit, "Cantonese : ");
 			AddLabelEdit(textInfoPanel, koreanEdit, "Korean : ");
 			AddLabelEdit(textInfoPanel, definitionEdit, "Definition : ");
-			definitionEdit.SetFont(WMBitmapFont.bimbofont);
 			definitionEdit.multiLine.Set(FALSE);
 			AddLabelEdit(textInfoPanel, codeEdit, "Code : ");
 			codeEdit.onEnter.Add(NewCode);
@@ -92,7 +89,7 @@ TYPE
 			filterComponents.nofRows.Set(1);
 			filterComponents.SetDrawCellProc(DrawFilterComponents);
 			filterComponents.defaultColWidth.Set(30); filterComponents.defaultRowHeight.Set(30);
-			filterComponents.onSelect.Add(FilterSelection);
+			filterComponents.onClick.Add(FilterSelection);
 			NEW(toggleFilter); toggleFilter.onClick.Add(ToggleFilter); toggleFilter.SetCaption("Clear Filter"); 
 			toggleFilter.alignment.Set(WMComponents.AlignTop); filterPanel.AddContent(toggleFilter);
 			
@@ -210,6 +207,7 @@ TYPE
 			result : BOOLEAN;
 		BEGIN
 			result := FALSE;
+			IF glyph.ucs = code THEN RETURN TRUE END;
 			FOR i := 0 TO glyph.nofSubComponents - 1 DO IF glyph.subComponents[i].refucs = code THEN result := TRUE END END;
 			RETURN result
 		END IsComponentUsed;
@@ -315,14 +313,14 @@ TYPE
 			g := bigFont(WMCCGFonts.Font).gf.GetGlyph(curChar, 0);
 			IF g # NIL THEN 
 				bigFont(WMCCGFonts.Font).gf.RenderGlyphReal(canvas, g, 0, 0, 256, 256, 0, 
-																								TRUE, 0FFH, WMGraphics.ModeSrcOverDst, points) 
+					TRUE, 0FFH, WMGraphics.ModeSrcOverDst, points) 
 			END	
 		END PaintCharacter;
 		
 		PROCEDURE Close;
 		BEGIN
 			Close^;
-			testWindow := NIL
+			winstance := NIL
 		END Close;
 		
 		PROCEDURE DrawAll(canvas : WMGraphics.Canvas; w, h : LONGINT; state : SET; x, y : LONGINT);
@@ -375,23 +373,23 @@ TYPE
 
 	END Identifier;
 
-VAR testWindow : Identifier;
-
-PROCEDURE Cleanup;
-BEGIN
-	IF testWindow # NIL THEN testWindow.Close END
-END Cleanup;
+VAR
+	winstance : Identifier;
 
 PROCEDURE Open*(par : PTR) : PTR;
 BEGIN
-	IF testWindow = NIL THEN NEW(testWindow) END;
+	IF winstance = NIL THEN NEW(winstance) END;
 	RETURN NIL
 END Open;
+
+PROCEDURE Cleanup;
+BEGIN
+	IF winstance # NIL THEN winstance.Close END
+END Cleanup;
 
 BEGIN
 	AosModules.InstallTermHandler(Cleanup)
 END CharacterLineup.
-
 
 S.Free CharacterLineup ~ UnihanParser ~
 CharacterLineup.Open ~

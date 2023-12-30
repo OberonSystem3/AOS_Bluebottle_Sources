@@ -39,9 +39,11 @@ END NewCATAgent;
 
 
 PROCEDURE Start*(par: PTR): PTR;
+VAR 
+	res : LONGINT;
 BEGIN
 	IF cat = NIL THEN
-		AosTCPServices.OpenService(cat, CATPort, NewCATAgent);
+		NEW(cat, CATPort, NewCATAgent, res);
 		log.Enter; log.TimeStamp; log.String("Started"); log.Exit
 	END;	
 	RETURN NIL
@@ -50,7 +52,7 @@ END Start;
 PROCEDURE Stop*(par: PTR): PTR;
 BEGIN
 	IF cat # NIL THEN
-		AosTCPServices.CloseService(cat);
+		cat.Stop; cat := NIL;
 		log.Enter; log.TimeStamp; log.String("Stopped"); log.Exit
 	END;
 	RETURN NIL

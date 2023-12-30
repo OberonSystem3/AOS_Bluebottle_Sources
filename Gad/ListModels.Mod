@@ -1,7 +1,7 @@
 (* ETH Oberon, Copyright 2001 ETH Zuerich Institut fuer Computersysteme, ETH Zentrum, CH-8092 Zuerich.
 Refer to the "General ETH Oberon System Source License" contract available at: http://www.oberon.ethz.ch/ *)
 
-MODULE ListModels;	(** portable *)		(* ps,   *)
+MODULE ListModels; (** portable *)	(* ps,   *)
 (** List and Tree are models designed for the access mechanism defined in module Riders. *)
 
 IMPORT Files, Objects, Gadgets, Strings, ListRiders;
@@ -35,7 +35,7 @@ TYPE
 	END;
 	
 VAR
-	method: ListRiders.Method;
+	method*: ListRiders.Method;
 
 (* Key generator *)
 PROCEDURE GetKey (obj: List): LONGINT;

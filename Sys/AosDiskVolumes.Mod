@@ -30,10 +30,10 @@ VAR
 TYPE
 	Volume* = OBJECT (AosFS.Volume)
 		VAR
-			dev: AosDisks.Device;
+			dev-: AosDisks.Device;
 			cache: AosCaches.Cache;	(* cache associated with volume, if any *)
 			blocks: LONGINT;	(* device blocks per volume block *)
-			startfs: LONGINT;	(* device block offset of file system start *)
+			startfs-: LONGINT;	(* device block offset of file system start *)
 				
 		(** Get block from adr [1..size] of volume vol *)
 		PROCEDURE GetBlock*(adr: LONGINT; VAR blk: ARRAY OF CHAR);

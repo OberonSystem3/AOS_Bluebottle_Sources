@@ -36,6 +36,39 @@ TYPE
 		data* : POINTER TO ARRAY OF CHAR;
 	END Buffer;
 	
+	(* a blocking buffer pool that can be used by a sound playing process to synchronize sound generation *)
+	BufferPool* = OBJECT
+		VAR head, num: LONGINT; buffer: POINTER TO ARRAY OF Buffer;
+
+		PROCEDURE &Init*(n: LONGINT);
+		BEGIN
+			head := 0; num := 0; NEW(buffer, n)
+		END Init;
+				
+		PROCEDURE Add*(x: Buffer);
+		BEGIN {EXCLUSIVE}
+			AWAIT(num # LEN(buffer));
+			buffer[(head+num) MOD LEN(buffer)] := x;
+			INC(num)
+		END Add;
+
+		PROCEDURE Remove*(): Buffer;
+		VAR x: Buffer;
+		BEGIN {EXCLUSIVE}
+			AWAIT(num # 0);
+			x := buffer[head];
+			head := (head+1) MOD LEN(buffer);
+			DEC(num);
+			RETURN x
+		END Remove;
+		
+		PROCEDURE NofBuffers*(): LONGINT;	
+		BEGIN {EXCLUSIVE}
+			RETURN num
+		END NofBuffers;
+
+	END BufferPool;
+	
 	(** A buffer listener is called when a play / or record buffer is completed, 
 			the application should reuse eg. process the buffer *)
 	BufferListener* = PROCEDURE { DELEGATE } (buffer : Buffer); 
@@ -283,4 +316,3 @@ BEGIN
 	AosModules.InstallTermHandler(Cleanup);
 	NEW(devices, "AosSound", "Sound drivers")
 END AosSound.
- 

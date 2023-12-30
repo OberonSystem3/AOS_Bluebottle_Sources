@@ -1,23 +1,32 @@
 MODULE Presentation; (** AUTHOR "TF"; PURPOSE "Dia-Show"; *)
 
-IMPORT AosCommands, AosOut, WM := WMWindowManager, Graphics := WMGraphics, AosFS;
+IMPORT AosCommands, AosOut, WM := WMWindowManager, Graphics := WMGraphics, AosFS, Raster, WMTransitions,
+	Utilities, WMDialogs;
 
 TYPE
 	Slide = POINTER TO RECORD 
 		img : Graphics.Image;
+		text, keywords : Utilities.String;
 		next, prev : Slide;
 	END;	
 	
 	PWin = OBJECT (WM.BufferWindow)
 	VAR	
 		current : Slide;
+		transition : WMTransitions.TransitionFade;
+		fadeImage : Raster.Image;
+		bigPointer : WM.PointerInfo;
+		showPointer : BOOLEAN;
 		
 		PROCEDURE &New;
 		BEGIN
-		(*	Init(view.range.r - view.range.l, view.range.b - view.range.t, FALSE); *)
-			Init(1280, 1024, FALSE);
+			Init(1024, 768, FALSE);
+			NEW(fadeImage); Raster.Create(fadeImage, 1024, 768, Raster.BGR565);
+			NEW(transition);
 			manager := WM.GetDefaultManager();
-			SetPointerInfo(manager.pointerNull)
+			SetPointerInfo(manager.pointerNull);
+			WM.LoadCursor("pointer.png", 0, 0, bigPointer);
+			showPointer := FALSE;
 		END New;
 		
 		PROCEDURE Start;
@@ -26,36 +35,78 @@ TYPE
 			IF current = tail THEN AosOut.String("not correctly inserted"); RETURN END;
 			manager := WM.GetDefaultManager();
 			manager.Add(0, 0, SELF, {}); manager.SetFocus(SELF);			
-			DrawImg
+			DrawImg(FALSE)
 		END Start;
 		
-		PROCEDURE DrawImg;
-		VAR w, h : LONGINT;
+		PROCEDURE TogglePointer;
+		BEGIN
+			IF showPointer THEN 
+				SetPointerInfo(manager.pointerNull);
+				showPointer := FALSE
+			ELSE
+				SetPointerInfo(bigPointer);
+				showPointer := TRUE
+			END
+		END TogglePointer;
+		
+		
+		PROCEDURE DrawImg(fade : BOOLEAN);
+		VAR w, h, i : LONGINT;
 		BEGIN
 			IF current = NIL THEN AosOut.String("current is nil"); RETURN; END;
 			IF (current # tail) & (current # head) THEN 
+				IF fade THEN 
+					FOR i := 1 TO 14 DO
+						IF current.prev # head THEN 
+							transition.CalcImage(current.prev.img, current.img, fadeImage, i * 18);
+							canvas.DrawImage(0, 0, fadeImage, Graphics.ModeCopy);
+							Invalidate(Graphics.MakeRectangle(0, 0, img.width, img.height))					
+						END;
+					END;
+				END;
 				canvas.DrawImage(0, 0, current.img, Graphics.ModeCopy);
+				IF (current.text # NIL) & (current.text^ # "") THEN
+					canvas.SetColor(Graphics.White);
+					canvas.DrawString(10, 750, current.text^);
+				END;
 				Invalidate(Graphics.MakeRectangle(0, 0, img.width, img.height))
 			END;
 		END DrawImg;
 		
-		PROCEDURE Next;
+		PROCEDURE Next(fade : BOOLEAN);
 		BEGIN
 			IF current.next # tail THEN current := current.next END;
-			DrawImg
+			DrawImg(fade)
 		END Next;
 		
 		PROCEDURE Prev;
 		BEGIN 
 			IF current.prev # head THEN current := current.prev END;
-			DrawImg
+			DrawImg(FALSE)
 		END Prev;
+		
+		PROCEDURE Search;
+		VAR mini : WMDialogs.MiniStringInput;
+			c : Slide;
+			searchtext : ARRAY 32 OF CHAR;
+		BEGIN
+			NEW(mini);
+			IF mini.Show(200, 200, searchtext) = WMDialogs.ResOk THEN
+				c := head.next;
+				WHILE (c # tail) & (c.text # NIL) & (Utilities.Pos(searchtext, c.text^) < 0) &
+					(c.keywords # NIL) & (Utilities.Pos(searchtext, c.keywords^) < 0) DO c := c.next END;
+				IF c # tail THEN current := c; DrawImg(FALSE) END;
+			END;
+		END Search;
 		
 		PROCEDURE KeyEvent(ucs : LONGINT; flags:SET; keySym:LONGINT);
 		BEGIN
-			IF (keySym = 0FF53H) OR (keySym = 0FF0DH) OR (keySym = 00020H) THEN Next
+			IF (keySym = 0FF53H) OR (keySym = 0FF0DH) THEN Next(FALSE)
+			ELSIF (keySym = 00020H) THEN Next(TRUE)
 			ELSIF keySym = 0FF51H THEN Prev 
 			ELSIF keySym = 0FF1BH THEN manager.Remove(SELF)
+			ELSIF keySym = 0FFC0H THEN Search
+			ELSIF keySym = 0FFBEH THEN TogglePointer
 			END
 		END KeyEvent;
 		
@@ -69,15 +120,21 @@ BEGIN{EXCLUSIVE}
 	RETURN NIL
 END Clear;
 
-PROCEDURE AddSlide(name : ARRAY OF CHAR);
+PROCEDURE AddSlide(name, text, keywords : ARRAY OF CHAR);
 VAR new : Slide;
 		dx, dy, w, h : LONGINT;
-		img : Graphics.Image;
+		timg, img : Graphics.Image;
+		bc : Graphics.BufferCanvas;
 BEGIN
-	img := Graphics.LoadImage(name, TRUE);
+	timg := Graphics.LoadImage(name, TRUE);
+	NEW(img); Raster.Create(img, 1024, 768, Raster.BGR565);
+	NEW(bc, img);
+	bc.DrawImage(0, 0, timg, Graphics.ModeCopy);
 	AosOut.String(name); AosOut.String(" ");
 	IF img # NIL THEN 	
 		NEW(new);
+		new.text := Utilities.NewString(text); 
+		new.keywords := Utilities.NewString(keywords); 
 		new.prev := tail.prev; tail.prev.next := new; new.next := tail; tail.prev := new;
 		new.img := img
 	ELSE AosOut.String(" not loaded!"); AosOut.Ln;
@@ -94,7 +151,7 @@ BEGIN {EXCLUSIVE}
 		j := 0;
 		WHILE (p.str[i] # " ") & (p.str[i] # 0X) & (i < LEN(name)-1) DO name[j] := p.str[i]; INC(i); INC(j) END;
 		name[j]:=0X;	
-		AddSlide(name);
+		AddSlide(name, "", "");
 		INC(i)
 	END;
 	RETURN NIL
@@ -102,9 +159,9 @@ END LoadSlides;
 
 PROCEDURE Load*(par : PTR) : PTR;
 VAR p : AosCommands.Parameters;		
-		name : ARRAY 256 OF CHAR;
+		name, text, keywords : ARRAY 256 OF CHAR;
 		ch : CHAR;
-		pf : AosFS.File; pr : AosFS.Rider;
+		pf : AosFS.File; r : AosFS.Reader;
 		i : LONGINT;
 BEGIN {EXCLUSIVE}
 	head.next:=tail; tail.prev:=head; (* empty slides *)
@@ -112,18 +169,13 @@ BEGIN {EXCLUSIVE}
 	WHILE (p.str[i] # " ") & (p.str[i] # 0X) & (i < LEN(name) - 1) DO name[i] := p.str[i]; INC(i) END;
 	pf := AosFS.Old(name);
 	IF pf # NIL THEN 
-		pf.Set(pr, 0);
-		REPEAT 
-			REPEAT
-				pf.Read(pr, ch)
-			UNTIL (ch # " ") & (ch # 0AX) & (ch # 0DX) & (ch # 9X);
-			i := 0;
-			WHILE (ch  #" ") & (ch # 0X) & (ch # '~') & (~pr.eof) & (ch # 0AX) & (ch # 0DX) & (ch # 9X) DO
-				name[i] := ch; INC(i); pf.Read(pr, ch)
-			END;
-			name[i] := 0X;
-			IF i # 0 THEN AddSlide(name) END
-		UNTIL pr.eof OR (i = 0)
+		AosFS.OpenReader(r, pf, 0);
+		WHILE r.res = 0 DO 
+			r.String(name); r.SkipWhitespace;
+			r.String(text);r.SkipWhitespace;
+			r.String(keywords); r.SkipLn;
+			IF i # 0 THEN AddSlide(name, text, keywords) END
+		END;
 	END;
 	RETURN NIL
 END Load;
@@ -140,18 +192,16 @@ BEGIN
 	NEW(head); NEW(tail); head.next:=tail; head.prev:=head; tail.prev:=head; tail.next:=tail
 END Presentation.
 
-System.Free Presentation ~
+S.Free Presentation ~
 
 (RembrandtDoc)
 ImageDocs.Open ^
 
-Aos.Call Presentation.LoadSlides Bart.Pict ~
+Presentation.LoadSlides Bart.Pict ~
 
-Aos.Call Presentation.Go~
+Presentation.Go~
 
-Aos.Call Presentation.Clear~
+Presentation.Clear~
 
-ET.OpenAscii Aos.txt ~
-
-Aos.Call Presentation.Load Aos.txt ~
+Presentation.Load Aos.txt ~
 

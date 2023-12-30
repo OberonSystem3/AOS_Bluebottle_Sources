@@ -1,18 +1,23 @@
 MODULE AVI;
 
-(* Prozedures to read an .avi file *)
+(* Procedures to read an .avi file *)
 (* Written by Thomas Trachsel, ttrachsel@web.de, 18.9.2003 *)
+(* Extended with indexfunctionality and adaptation on AosCodecs by Urs Müller, October 2004 *)
+(* Cleaned by PL, March 2005 *)
 
 IMPORT
-	AosFS, AosIO, AosOut, SYSTEM;
+	AosFS, AosIO, AosOut, SYSTEM, AOC := AosCodecs;
 	
 	CONST
-		Debug =FALSE;
-
+		Debug = FALSE;
+		DefaultReaderSize = 4096;
+		WriteError = 2907;
+	
+	(* Steht jetzt einmal hier, kann man vielleicht in AVIDemux reinpacken, mal schauen *)
 	TYPE
 		(* Structure that contains the main informations of the .avi file *)
-		MainAVIHeaderPtr* = POINTER TO MainAVIHeaderDesc;
-		MainAVIHeaderDesc* = RECORD
+		MainAVIHeaderDesc* = OBJECT
+		VAR 
 			microSecsPerFrame*: LONGINT;
 			maxBytesPerSec*: LONGINT;
 			reserved1*: LONGINT;
@@ -24,12 +29,12 @@ IMPORT
 			width*: LONGINT;
 			height*: LONGINT;
 			reserved*: ARRAY 4 OF LONGINT;
-		END;
+		END MainAVIHeaderDesc;
 		
 		(* Structure that contains the main Info of a stream in a .avi file *)
-		AVIStreamHeaderPtr* = POINTER TO AVIStreamHeader;
-		AVIStreamHeader* = RECORD
-			fccType: ARRAY 4 OF CHAR;
+		AVIStreamHeader* = OBJECT
+		VAR
+			fccType*: ARRAY 4 OF CHAR;
 			fccHandler*: ARRAY 4 OF CHAR;
 			flags*: LONGINT;
 			priority*: LONGINT;
@@ -46,13 +51,13 @@ IMPORT
 			right*: LONGINT;
 			bottom*: LONGINT;
 			streamIdentifier*: ARRAY 4 OF CHAR;
-			bitMapInfo*: BitMapInfoPtr;
-			waveFormatEx*: WAVEFormatExPtr;
-		END;
+			bitMapInfo*: BitMapInfo;
+			waveFormatEx*: WAVEFormatEx;
+		END AVIStreamHeader;
 
 		(* video stream specific infos *)
-		BitMapInfoPtr* = POINTER TO BitMapInfo;
-		BitMapInfo = RECORD
+		BitMapInfo = OBJECT
+		VAR
 			size*: LONGINT;
 			width*: LONGINT;
 			height*: LONGINT;
@@ -64,11 +69,11 @@ IMPORT
 			yPelsPerMeter*: LONGINT;
 			clrUsed*: LONGINT;
 			clrImportant*: LONGINT;
-		END;
+		END BitMapInfo;
 		
 		(* audio stream specific infos *)
-		WAVEFormatExPtr* = POINTER TO WAVEFormatEx;
-		WAVEFormatEx* = RECORD
+		WAVEFormatEx* = OBJECT
+		VAR
 			formatTag*: LONGINT;
 			channels*: LONGINT;
 			samplesPerSec*: LONGINT;
@@ -76,135 +81,47 @@ IMPORT
 			blockAlign*: LONGINT;
 			bitsPerSample*: LONGINT;
 			cbSize*: LONGINT;
+		END WAVEFormatEx;
+		
+		(* IndexChunk infos *)
+		AVIIndexEntry* = RECORD
+			ckid*: LONGINT;
+			flags*: LONGINT;
+			offset*: LONGINT;
+			length*: LONGINT;
+			tot*: LONGINT;
 		END;
-
+	
+	TYPE IndexArrayPointer* = POINTER TO ARRAY OF AVIIndexEntry;
+			
 	(* Stream for reading a Stream of an .avi file *)
-	TYPE AVIStream* = OBJECT
+	TYPE AVIStream* = OBJECT(AOC.DemuxStream)
 		VAR
-			index*: LONGINT;	(* Position (Bit) in buf *)
 			bufAdr: LONGINT;
-			buf: POINTER  TO ARRAY OF CHAR;	(* Local buffer, contains the data for decoding one frame *)
-			r: AVIReader;
+			r : AosIO.Reader;
 			chunkSize*: LONGINT;	(* Bytes in actual AVI Chunk *)
-			streamHeader: AVIStreamHeaderPtr;
-			aviHeader: MainAVIHeaderPtr;
-			stuffByte: LONGINT;
+			streamHeader: AVIStreamHeader;
+			stuffByte*: LONGINT;
 			eof*: BOOLEAN;	(* End of File *)
 			
 		(* Constructor *)
-		PROCEDURE & Init( r: AVIReader; aviHdr: MainAVIHeaderPtr; streamHdr: AVIStreamHeaderPtr );
+		PROCEDURE & Init( r: AosIO.Reader;  streamHdr: AVIStreamHeader);
 		BEGIN
-			index :=  -1; (* index is in the beginning not valid  *)
 			bufAdr := 0;
 			chunkSize := 0;
 			streamHeader := streamHdr;
-			aviHeader := aviHdr;
 			SELF.r := r;
 			ASSERT(SELF.r # NIL);
 			stuffByte := 0;
 			eof := FALSE;
-			buf := NIL
 		END Init;
-
-		(* Align stream to next Byte *)
-		PROCEDURE Align*( );
-		BEGIN
-			IF ( index MOD 8 ) # 0 THEN
-				index :=  index - ( index MOD 8 ) + 8
-			END;
-		END Align;
-
-		(* True if actual position is on byte boundary *)
-		PROCEDURE IsAligned*(): BOOLEAN;
-		BEGIN
-			IF ( index MOD 8 ) = 0 THEN
-				RETURN TRUE
-			ELSE
-				RETURN FALSE
-			END;
-		END IsAligned;
 		
-	(* Read next n Bits (max 32), without advancing in stream. Max 32 Bits are allowed *)
-	(* Very slow but portable *)
-		PROCEDURE ShowBitsSlow*( n: LONGINT ): LONGINT;
-		VAR
-			ret: LONGINT;
-			count: LONGINT;
+		(* Returns TRUE if the underlying reader supports seeking.  *)
+		PROCEDURE CanSetPos*() : BOOLEAN;
 		BEGIN
-			ret := 0;
-			count := 0;
-			
-			WHILE count < n DO
-				ret := ret * 2;
-				IF ( 7 - ( index MOD 8 ) ) IN SYSTEM.VAL( SET, buf[index DIV 8] ) THEN
-					INC(ret)
-				END;
-				INC( index );
-				INC( count )
-			END;
-			
-			index := index - count;
-
-			RETURN ret
-		END ShowBitsSlow;
-
-	 	(* Fast function for changing byte order, but only for  >= i486 *)
-	 	PROCEDURE ChangeByteOrder( n: LONGINT ): LONGINT;
-		CODE { SYSTEM.i486 }
-			MOV EAX, n[EBP]				; load n in eax
-			BSWAP EAX			 ; swap byte order
-		END ChangeByteOrder;
-	 	
-		(* Read next n Bits (max 32), without advancing in stream. Max 32 Bits are allowed *)
-		(* Fast, but im not sure if it's portable *)
-		PROCEDURE ShowBits*( n: LONGINT ): LONGINT;
-		VAR
-			nbit: LONGINT; 
-			posInLONGINT: LONGINT;
-			bufa, bufb: LONGINT;
-			temp: LONGINT;
-		BEGIN
-			posInLONGINT := index MOD 32;
-			nbit := ( posInLONGINT+ n ) - 32;
-			
-			IF nbit > 0 THEN
-				(* We have to read two 32 bit values *)
-				temp := SYSTEM.LSH( index - posInLONGINT , -3 ) + bufAdr;
-				bufa := ChangeByteOrder( SYSTEM.GET32( temp ) );
-				bufb := ChangeByteOrder( SYSTEM.GET32( temp + 4 ) );
-				
-				 temp := SYSTEM.LSH( SYSTEM.LSH( bufa, posInLONGINT ),  nbit - posInLONGINT );
-				RETURN SYSTEM.VAL( LONGINT, SYSTEM.VAL( SET, SYSTEM.LSH( bufb, nbit - 32 ) ) + SYSTEM.VAL( SET, temp ) )
-			ELSE
-				(* Reading one 32 value is sufficient *)
-				bufa := ChangeByteOrder( SYSTEM.GET32( SYSTEM.LSH( index - posInLONGINT, -3 ) + bufAdr ) );
-				
-				RETURN SYSTEM.LSH( SYSTEM.LSH( bufa, posInLONGINT ),  n - 32 )
-			END;
-		END ShowBits;
-	 	 	 
-	 (* Show n bits, byte aligned without advancing in bit stream *)
-		PROCEDURE ShowBitsByteAligned*(n: LONGINT): LONGINT;
-		VAR
-			count: LONGINT;
-			ret: LONGINT;
-		BEGIN
-			count := 8 - ( index MOD 8 );
-			
-			IF count = 8 THEN
-				IF ShowBits( 8 ) = 7FH THEN (* Spezial case: see iso spec *)
-					count := 8
-				ELSE
-					count := 0
-				END;
-			END;
-			
-			index := index + count;
-			ret := ShowBits( n );
-			index := index - count;
-			RETURN ret
-		END ShowBitsByteAligned;
-
+			RETURN r.CanSetPos();
+		END CanSetPos;
+		
 		(* Compare two array up to len bytes *)
 		PROCEDURE CompareCharArrays(ar1,ar2 : ARRAY OF CHAR; len: LONGINT ): BOOLEAN;
 		VAR
@@ -221,30 +138,15 @@ IMPORT
 			END;
 			RETURN TRUE
 		END CompareCharArrays;
-												
-		(* Read next n Bits and advance in Bit Stream. Max 32 Bits are allowed *)
-		PROCEDURE GetBits*( n: LONGINT ): LONGINT;
-		VAR
-			ret: LONGINT;
-		BEGIN
-			ret := ShowBits( n );
-			SkipBits( n );
-			RETURN ret
-		END GetBits;
-
-		(* Skip Next n Bits *)
-		PROCEDURE SkipBits*(n: LONGINT );
-		BEGIN
-			index := index + n
-		END SkipBits;
-
-		(* Seek the next chunk of our stream in the avi fileand read it *)
-		PROCEDURE  ReadNextChunk();
+		
+		(* Seek the next chunk of our stream in the avi file and read it *)
+		PROCEDURE  ReadNextChunk(VAR buf:  ARRAY OF CHAR);
 		VAR 
 			tempBuf: ARRAY 4 OF CHAR;
 			len: LONGINT;
 			done: BOOLEAN;
 		BEGIN
+			IF Debug THEN AosOut.String("Read next Chunk"); AosOut.Ln; END;
 			done := FALSE;
 			eof := FALSE;
 			
@@ -257,7 +159,7 @@ IMPORT
 			REPEAT
 				r.Bytes(tempBuf, 0, 4, len );
 				IF r.res = AosIO.Ok THEN
-					r.ReadLONGINT( len );
+					r.RawLInt(len);
 					stuffByte := len MOD 2;
 					IF r.res = AosIO.Ok THEN 
 						IF Debug THEN
@@ -266,92 +168,118 @@ IMPORT
 							AosOut.Hex( ORD( tempBuf[2] ), 0 ); AosOut.Hex( ORD( tempBuf[3] ), 0 ); AosOut.String(" ");
 							AosOut.Char( tempBuf[0] ); AosOut.Char( tempBuf[1] ); AosOut.Char( tempBuf[2] ); 
 							AosOut.Char( tempBuf[3] ); AosOut.String( "@Pos: "); AosOut.Int( r.Pos() - 8, 0 ); 
-							AosOut.String( " SkipBytes: " ); AosOut.Int( len, 0 ); AosOut.Ln()
+							AosOut.String( " SkipBytes: " ); AosOut.Int( len, 0 ); AosOut.Ln();
 						END;
 						IF CompareCharArrays( tempBuf, streamHeader.streamIdentifier, 4 ) THEN
 							(* We found the correct chunk *)
 							IF len > 0 THEN
 								done := TRUE;
-								NEW( buf, len + 4 );
 								bufAdr := SYSTEM.ADR( buf[0] );
-								r.Bytes( buf^, 0, len, chunkSize );
+								r.Bytes( buf, 0, len, chunkSize );
 								buf[len] := CHR( 0 ); buf[len+1] := CHR( 0 ); buf[len+2] := CHR( 0 ); buf[len+3] := CHR( 0 );
 								ASSERT( len = chunkSize );
-								index := 0
 							END;
 						ELSE
 							r.SkipBytes( len + stuffByte )
 						END;
 					ELSE 
-						eof := TRUE
+						eof := TRUE;
+						res := AosIO.EOF;
+						AosOut.String("ENDE");
 					END;
 				ELSE
-					eof := TRUE
+					eof := TRUE;
+					res := AosIO.EOF;
+					AosOut.String("ENDE");
 				END; 
 			UNTIL ( done OR eof );
 		END ReadNextChunk;
 		
 		(* Go to the beginnig of the next frame -> Read next chunk *)
-		PROCEDURE Resynch*(): BOOLEAN;
+		PROCEDURE Resynch*(VAR buf: ARRAY OF CHAR): BOOLEAN;
 		BEGIN
-			ReadNextChunk();
-			RETURN ~eof
+			ReadNextChunk(buf);
+			RETURN ~eof			
 		END Resynch;
 		
 		(* Return Pos in Avi File, relativ to the beginning of the stream data *)
-		PROCEDURE FilePos*(): LONGINT;
+		PROCEDURE Pos*(): LONGINT;
 		BEGIN
 			RETURN r.Pos()
-		END FilePos;
+		END Pos;
 		
-		(* Get Header of the avi File *)
-		PROCEDURE GetAVIHeader*(): MainAVIHeaderPtr;
+		(* Set the Position of the AVIReader. If frame flag is set, position is interpreted as a framenumber *)
+		PROCEDURE SetAVIPos*(pos: LONGINT;  VAR retPos: LONGINT);
 		BEGIN
-			RETURN aviHeader
-		END  GetAVIHeader;
+			IF Debug THEN AosOut.String("DemuxStream.SetAVIPos"); AosOut.Ln; END;
+			r.SetPos(pos);
+			stuffByte := 0;
+			retPos := r.Pos();	
+			Reset;
+		END SetAVIPos;
 		
-		(* Get Header of our Stream *)
-		PROCEDURE GetAVIStreamHeader*(): AVIStreamHeaderPtr;
+		PROCEDURE Bytes*(VAR x: ARRAY OF CHAR; ofs, size: LONGINT; VAR len: LONGINT);
+		VAR 
+			min, res: LONGINT;
 		BEGIN
-			RETURN streamHeader
-		END GetAVIStreamHeader;
-	
+			IF Debug THEN AosOut.String("Bytes"); AosOut.Ln; END;
+			demultiplexer.GetData(streamNr, x, ofs, size, min, len, res);
+		END Bytes;
+		
+		(* Set Byte Position *)
+		PROCEDURE SetPos*(pos : LONGINT);
+		VAR seekType, itemSize, res : LONGINT;
+		BEGIN
+			IF Debug THEN AosOut.String("DemuxStream.SetPos"); AosOut.Ln; END;
+			seekType := AOC.SeekByte;
+			demultiplexer.SetStreamPos(streamNr, seekType, pos, itemSize, res);
+			Reset;
+		END SetPos;		
+		
 	END AVIStream;
 	
-	(* Reader that provides platform independence *)
-	TYPE AVIReader* = OBJECT(AosFS.Reader)
-	VAR
-	
-		PROCEDURE ReadLONGINT*( VAR n: LONGINT );
-		BEGIN
-			n := LONG( ORD( Get() ) ) + LONG( ORD( Get() ) )*100H + LONG( ORD( Get() ) )*10000H 
-			+ LONG( ORD( Get() ) )*1000000H;
-		END ReadLONGINT;
-		
-		PROCEDURE ReadINTEGER*( VAR n: INTEGER );
-		BEGIN
-			n := SHORT( ORD( Get() ) ) + SHORT( ORD( Get() ) )*100H;
-		END ReadINTEGER;
-	END AVIReader;
-	
 	(* The .avi File Demultiplexer *)
-	TYPE AVIDemux* = OBJECT 
-		VAR 
-			file: AosFS.File;
-			fileName: ARRAY 255 OF CHAR;
-			(* We need just these 3 Headers *)
-			aviHeader: MainAVIHeaderPtr;
-			audioStreamHeader: AVIStreamHeaderPtr;
-			videoStreamHeader: AVIStreamHeaderPtr;
-			riffLength: LONGINT;
-			r: AVIReader;
-
-		PROCEDURE &Init( fileID: AosFS.File );
-		BEGIN
-			file := fileID
-		END Init;
+	AVIDemux* = OBJECT(AOC.AVDemultiplexer) 
+	VAR 
+		r : AosIO.Reader;
+		filename* : ARRAY 256 OF CHAR;
 		
-		PROCEDURE GetAVIHeader*(): MainAVIHeaderPtr;
+		(* We need just these 3 Headers *)
+		aviHeader: MainAVIHeaderDesc;
+		audioStreamHeader: AVIStreamHeader;
+		videoStreamHeader: AVIStreamHeader;
+		riffLength: LONGINT;
+		
+		movieBeginPos: LONGINT;
+		indexStart: LONGINT;
+		videoFrames: LONGINT;
+		audioChunks: LONGINT;
+		videoIndex: IndexArrayPointer;
+		audioIndex: IndexArrayPointer;
+		audioBytes: LONGINT;
+		
+		videoBufferIndex: LONGINT;
+		
+		audioChunkSize: LONGINT;
+		
+		audioStream: AVIStream;
+		videoStream: AVIStream;
+		videoFramePos: LONGINT;
+		audioFramePos: LONGINT; 	
+		
+		PROCEDURE Open*(in : AosIO.Reader; VAR res : LONGINT);
+		BEGIN
+			r := in;
+			res := AOC.ResFailed;
+			
+			IF in IS AOC.FileInputStream	THEN
+				in(AOC.FileInputStream).f.GetName(filename);
+				IF ReadHeader() THEN res := AOC.ResOk 	END
+			ELSE RETURN END;													(* bad bad bad *)
+			
+		END Open;
+		
+		PROCEDURE GetAVIHeader*(): MainAVIHeaderDesc;
 		BEGIN
 			RETURN aviHeader
 		END  GetAVIHeader;
@@ -381,9 +309,11 @@ IMPORT
 			done: BOOLEAN;
 			headerLength: LONGINT;
 			headerBeginPos: LONGINT;
-			tempHeader: AVIStreamHeaderPtr;
-			temp: LONGINT;
+			movieLength: LONGINT;
+			
+			tempHeader: AVIStreamHeader;
 			streamNumber: SHORTINT;
+
 		BEGIN
 			done := FALSE;
 			streamNumber := 0;
@@ -392,8 +322,6 @@ IMPORT
 			audioStreamHeader := NIL;
 			videoStreamHeader := NIL;
 
-			(* Open File *)
-			NEW( r, file, 0 );
 			ASSERT(r # NIL);
 			
 			(* Check, if we have a valid avi file *)
@@ -402,7 +330,7 @@ IMPORT
 				AosOut.String( "Not a valid .avi File!" ); AosOut.Ln;
 				RETURN FALSE
 			END;
-			r.ReadLONGINT( riffLength );
+			r.RawLInt(riffLength);
 			
 			r.Bytes( buf,0,4, len );
 			IF CompareCharArrays( buf, "AVI ",4 ) # TRUE THEN
@@ -416,7 +344,8 @@ IMPORT
 				IF CompareCharArrays( buf, "LIST",4 ) THEN
 					(* We found an additional Header *)
 					(* Store Infos about header *)
-					r.ReadLONGINT( headerLength );
+					r.RawLInt(headerLength);
+					
 					headerLength := headerLength + headerLength MOD 2;
 					headerBeginPos := r.Pos();
 					r.Bytes( buf,0,4, len );
@@ -481,11 +410,30 @@ IMPORT
 							END;
 						END;
 					ELSIF CompareCharArrays(buf, "movi",4) THEN
-						(* movie data begin *)
-						IF Debug THEN 
-							AosOut.String("AVIDemux: Start of movie stream found " ); AosOut.Ln()
+						(* movie data begin, including movi Tag *)
+ 						movieBeginPos := r.Pos()-4;
+ 						
+ 						(* this could be improved... *)
+ 						r.SetPos(headerLength+movieBeginPos);			(* headerLength); *) 
+ 						
+						r.Bytes(buf,0,4,len);
+ 						
+ 						IF CompareCharArrays(buf, "idx1",4) THEN
+ 							(* There is an index *)
+ 						
+ 							(* Start of Index including idx1 Tag *)
+ 							indexStart := r.Pos()-4;
+ 							ReadIndex();
+							IF Debug THEN
+								AosOut.String("AVIDemux: Start of movie stream found " ); AosOut.Ln()
+							END;
+						ELSE
+							videoIndex := NIL;
+							audioIndex := NIL;
 						END;
-						done := TRUE
+						r.SetPos(movieBeginPos+4);
+						
+						done := TRUE;
 					ELSE
 						IF Debug THEN
 							AosOut.String("AVIDemux: Unknown StreamHeader found: " ); AosOut.String(buf); AosOut.Ln()
@@ -497,52 +445,195 @@ IMPORT
 					IF Debug THEN
 						AosOut.String("AVIDemux: Unknown Header found: " ); AosOut.Buffer(buf,0,4); AosOut.Ln()
 					END;
-					SkipHeader()
+					SkipHeader(); 
 				END;
 			UNTIL done;
 			
 			IF Debug THEN
-				DumpHeaders()
+				DumpHeaders();
 			END;
 			
 			RETURN TRUE
 		END ReadHeader;
 
+		(* Noch ueberlegen: BOOLEAN Rueckgabe, wenn kein Index dann False *)
+		PROCEDURE ReadIndex*();
+		VAR
+			buf : ARRAY 8 OF CHAR;
+			buf2 : ARRAY 8 OF CHAR;
+			indexLength: LONGINT;
+			nidx: LONGINT;
+			idxType: INTEGER;
+			i: LONGINT;
+			pos: LONGINT;
+			length: LONGINT;
+			len: LONGINT;
+			temp: LONGINT;
+			nai: LONGINT;
+			nvi: LONGINT;
+			tot: LONGINT;
+			ioff: LONGINT;
+			
+		BEGIN
+ 			r.RawLInt(indexLength);
+ 		
+ 			nidx := indexLength DIV 16;
+ 			idxType := 0; 
+ 			i := 0;
+ 			LOOP
+ 				r.Bytes(buf, 0, 4, len);
+ 				IF CompareCharArrays(buf, videoStreamHeader.streamIdentifier, 3) THEN
+ 					i := i+1;
+ 					(* Not shure, wether this is necessary - but everything works fine with it *)
+ 					indexStart := r.Pos()-4;
+ 					EXIT;
+ 				END;
+ 				IF i >= nidx THEN
+ 					AosOut.String("No Index found"); AosOut.Ln();
+ 					EXIT;
+ 				END; 
+ 			END;
+ 			
+ 			r.SkipBytes(4);
+ 			r.RawLInt(pos);
+ 			r.RawLInt(length);
+ 			r.SetPos(pos); 			
+ 			
+ 			(* Index from start of File*)
+ 			IF CompareCharArrays(buf2, buf, 4) THEN
+ 				r.RawLInt(temp);
+ 				
+ 				IF (temp = length) THEN
+ 					idxType := 1;
+ 				END;
+ 			ELSE
+ 				r.SetPos(pos + movieBeginPos);
+ 				
+ 				r.Bytes(buf2, 0, 4, len);
+ 				IF CompareCharArrays(buf2, buf, 4) THEN
+ 					r.RawLInt(temp);
+ 					
+ 					IF (temp = length) THEN
+ 						idxType := 2;
+ 					END;
+ 				END;
+ 			END;
+ 			
+ 			(* now go on according to indexType *)
+ 			IF idxType = 0 THEN
+ 				AosOut.String("File without index: Not supported yet");
+ 				(* And trap here ... *)
+ 			END;
+ 			
+ 			(* The 0 case: no index. It is possible to generate an index b y traversing the whole file 	*)
+ 			(* For now we simply declare the file as not seekable										*)
+ 			
+ 			IF idxType # 0 THEN
+ 				nai := 0;
+ 				nvi := 0;
+ 			
+ 				r.SetPos(indexStart);
+ 				
+ 				i := 0;
+ 				(* Count, how many entries there are (the number would also be in the header, 	*)
+ 				(* but if there is no index, you have to do this anyway)							*)
+ 				REPEAT
+ 					r.Bytes(buf, 0, 4, len);
+ 					IF CompareCharArrays(buf, videoStreamHeader.streamIdentifier, 3) THEN
+ 						nvi := nvi+1;
+ 					ELSE
+ 						IF audioStreamHeader # NIL THEN
+ 							IF CompareCharArrays(buf, audioStreamHeader.streamIdentifier, 4) THEN
+ 								nai := nai+1;
+ 							END;
+ 						END;
+ 					END;
+ 					r.SkipBytes(12);
+ 					i := i+1;
+ 				UNTIL (i = nidx-1);
+ 			
+ 				videoFrames := nvi; 				
+ 				audioChunks := nai;
+				NEW(videoIndex, nvi);
+ 			
+ 				(* Vielleicht haben wir ja nur Bilder... *)
+ 				IF (audioChunks > 0) THEN
+ 					NEW(audioIndex, nai);
+ 				END;
+ 			
+ 				(* So, und jetzt die Arrays fuellen *)
+ 				nvi := 0;
+ 				nai := 0;
+ 				tot := 0;
+ 				r.SetPos(indexStart);
+ 			
+ 				IF (idxType = 1) THEN
+ 					ioff := 8;
+ 				ELSE
+ 					ioff := movieBeginPos;
+ 				END;
+ 			
+ 				i := 0;
+ 				REPEAT
+ 					r.Bytes(buf, 0, 4, len);
+ 					IF CompareCharArrays(buf, videoStreamHeader.streamIdentifier, 3) THEN
+ 						r.RawLInt(videoIndex[nvi].flags);
+ 						r.RawLInt(videoIndex[nvi].offset);
+ 						videoIndex[nvi].offset := videoIndex[nvi].offset + ioff;
+ 						r.RawLInt(videoIndex[nvi].length);
+ 						nvi := nvi+1;
+ 					ELSE
+ 						IF CompareCharArrays(buf, audioStreamHeader.streamIdentifier, 4) THEN
+ 							r.SkipBytes(4);
+ 							r.RawLInt(audioIndex[nai].offset);
+ 							audioIndex[nai].offset := audioIndex[nai].offset + ioff;
+ 							r.RawLInt(audioIndex[nai].length);
+ 							audioIndex[nai].tot := tot;
+ 							tot := tot + audioIndex[nai].length;
+ 							nai := nai+1;
+ 						END;
+ 					END;
+ 					i := i+1;
+ 				UNTIL (i = nidx-1);
+ 				audioBytes := tot;
+ 			END;
+		END ReadIndex;
+		
 		(* Skip chunk *)
 		PROCEDURE SkipHeader*();
 		VAR
 			length: LONGINT;
 		BEGIN
-			r.ReadLONGINT( length );
+			r.RawLInt(length);
 			r.SkipBytes( length + length MOD 2)
 		END SkipHeader;
 		
 		(* Read Main AVI Header *)
-		PROCEDURE ReadMainAVIHeader(): MainAVIHeaderPtr;
+		PROCEDURE ReadMainAVIHeader(): MainAVIHeaderDesc;
 		VAR 
-			aviHeader: MainAVIHeaderPtr;
+			aviHeader: MainAVIHeaderDesc;
 			headerLength: LONGINT;
 			startPos: LONGINT;
 		BEGIN
 			NEW( aviHeader );
 							
-			r.ReadLONGINT( headerLength );
+			r.RawLInt(headerLength);
 			startPos := r.Pos();
 			
-			r.ReadLONGINT( aviHeader.microSecsPerFrame );
-			r.ReadLONGINT( aviHeader.maxBytesPerSec );
-			r.ReadLONGINT( aviHeader.reserved1 );
-			r.ReadLONGINT( aviHeader.flags );
-			r.ReadLONGINT( aviHeader.totalFrames );
-			r.ReadLONGINT( aviHeader.initialFrames );
-			r.ReadLONGINT( aviHeader.streams );
-			r.ReadLONGINT( aviHeader.suggestedBufferSize );
-			r.ReadLONGINT( aviHeader.width );
-			r.ReadLONGINT( aviHeader.height );
-			r.ReadLONGINT( aviHeader.reserved[0] );
-			r.ReadLONGINT( aviHeader.reserved[1] );
-			r.ReadLONGINT( aviHeader.reserved[2] );
-			r.ReadLONGINT( aviHeader.reserved[3] );
+			r.RawLInt( aviHeader.microSecsPerFrame );
+			r.RawLInt( aviHeader.maxBytesPerSec );
+			r.RawLInt( aviHeader.reserved1 );
+			r.RawLInt( aviHeader.flags );
+			r.RawLInt( aviHeader.totalFrames );
+			r.RawLInt( aviHeader.initialFrames );
+			r.RawLInt( aviHeader.streams );
+			r.RawLInt( aviHeader.suggestedBufferSize );
+			r.RawLInt( aviHeader.width );
+			r.RawLInt( aviHeader.height );
+			r.RawLInt( aviHeader.reserved[0] );
+			r.RawLInt( aviHeader.reserved[1] );
+			r.RawLInt( aviHeader.reserved[2] );
+			r.RawLInt( aviHeader.reserved[3] );
 			
 			(* Skip Bytes if we have still available *)
 			IF r.Pos() - startPos < headerLength THEN
@@ -553,9 +644,9 @@ IMPORT
 		END ReadMainAVIHeader;
 
 		(* Read Header of this avi Stream *)
-		PROCEDURE ReadAVIStreamHeader(): AVIStreamHeaderPtr;
+		PROCEDURE ReadAVIStreamHeader(): AVIStreamHeader;
 		VAR
-			header: AVIStreamHeaderPtr;
+			header: AVIStreamHeader;
 			headerLength: LONGINT;
 			startPos: LONGINT;
 			len: LONGINT;
@@ -563,25 +654,25 @@ IMPORT
 		BEGIN
 			NEW(header);
 			
-			r.ReadLONGINT( headerLength );
+			r.RawLInt(headerLength);
 			startPos := r.Pos();
 			
 			r.Bytes( header.fccType,0,4, len );
 			r.Bytes( header.fccHandler,0,4, len ); 
-			r.ReadLONGINT( header.flags );
-			r.ReadLONGINT( header.priority );
-			r.ReadLONGINT( header.initialFrames );
-			r.ReadLONGINT( header.scale );
-			r.ReadLONGINT( header.rate );
-			r.ReadLONGINT( header.start );
-			r.ReadLONGINT( header.length );
-			r.ReadLONGINT( header.suggestedBufferSize );
-			r.ReadLONGINT( header.quality );
-			r.ReadLONGINT( header.sampleSize );
-			r.ReadINTEGER( temp ); header.left := temp;
-			r.ReadINTEGER( temp ); header.top := temp;
-			r.ReadINTEGER( temp ); header.right := temp;
-			r.ReadINTEGER( temp ); header.bottom := temp;
+			r.RawLInt( header.flags );
+			r.RawLInt( header.priority );
+			r.RawLInt( header.initialFrames );
+			r.RawLInt( header.scale );
+			r.RawLInt( header.rate );
+			r.RawLInt( header.start );
+			r.RawLInt( header.length );
+			r.RawLInt( header.suggestedBufferSize );
+			r.RawLInt( header.quality );
+			r.RawLInt( header.sampleSize );
+			r.RawInt( temp ); header.left := temp;
+			r.RawInt( temp ); header.top := temp;
+			r.RawInt( temp ); header.right := temp;
+			r.RawInt( temp ); header.bottom := temp;
 
 			(* Skio Bytes if we have still available *)
 			IF r.Pos() - startPos < headerLength THEN
@@ -592,29 +683,29 @@ IMPORT
 		END ReadAVIStreamHeader;
 
 		(* Read BitMapInfo Structure *)
-		PROCEDURE ReadBitMapInfo(): BitMapInfoPtr;
+		PROCEDURE ReadBitMapInfo(): BitMapInfo;
 		VAR
-			header: BitMapInfoPtr;
+			header: BitMapInfo;
 			headerLength: LONGINT;
 			startPos: LONGINT;
 			temp: INTEGER;
 		BEGIN
 			NEW(header);
 					
-			r.ReadLONGINT( headerLength );
+			r.RawLInt(headerLength);
 			startPos := r.Pos();
 		
-			r.ReadLONGINT( header.size );
-			r.ReadLONGINT( header.width );
-			r.ReadLONGINT( header.height );
-			r.ReadINTEGER( temp ); header.planes := temp;
-			r.ReadINTEGER( temp ); header.bitCount := temp;
-			r.ReadLONGINT( header.compression );
-			r.ReadLONGINT( header.sizeImage );
-			r.ReadLONGINT( header.xPelsPerMeter );
-			r.ReadLONGINT( header.yPelsPerMeter );
-			r.ReadLONGINT( header.clrUsed );
-			r.ReadLONGINT( header.clrImportant );
+			r.RawLInt( header.size );
+			r.RawLInt( header.width );
+			r.RawLInt( header.height );
+			r.RawInt( temp ); header.planes := temp;
+			r.RawInt( temp ); header.bitCount := temp;
+			r.RawLInt( header.compression );
+			r.RawLInt( header.sizeImage );
+			r.RawLInt( header.xPelsPerMeter );
+			r.RawLInt( header.yPelsPerMeter );
+			r.RawLInt( header.clrUsed );
+			r.RawLInt( header.clrImportant );		
 			
 			IF r.Pos() - startPos < headerLength THEN
 				r.SkipBytes( headerLength - ( r.Pos() - startPos ) )
@@ -624,25 +715,25 @@ IMPORT
 		END  ReadBitMapInfo;
 			
 		(* Read WaveFormatEX Structure *)
-		PROCEDURE ReadWaveFormatEx(): WAVEFormatExPtr;
+		PROCEDURE ReadWaveFormatEx(): WAVEFormatEx;
 		VAR
-			header: WAVEFormatExPtr;
+			header: WAVEFormatEx;
 			headerLength: LONGINT;
 			startPos: LONGINT;
 			temp: INTEGER;
 		BEGIN
 			NEW(header);
 					
-			r.ReadLONGINT( headerLength );
+			r.RawLInt(headerLength);
 			startPos := r.Pos();
 			
-			r.ReadINTEGER( temp ); header.formatTag := temp;
-			r.ReadINTEGER( temp ); header.channels := temp;
-			r.ReadLONGINT( header.samplesPerSec );
-			r.ReadLONGINT( header.avgBytesPerSec );
-			r.ReadINTEGER( temp ); header.blockAlign := temp;
-			r.ReadINTEGER( temp ); header.bitsPerSample := temp;
-			r.ReadINTEGER( temp ); header.cbSize := temp;
+			r.RawInt( temp ); header.formatTag := temp;
+			r.RawInt( temp ); header.channels := temp;
+			r.RawLInt( header.samplesPerSec );
+			r.RawLInt( header.avgBytesPerSec );
+			r.RawInt( temp ); header.blockAlign := temp;
+			r.RawInt( temp ); header.bitsPerSample := temp;
+			r.RawInt( temp ); header.cbSize := temp;
 			
 			IF r.Pos() - startPos < headerLength THEN
 				r.SkipBytes( headerLength - ( r.Pos() - startPos ) )
@@ -652,7 +743,7 @@ IMPORT
 		END ReadWaveFormatEx;
 
 		(* Write Avi Headers to KernelLog *)
-		PROCEDURE DumpHeaders();
+		PROCEDURE DumpHeaders*();
 		BEGIN
 			AosOut.String("AviDemux: Dump of Avi Headers: "); AosOut.Ln();
 			
@@ -741,7 +832,7 @@ IMPORT
 				AosOut.String("AVIDemux.bitMapInfo = NIL"); AosOut.Ln()
 			END;
 
-			IF audioStreamHeader.waveFormatEx # NIL THEN
+			IF (audioStreamHeader # NIL) & (audioStreamHeader.waveFormatEx # NIL) THEN
 				AosOut.String( "waveFormat.formatTag =  " ); AosOut.Int( audioStreamHeader.waveFormatEx.formatTag ,0 ); AosOut.Ln();
 				AosOut.String( "waveFormat.channel =  " ); AosOut.Int( audioStreamHeader.waveFormatEx.channels ,0 ); AosOut.Ln();
 				AosOut.String( "waveFormat.samplesPerSec =  " ); AosOut.Int( audioStreamHeader.waveFormatEx.samplesPerSec ,0 ); AosOut.Ln();
@@ -756,41 +847,554 @@ IMPORT
 			AosOut.Ln()			
 		END DumpHeaders;
 		
-		(* Returns the audioStream *)
-		PROCEDURE GetAudioStream*(): AVIStream;
-		VAR
-			stream: AVIStream;
-			reader: AVIReader;
+		(* Write AVI video index to Kernel Log *)
+		PROCEDURE DumpVideoIndex*();
+		VAR i : LONGINT;	
 		BEGIN
-			(* Create AVIReader *)
+			AosOut.String("AviDemux: Dump of Video-Index: "); AosOut.Ln();
+			IF videoIndex = NIL THEN AosOut.String("no index in AVI"); AosOut.Ln; RETURN END;
 			
-			NEW( reader, file, r.Pos() );
-			NEW(stream, reader , aviHeader, audioStreamHeader );
-			reader := NIL;
-			RETURN stream
-		END GetAudioStream;
+			FOR i := 0 TO LEN(videoIndex)-1 DO
+				AosOut.String("Index: "); AosOut.Int(i, 0);
+				AosOut.String(" ckid= "); AosOut.Int(videoIndex[i].ckid, 0); 
+				AosOut.String(" flags= "); AosOut.Int(videoIndex[i].flags, 0); 
+				AosOut.String(" offset= "); AosOut.Int(videoIndex[i].offset, 0); 
+				AosOut.String(" length= "); AosOut.Int(videoIndex[i].length, 0); 
+				AosOut.String(" tot= "); AosOut.Int(videoIndex[i].tot, 0);
+				IF (i > 0) THEN AosOut.String(" deltaOFF= "); AosOut.Int(videoIndex[i].offset - videoIndex[i-1].offset, 0); END;	
+				AosOut.Ln;
+			END
+			
+		END DumpVideoIndex;
 		
+		(* Write AVI audio index to Kernel Log *)
+		PROCEDURE DumpAudioIndex*();
+		VAR i : LONGINT;
+		BEGIN
+			AosOut.String("AviDemux: Dump of Audio-Index: "); AosOut.Ln();
+			IF audioIndex = NIL THEN AosOut.String("no index in AVI"); AosOut.Ln; RETURN END;
+			
+			FOR i := 0 TO LEN(audioIndex)-1 DO
+				AosOut.String("Index: "); AosOut.Int(i, 0);
+				AosOut.String(" ckid= "); AosOut.Int(audioIndex[i].ckid, 0); 
+				AosOut.String(" flags= "); AosOut.Int(audioIndex[i].flags, 0); 
+				AosOut.String(" offset= "); AosOut.Int(audioIndex[i].offset, 0); 
+				AosOut.String(" length= "); AosOut.Int(audioIndex[i].length, 0); 
+				AosOut.String(" tot= "); AosOut.Int(audioIndex[i].tot, 0);
+				IF (i > 0) THEN AosOut.String(" deltaOFF= "); AosOut.Int(audioIndex[i].offset - audioIndex[i-1].offset, 0); END;			
+				AosOut.Ln;
+			END
+						
+		END DumpAudioIndex;	
+	
 		(* Return AudioStreamHeader *)
-		PROCEDURE GetAudioStreamHeader*(): AVIStreamHeaderPtr;
+		PROCEDURE GetAudioStreamHeader*(): AVIStreamHeader;
 		BEGIN
 			RETURN audioStreamHeader
 		END GetAudioStreamHeader;
 	
 		(* Return VideoStreamHeader *)	
-		PROCEDURE GetVideoStreamHeader*(): AVIStreamHeaderPtr;
+		PROCEDURE GetVideoStreamHeader*():AVIStreamHeader;
 		BEGIN
 			RETURN videoStreamHeader
 		END GetVideoStreamHeader;
 	
-		(* Get VideoStream *)	
-		PROCEDURE GetVideoStream*(): AVIStream;
+		(* Muss noch generischer werden *)
+		PROCEDURE GetStream*(streamNr: LONGINT): AOC.DemuxStream;
 		VAR
-			stream: AVIStream;
-			reader: AVIReader;
+			(* reader : AVIReader; *)
+			(* reader: AOC.FileInputStream; *)
+			reader : AosIO.Reader;
+			i: LONGINT;
+			itemSize: LONGINT;
+			rres: LONGINT;
+			
+			streamInfo : AOC.AVStreamInfo;
+			tag : ARRAY 4 OF CHAR;
+			
 		BEGIN
-			NEW( reader, file, r.Pos() );
-			NEW(stream, reader, aviHeader, videoStreamHeader );
-			RETURN stream
-		END GetVideoStream;
+		
+			reader := AOC.OpenInputStream(filename);				(* should be only one reader ideally... *)
+			reader.SetPos(r.Pos());
+
+			IF streamNr = 0 THEN
+				NEW(videoStream, reader, videoStreamHeader);
+				videoFramePos := 0;
+				(* Add streamInfo to Stream *)
+				streamInfo.streamType := AOC.STVideo;
+				FOR i := 0 TO 3 DO streamInfo.contentType[i] := videoStreamHeader.fccHandler[i] END;
+				IF videoIndex = NIL THEN streamInfo.seekability := {};
+				ELSE streamInfo.seekability := {3,4}; END;
+				streamInfo.length := videoFrames;
+				streamInfo.frames := videoFrames;
+				streamInfo.rate := videoStreamHeader.rate;
+				
+				videoStream.streamInfo := streamInfo;
+				RETURN videoStream;
+			ELSE
+				NEW(audioStream, reader, audioStreamHeader);
+				audioFramePos := 0;
+				(* Add streamInfo to Stream *)
+				streamInfo.streamType := AOC.STAudio;
+				IF (audioStreamHeader.waveFormatEx # NIL) THEN
+					CASE audioStreamHeader.waveFormatEx.formatTag OF
+						1 :	COPY("PCM", tag);
+					|	85: 	COPY("MP3", tag);
+					ELSE
+					END;
+					FOR i := 0 TO 3 DO streamInfo.contentType[i] := tag[i]; END;					 
+				END;
+				IF audioIndex = NIL THEN streamInfo.seekability := {};
+				ELSE streamInfo.seekability := {1,2}; END;
+				streamInfo.length := audioStreamHeader.length*GetSampleSize();
+				streamInfo.frames := audioChunks;
+				streamInfo.rate := audioStreamHeader.rate;
+													
+				audioStream.streamInfo := streamInfo;				
+				RETURN audioStream;
+			END;
+		END GetStream;
+		
+		PROCEDURE GetMilliSecondsPerFrame*(): LONGINT;
+		BEGIN
+			RETURN aviHeader.microSecsPerFrame DIV 1000;
+		END GetMilliSecondsPerFrame;
+		
+		PROCEDURE GetNofChannels*(): LONGINT;
+		BEGIN
+			RETURN audioStreamHeader.waveFormatEx.channels;
+		END GetNofChannels;
+		
+		PROCEDURE GetSamplesPerSecond*(): LONGINT;
+		BEGIN
+			RETURN audioStreamHeader.waveFormatEx.samplesPerSec;
+		END GetSamplesPerSecond;
+		
+		PROCEDURE GetBitsPerSample*(): LONGINT;
+		BEGIN
+			RETURN audioStreamHeader.waveFormatEx.bitsPerSample;
+		END GetBitsPerSample;
+		
+		PROCEDURE GetVideoIndex*(): IndexArrayPointer;
+		BEGIN
+			RETURN videoIndex;
+		END GetVideoIndex;
+		
+		PROCEDURE GetAudioIndex*(): IndexArrayPointer;
+		BEGIN
+			RETURN audioIndex;
+		END GetAudioIndex;
+		
+		PROCEDURE GetAudioChunks*(): LONGINT;
+		BEGIN
+			RETURN audioChunks;
+		END GetAudioChunks;
+		
+		PROCEDURE GetAudioBytes*(): LONGINT;
+		BEGIN
+			RETURN audioBytes;
+		END GetAudioBytes;
+		
+		PROCEDURE GetVideoFrames*(): LONGINT;
+		BEGIN
+			RETURN videoFrames;
+		END GetVideoFrames;
+		
+		PROCEDURE GetNumberOfStreams*(): LONGINT;
+		BEGIN
+			RETURN aviHeader.streams;
+		END GetNumberOfStreams;
+		
+		(* Could be optimized, as we assume videostream beeing at index 0 and that there is only one *)
+		PROCEDURE GetStreamInfo*(streamNr: LONGINT): AOC.AVStreamInfo;
+		VAR streamInfo : AOC.AVStreamInfo;
+			i: INTEGER;
+			tag : ARRAY 4 OF CHAR;
+		BEGIN
+
+ 			IF streamNr = 0 THEN							(* Video *)
+				streamInfo.streamType := AOC.STVideo;
+				FOR i := 0 TO 3 DO
+					streamInfo.contentType[i] := videoStreamHeader.fccHandler[i];
+				END;
+
+				IF videoIndex = NIL THEN
+					streamInfo.seekability := {};
+				ELSE
+					streamInfo.seekability := {3,4};
+				END;
+				streamInfo.length := videoFrames;
+				streamInfo.frames := videoFrames;
+				streamInfo.rate := videoStreamHeader.rate;
+			ELSE											(* Audio *)
+				streamInfo.streamType := AOC.STAudio;
+
+				IF (audioStreamHeader.waveFormatEx # NIL) THEN
+					CASE audioStreamHeader.waveFormatEx.formatTag OF
+						1 :	COPY("PCM", tag);
+					|	85: 	COPY("MP3", tag);
+					ELSE
+					END;
+					FOR i := 0 TO 3 DO
+						streamInfo.contentType[i] := tag[i];
+					END;					 
+				END;
+				
+				IF audioIndex = NIL THEN
+					streamInfo.seekability := {};
+				ELSE
+					streamInfo.seekability := {1,2};
+				END;
+				streamInfo.length := audioStreamHeader.length*GetSampleSize();
+				streamInfo.frames := audioChunks;
+				streamInfo.rate := audioStreamHeader.rate;
+			END;		
+			
+			RETURN streamInfo
+		END GetStreamInfo;
+		
+		PROCEDURE GetStreamType*(streamNr : LONGINT): LONGINT;
+		VAR type : LONGINT;
+		BEGIN
+			IF streamNr = 0 THEN type :=  AOC.STVideo;
+			ELSIF streamNr = 1 THEN type := AOC.STAudio;
+			ELSE type := AOC.STUnknown;
+			END;
+			RETURN type
+		END GetStreamType;
+		
+		(* Returns Information, which can be read out from file and which is useful/needed *)
+		PROCEDURE GetInfo*(VAR vl, vf, vr, mspf, al, af, ar : LONGINT);
+		BEGIN
+			vl := videoFrames;
+			vf := videoFrames;
+			vr := videoStreamHeader.rate;
+			mspf := aviHeader.microSecsPerFrame;
+			IF audioStreamHeader # NIL THEN
+				al := audioStreamHeader.length*GetSampleSize();
+				af := audioChunks;
+				ar := audioStreamHeader.rate;
+			END;			
+
+		END GetInfo;
+		
+		PROCEDURE GetData*(streamNr: LONGINT;  VAR buf:  ARRAY OF CHAR; ofs, size, min: LONGINT; VAR len, res: LONGINT);
+		VAR 
+			rres: BOOLEAN;
+		BEGIN
+			IF streamNr = 0 THEN
+				IF videoIndex # NIL THEN
+					IF videoFramePos < videoFrames THEN
+						len := videoIndex[videoFramePos].length;
+						IF (len > (size-4)) THEN
+							len := len+4;
+							res := AOC.ResFailed;
+							RETURN;
+						END;
+						rres := videoStream.Resynch(buf);
+						INC(videoFramePos);			
+						IF rres THEN
+							videoStream.res := AosIO.Ok;
+							res := AOC.ResOk;
+						ELSE
+							res := AOC.ResFailed;
+							videoStream.res := AosIO.EOF;						
+						END
+					ELSE
+						res := AOC.ResFailed;
+						videoStream.res := AosIO.EOF;
+						len := 0;
+					END;					
+				END;
+			ELSE
+				IF audioIndex # NIL THEN
+					IF audioFramePos < audioChunks THEN
+						len := audioIndex[audioFramePos].length;
+						IF (LEN(buf) < len+4) THEN
+							len := len+4;
+							res := AOC.ResFailed;
+							audioStream.res := AosIO.EOF;
+							RETURN;
+						END;
+						len := audioIndex[audioFramePos].length;
+						rres := audioStream.Resynch(buf);
+						INC(audioFramePos);
+						IF rres THEN
+							audioStream.res := AosIO.Ok;
+							res := AOC.ResOk;
+						ELSE
+							(* res := AOC.ResFailed; *)
+							audioStream.res := AosIO.EOF;						
+						END						
+					ELSE
+						res := AOC.ResFailed;
+						audioStream.res := AosIO.EOF;
+						len := 0;
+					END;
+				END;
+			END;
+		END GetData;
+		
+		PROCEDURE SetStreamPos*(streamNr: LONGINT; seekType: LONGINT; pos: LONGINT; VAR itemSize: LONGINT; VAR res: LONGINT);
+		(* PROCEDURE SetStreamPos*(streamNr, pos : LONGINT; VAR res: LONGINT); *)
+		VAR
+			n0, n1, n, spos: LONGINT;
+			(* seekType, itemSize : LONGINT; *)
+		BEGIN
+			IF Debug THEN AosOut.String("AVIDemux.SetStreamPos: "); AosOut.Int(pos, 0); AosOut.Ln; END;
+			IF streamNr = 0 THEN
+				IF videoIndex # NIL THEN
+					IF seekType = AOC.SeekKeyFrame THEN			
+						IF pos > itemSize THEN
+							IF pos >= videoStreamHeader.length-1 THEN
+								pos := videoStreamHeader.length-1;
+							ELSE 
+								WHILE ((pos < videoFrames-1) & (videoIndex[pos].flags # 16)) DO
+									INC(pos);
+								END;
+							END;
+						ELSE
+							IF(pos > 0) THEN
+								DEC(pos);
+							END;
+							WHILE ((videoIndex[pos].flags # 16) & (pos > 0)) DO
+								DEC(pos);	
+							END;
+						END;
+					END;
+					IF ((seekType = AOC.SeekFrame) OR (seekType = AOC.SeekKeyFrame)) THEN
+						IF pos < LEN(videoIndex) THEN
+							videoStream.SetAVIPos(videoIndex[pos].offset, itemSize);
+							itemSize := pos;
+							videoFramePos := pos;
+						END
+					ELSE
+						videoStream.SetAVIPos(pos, itemSize);
+					END;
+				END;
+			ELSE
+				IF audioIndex # NIL THEN
+					IF seekType = AOC.SeekSample THEN
+						IF pos < 0 THEN
+							pos := 0;
+						END;
+						IF pos = 0 THEN
+							n0 := 0;
+						ELSE
+							n0 := 0;
+							n1 := audioChunks;
+						
+							WHILE (n0 < n1 - 1) DO
+								n := (n0 + n1) DIV 2;
+								IF (audioIndex[n].tot > pos) THEN
+									n1 := n;
+								ELSE
+									n0 := n;
+								END;
+							END;
+						END;
+						audioStream.SetAVIPos(audioIndex[n0].offset, itemSize);
+						audioFramePos := n0;
+					ELSIF seekType = AOC.SeekByte THEN
+						(* spos := ENTIER(pos * 8 *  audioStreamHeader.waveFormatEx.samplesPerSec/audioStreamHeader.rate / 1000); *)
+						spos := ENTIER(pos / audioStreamHeader.rate * audioStreamHeader.waveFormatEx.samplesPerSec);
+						
+						IF Debug THEN AosOut.String("spos= "); AosOut.Int(spos, 0); AosOut.Ln; END;
+						IF spos < 0 THEN spos := 0 END;
+						IF spos = 0 THEN n0 := 0
+						ELSE
+							n0 := 0;
+							n1 := audioChunks;
+						
+							WHILE (n0 < n1 - 1) DO
+								n := (n0 + n1) DIV 2;
+								IF (audioIndex[n].tot > spos) THEN
+									n1 := n;
+								ELSE
+									n0 := n;
+								END;
+							END;
+						END;
+
+						audioStream.SetAVIPos(audioIndex[n0].offset, itemSize);
+						audioFramePos := n0;
+						IF Debug THEN
+							AosOut.String("audioIndex[n].tot= "); AosOut.Int(audioIndex[n].tot, 0); 
+							AosOut.String("audioIndex[n0].offset= "); AosOut.Int(audioIndex[n0].offset, 0); 
+							AosOut.String("audioFramePos= "); AosOut.Int(audioFramePos, 0); 
+							AosOut.String("itemSize= "); AosOut.Int(itemSize, 0);  AosOut.Ln;
+						END
+					ELSE
+						audioStream.SetAVIPos(pos, itemSize);
+					END;
+				END;
+			END;
+		END SetStreamPos;
+		
+		PROCEDURE GetVideoWidth*(): LONGINT;
+		BEGIN
+			RETURN videoStreamHeader.bitMapInfo.width;
+		END GetVideoWidth;
+		
+		PROCEDURE GetVideoHeight*(): LONGINT;
+		BEGIN
+			RETURN videoStreamHeader.bitMapInfo.height;
+		END GetVideoHeight;
+		
+		PROCEDURE GetNextFrameSize*(streamNr: LONGINT): LONGINT;
+		BEGIN
+			IF streamNr = 0 THEN
+				IF videoFramePos < videoFrames THEN
+					RETURN videoIndex[videoFramePos].length;
+				ELSE
+					RETURN AOC.ResFailed;
+				END;
+			ELSE
+				IF audioFramePos < audioChunks THEN
+					RETURN audioIndex[audioFramePos].length;
+				ELSE
+					RETURN AOC.ResFailed;
+				END;
+			END;
+		END GetNextFrameSize; 
+		
+		PROCEDURE GetSampleSize*(): LONGINT;
+		VAR
+			s: LONGINT;
+		BEGIN
+			s := ((audioStreamHeader.waveFormatEx.bitsPerSample+7) DIV 8)*audioStreamHeader.waveFormatEx.channels;
+			IF s = 0 THEN
+				s := 1;
+			END;
+			RETURN s;
+		END GetSampleSize;
+		
 	END AVIDemux;
+	
+	(* -- Helper Procedures -- *)
+	
+(* Align stream to next Byte *)
+PROCEDURE Align*(VAR  index: LONGINT);
+BEGIN
+	IF ( index MOD 8 ) # 0 THEN
+		index :=  index - ( index MOD 8 ) + 8
+	END;
+END Align;
+
+(* True if actual position is on byte boundary *)
+PROCEDURE IsAligned*(index: LONGINT): BOOLEAN;
+BEGIN
+	IF ( index MOD 8 ) = 0 THEN
+		RETURN TRUE;
+	ELSE
+		RETURN FALSE;
+	END;
+END IsAligned;
+	
+(* Read next n Bits (max 32), without advancing in stream. Max 32 Bits are allowed *)
+(* Very slow but portable *)
+PROCEDURE ShowBitsSlow*( n: LONGINT; VAR buf: ARRAY OF CHAR; VAR index: LONGINT): LONGINT;
+VAR
+	ret: LONGINT;
+	count: LONGINT;
+BEGIN
+	ret := 0;
+	count := 0;
+			
+	WHILE count < n DO
+		ret := ret * 2;
+		IF ( 7 - ( index MOD 8 ) ) IN SYSTEM.VAL( SET, buf[index DIV 8] ) THEN
+			INC(ret)
+		END;
+		INC( index );
+		INC( count )
+	END;
+			
+	index := index - count;
+
+	RETURN ret
+END ShowBitsSlow;
+
+(* Fast function for changing byte order, but only for  >= i486 *)
+PROCEDURE ChangeByteOrder( n: LONGINT ): LONGINT;
+CODE { SYSTEM.i486 }
+	MOV EAX, n[EBP]				; load n in eax
+	BSWAP EAX						; swap byte order
+END ChangeByteOrder;
+
+(* Read next n Bits (max 32), without advancing in stream. Max 32 Bits are allowed *)
+(* Fast, but im not sure if it's portable *)
+PROCEDURE ShowBits*( n: LONGINT; VAR buf: ARRAY OF CHAR; VAR index: LONGINT): LONGINT;
+VAR
+	nbit: LONGINT; 
+	posInLONGINT: LONGINT;
+	bufa, bufb: LONGINT;
+	temp: LONGINT;
+	bufAdr: LONGINT;
+BEGIN
+	bufAdr := SYSTEM.ADR( buf[0] );
+	posInLONGINT := index MOD 32;
+	nbit := ( posInLONGINT+ n ) - 32;
+			
+	IF nbit > 0 THEN
+		(* We have to read two 32 bit values *)
+		temp := SYSTEM.LSH( index - posInLONGINT , -3 ) + bufAdr;
+		bufa := ChangeByteOrder( SYSTEM.GET32( temp ) );
+		bufb := ChangeByteOrder( SYSTEM.GET32( temp + 4 ) );
+				
+		 temp := SYSTEM.LSH( SYSTEM.LSH( bufa, posInLONGINT ),  nbit - posInLONGINT );
+		RETURN SYSTEM.VAL( LONGINT, SYSTEM.VAL( SET, SYSTEM.LSH( bufb, nbit - 32 ) ) + SYSTEM.VAL( SET, temp ) )
+	ELSE
+		(* Reading one 32 value is sufficient *)
+		bufa := ChangeByteOrder( SYSTEM.GET32( SYSTEM.LSH( index - posInLONGINT, -3 ) + bufAdr ) );
+				
+		RETURN SYSTEM.LSH( SYSTEM.LSH( bufa, posInLONGINT ),  n - 32 )
+	END;
+END ShowBits;
+		
+(* Show n bits, byte aligned without advancing in bit stream *)
+PROCEDURE ShowBitsByteAligned*(n: LONGINT; VAR buf: ARRAY OF CHAR; VAR index: LONGINT): LONGINT;
+VAR
+	count: LONGINT;
+	ret: LONGINT;
+BEGIN
+	count := 8 - ( index MOD 8 );
+		
+	IF count = 8 THEN
+		IF ShowBits(8, buf, index) = 7FH THEN (* Spezial case: see iso spec *)
+			count := 8
+		ELSE
+			count := 0
+		END;
+	END;
+			
+	index := index + count;
+	ret := ShowBits(n, buf, index);
+	index := index - count;
+	RETURN ret
+END ShowBitsByteAligned;
+
+(* Read next n Bits and advance in Bit Stream. Max 32 Bits are allowed *)
+PROCEDURE GetBits*( n: LONGINT; VAR buf: ARRAY OF CHAR; VAR index: LONGINT): LONGINT;
+VAR
+	ret: LONGINT;
+BEGIN
+	ret := ShowBits(n, buf, index);
+	SkipBits(n, index);
+	RETURN ret
+END GetBits;
+
+(* Skip Next n Bits *)
+PROCEDURE SkipBits*(n: LONGINT; VAR index: LONGINT );
+BEGIN
+	index := index + n
+END SkipBits;
+
+PROCEDURE Factory*(par : ANY) : ANY;
+VAR p: AVIDemux;
+BEGIN
+	NEW(p);
+	RETURN p
+END Factory;
+
 END AVI.

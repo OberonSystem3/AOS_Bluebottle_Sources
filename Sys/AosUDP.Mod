@@ -34,12 +34,13 @@ CONST
 	Timeout* = 3502;
 	BufferOverflow* = 3503;
 	NoInterface* = 3504;
+	Closed* = 3505;
 	
 	NilPort* = 0;
 	
 	IPTypeUDP = 17; (* UDP type code for IP packets *)
 	UDPHdrLen = 8;
-	PseudoHdrLen = 12;
+	MaxPseudoHdrLen = 40;  (* IPv4: 12, IPv6: 40 *)
 	MaxUDPDataLen = 10000H-UDPHdrLen;
 	
 	MinEphemeralPort = 1024;
@@ -50,14 +51,13 @@ CONST
 	
 TYPE
 	(** Socket. Stores the state of a UDP communication endpoint. *)
-	
 	Socket* = OBJECT
 		VAR
 			next: Socket; (* link for socket pool *)
 			lport: LONGINT; (* local port *)
 			
 			hdr: ARRAY UDPHdrLen OF CHAR; (* UDP prototype header for sending *)
-			pseudoHdr: ARRAY PseudoHdrLen OF CHAR; (* pseudo header for calculating checksum *)
+			pseudoHdr: ARRAY MaxPseudoHdrLen OF CHAR; (* pseudo header for calculating checksum *)
 			
 			(* Receive queue (ring buffer) *)
 			queue: ARRAY QueueSize OF AosNet.Buffer;
@@ -66,12 +66,13 @@ TYPE
 
 			(* Variables for handling timeout *)
 			timer: AosActive.Timer;
-			timeout: BOOLEAN;
+			timeout, open: BOOLEAN;
+	
 	
 		(** Constructor *)
-		
 		PROCEDURE &Open(lport: LONGINT; VAR res: LONGINT);
 		BEGIN
+			open := TRUE;
 			ASSERT((lport >= 0) & (lport < 10000H));
 			SELF.lport := lport;
 			IF pool.AddSocket(SELF) THEN
@@ -87,16 +88,19 @@ TYPE
 			END
 		END Open;
 
-		(** Send a UDP datagram to the foreign address specified by "fip" and "lport". 
-			The data is in "data[ofs..ofs+len-1]".  In case of concurrent sends the datagrams are serialized.
-		*)
+
+		(** Send a UDP datagram to the foreign address specified by "fip" and "fport". 
+			The data is in "data[ofs..ofs+len-1]".  In case of concurrent sends the datagrams are serialized. *)
 		PROCEDURE Send*(fip: AosIP.Adr; fport: LONGINT; VAR data: ARRAY OF CHAR; ofs, len: LONGINT; VAR res: LONGINT);
 		VAR
 			int: AosIP.Interface;
+			
 		BEGIN {EXCLUSIVE}
 			ASSERT((fport >= 0) & (fport < 10000H));
 			ASSERT((len >= 0) & (len <= MaxUDPDataLen));
+			
 			int := AosIP.InterfaceByDstIP(fip);
+
 			IF int # NIL THEN
 				DoSend(int, fip, fport, data, ofs, len);
 				res := Ok;
@@ -105,15 +109,16 @@ TYPE
 			END;
 		END Send;
 		
+		
 		(** Send a broadcast UDP datagram via interface "int" to port "lport". Normally only used by DHCP.
-			The data is in "data[ofs..ofs+len-1]".  In case of concurrent sends the datagrams are serialized.
-		*)
+			The data is in "data[ofs..ofs+len-1]".  In case of concurrent sends the datagrams are serialized. *)
 		PROCEDURE SendBroadcast*(int: AosIP.Interface; fport: LONGINT; VAR data: ARRAY OF CHAR; ofs, len: LONGINT);
 		BEGIN {EXCLUSIVE}
 			ASSERT((fport >= 0) & (fport < 10000H));
 			ASSERT((len >= 0) & (len <= MaxUDPDataLen));
-			DoSend(int, AosIP.BroadcastAdr, fport, data, ofs, len);
+			DoSend(int, int.broadAdr, fport, data, ofs, len);
 		END SendBroadcast;
+		
 		
 		(** Receive a UDP datagram.  If none is available, wait up to the specified timeout for one to arrive.
 		"data[ofs..ofs+size-1]" is the data buffer to hold the returned datagram.
@@ -123,24 +128,31 @@ TYPE
 		"res" returns "Timeout" in case of a timeout and "BufferOverflow" if the received datagram was too big.
 		*)
 		PROCEDURE Receive*(VAR data: ARRAY OF CHAR; ofs, size, ms: LONGINT; VAR fip: AosIP.Adr; VAR fport, len, res: LONGINT);
-		VAR buffer: AosNet.Buffer;
+		VAR 
+			buffer: AosNet.Buffer;
+			fragmentBuffer: AosNet.Buffer;
+			fragmentOffset: LONGINT;
+		
 		BEGIN {EXCLUSIVE}
+			IF ~open THEN res := Closed; RETURN END;
 			IF queueFirst = queueLast THEN
 				(* queue empty *)
 				IF ms > 0 THEN
 					timeout := FALSE;
 					AosActive.SetTimeout(timer, DoTimeout, ms);
-					AWAIT((queueFirst # queueLast) OR timeout);
+					AWAIT((queueFirst # queueLast) OR timeout OR ~open);
+					IF ~open THEN res := Closed; RETURN END;
 					IF timeout THEN
 						res := Timeout;
 						RETURN;
 					ELSE
-						AosActive.CancelTimeout(timer);
+						AosActive.CancelTimeout(timer)
 						(* now we can continue *)
 					END;
 				ELSIF ms = -1 THEN
 					(* infinite wait *)
-					AWAIT(queueFirst # queueLast);
+					AWAIT((queueFirst # queueLast) OR ~ open);
+					IF ~open THEN res := Closed; RETURN END;
 				ELSE
 					res := Timeout;
 					RETURN;
@@ -149,56 +161,69 @@ TYPE
 			(* Here we can get a packet from the queue *)
 			buffer := queue[queueLast];
 			queueLast := (queueLast + 1) MOD QueueSize;
-			
-			fip := buffer.int; (* IP address of origin is stored in "int" field of buffer type *)
+
+			fip := AosIP.SrcAdrFromBuffer(buffer);
 			fport := AosNet.GetNet2(buffer.data, buffer.ofs);
-			len := buffer.len - UDPHdrLen;
+			fragmentBuffer := buffer;
+			len := 0;
+			WHILE fragmentBuffer # NIL DO
+				INC(len, fragmentBuffer.len);
+				fragmentBuffer := fragmentBuffer.nextFragment;
+			END;
+			
+			DEC(len, UDPHdrLen);
 			IF len > size THEN
 				(* packet too big for receive buffer *)
 				res := BufferOverflow;
 			ELSE
-				AosNet.Copy(buffer.data, data, buffer.ofs+UDPHdrLen, ofs, len);
+				AosNet.Copy(buffer.data, data, buffer.ofs+UDPHdrLen, ofs, buffer.len - UDPHdrLen);
+				fragmentOffset := ofs + buffer.len - UDPHdrLen;
+				fragmentBuffer := buffer.next;
+				WHILE fragmentBuffer # NIL DO
+					AosNet.Copy(fragmentBuffer.data, data, buffer.ofs, fragmentOffset, buffer.len);
+					INC(fragmentOffset, buffer.len);
+					
+					fragmentBuffer := fragmentBuffer.nextFragment;	
+				END;
+			
 				res := Ok;
 			END;
 			AosNet.ReturnBuffer(buffer);
 		END Receive;
 		
+		
 		(* Internal send operation. Called from "Send" and "SendBroadcast". *)
-
 		PROCEDURE DoSend(int: AosIP.Interface; fip: AosIP.Adr; fport: LONGINT; VAR data: ARRAY OF CHAR; ofs, len: LONGINT);
-		VAR sum: LONGINT;
+		VAR 
+			sum: LONGINT;
+			pseudoHdrLen: LONGINT;
 		BEGIN
 			(* set UDP header *)
 			AosNet.PutNet2(hdr, 2, fport); (* foreign port *)
 			AosNet.PutNet2(hdr, 4, len+UDPHdrLen); (* UPD length *)
 			AosNet.Put2(hdr, 6, 0); (* checksum := 0 *)
-			
 			IF ~(AosNet.ChecksumUDP IN int.dev.calcChecksum) THEN
 				(* set pseudo header *)
-				AosNet.Put4(pseudoHdr, 0, int.localAdr); (* local IP address *)
-				AosNet.Put4(pseudoHdr, 4, fip); (* foreign IP address *)
-				AosNet.PutNet2(pseudoHdr, 8, IPTypeUDP); (* IP type code of UDP *)
-				AosNet.PutNet2(pseudoHdr, 10, len+UDPHdrLen); (* UPD length *)
+				pseudoHdrLen := int.WritePseudoHeader(pseudoHdr, int.localAdr, fip, IPTypeUDP, len+UDPHdrLen);
 				
-				sum := AosIP.Checksum1(pseudoHdr, 0, PseudoHdrLen, 0);
+				sum := AosIP.Checksum1(pseudoHdr, 0, pseudoHdrLen, 0);
 				sum := AosIP.Checksum1(hdr, 0, UDPHdrLen, sum);
 				sum := AosIP.Checksum2(data, ofs, len, sum);
 				
 				AosNet.Put2(hdr, 6, sum); (* checksum := sum *)
 			END;
-			
 			int.Send(IPTypeUDP, fip, hdr, data, UDPHdrLen, ofs, len, AosIP.MaxTTL);
 		END DoSend;
 		
-		(* Handle timeout call from AosActive *)
 		
+		(* Handle timeout call from AosActive *)
 		PROCEDURE DoTimeout();
 		BEGIN {EXCLUSIVE}
 			timeout := TRUE;
 		END DoTimeout;
 
+
 		(* Input a datagram on this socket. *)
-		
 		PROCEDURE Input(fip: AosIP.Adr; buffer: AosNet.Buffer);
 		BEGIN {EXCLUSIVE}
 			IF (queueLast - queueFirst) MOD QueueSize = 1 THEN
@@ -206,23 +231,23 @@ TYPE
 				AosKernel.AtomicInc(NUDPQueueOverflow);
 				AosNet.ReturnBuffer(buffer);
 			ELSE
-				(* use the "int" field of the buffer type to store the IP address of the origin *)
-				buffer.int := fip;
 				queue[queueFirst] := buffer;
 				queueFirst := (queueFirst + 1) MOD QueueSize;
 				AosKernel.AtomicInc(NUDPQueued);
 			END;
 		END Input;
 		
-		(** Close the Socket, freeing its address for re-use. *)
 		
-		PROCEDURE Close*();
+		(** Close the Socket, freeing its address for re-use. *)
+		PROCEDURE Close*();			
 		BEGIN {EXCLUSIVE}
 			pool.RemoveSocket(SELF);
 			AosActive.CancelTimeout(timer);
+			open := FALSE;
 			(* return all queued buffers *)
-			WHILE queueFirst # queueLast DO
+			WHILE queueFirst # queueLast DO;
 				AosNet.ReturnBuffer(queue[queueLast]);
+
 				queueLast := (queueLast + 1) MOD QueueSize;
 			END;
 			(* do not touch any other fields, as instance may still be in use via pool.Lookup. *)
@@ -230,15 +255,14 @@ TYPE
 		
 	END Socket;
 	
-	(* Socket pool *)
 	
+	(* Socket pool *)
 	SocketPool = OBJECT
 		VAR
 			table: ARRAY HashTableSize OF Socket;
 			eport: LONGINT;
 		
 		(* Initialize the pool. *)
-		
 		PROCEDURE &Init;
 		VAR i: LONGINT;
 		BEGIN
@@ -248,8 +272,8 @@ TYPE
 			eport := MinEphemeralPort;
 		END Init;
 		
-		(* Look for the specified Socket *)
 		
+		(* Look for the specified Socket *)
 		PROCEDURE Lookup(lport: LONGINT): Socket;
 		VAR item: Socket;
 		BEGIN
@@ -260,11 +284,10 @@ TYPE
 			RETURN item;
 		END Lookup;
 
-		(* Add a socket to the pool. If lport is NilPort, an ephemeral port is assigned. *)
-		
+
+		(* Add a socket to the pool. If lport is NilPort, an ephemeral port is assigned. *)		
 		PROCEDURE AddSocket(p: Socket): BOOLEAN;
 		VAR
-			item: Socket;
 			ok: BOOLEAN;
 			i, sport: LONGINT;
 		BEGIN {EXCLUSIVE}
@@ -293,8 +316,8 @@ TYPE
 			RETURN ok;
 		END AddSocket;
 		
-		(* Remove the Socket from the pool, making its address re-usable. *)
 		
+		(* Remove the Socket from the pool, making its address re-usable. *)
 		PROCEDURE RemoveSocket(p: Socket);
 		VAR
 			i: LONGINT;
@@ -317,8 +340,8 @@ TYPE
 			(* do not clear p.next, because Lookup may be looking at it *)
 		END RemoveSocket;
 		
-		(* Close all sockets that are registered in pool *)
 		
+		(* Close all sockets that are registered in pool *)
 		PROCEDURE CloseAll();
 		VAR i: LONGINT;
 		BEGIN
@@ -330,36 +353,28 @@ TYPE
 		END CloseAll;
 
 	END SocketPool;
+
 	
 VAR
 	(* Module variables *)
 	pool: SocketPool;
 	
 	(* Statistic variables *)
-	NUDPRcvTotal, NUDPTooSmall, NUDPBadChecksum, NUDPRcvBroadcast, NUDPUnknownPort,
-	NUDPQueued, NUDPQueueOverflow, NUDPTrim, NUDPBadHdrLen: LONGINT;
+	NUDPRcvTotal-, NUDPTooSmall-, NUDPBadChecksum-, NUDPRcvBroadcast-, NUDPUnknownPort-,
+	NUDPQueued-, NUDPQueueOverflow-, NUDPTrim-, NUDPBadHdrLen-: LONGINT;
 
-(* Send an ICMP "port unreachable" error message *)
-
-PROCEDURE SendICMPError(fip: AosIP.Adr; buffer: AosNet.Buffer);
-VAR
-	IPHdrLen: LONGINT; (* length of IP header to copy *)
-	icmpMsg: ARRAY 72 OF CHAR; (* unused (4) + MaxIPHdrLen (60) + UDPHdrLen (8) *)
-BEGIN
-	IPHdrLen := buffer.ofs - buffer.l3ofs;
-	AosNet.Put4(icmpMsg, 0, 0); (* unused *)
-	AosNet.Copy(buffer.data, icmpMsg, buffer.l3ofs, 4, IPHdrLen + UDPHdrLen); (* IP header UDP header *)
-	AosICMP.Send(fip, icmpMsg, 0, 4+IPHdrLen+UDPHdrLen, AosICMP.TypeDstUnreachable, 3, AosIP.MaxTTL);
-END SendICMPError;
 
 (* Receive a UDP datagram. *)
-
 PROCEDURE Input(int: AosIP.Interface; type: LONGINT; fip, lip: AosIP.Adr; buffer: AosNet.Buffer);
 VAR
 	(* pseudo header for calculating checksum *)
-	pseudoHdr: ARRAY PseudoHdrLen OF CHAR;
+	pseudoHdr: ARRAY MaxPseudoHdrLen OF CHAR;
+	pseudoHdrLen: LONGINT;
 	sum, tlen: LONGINT;
 	s: Socket;
+	reassembledLength: LONGINT;
+	fragmentBuffer: AosNet.Buffer;
+	
 BEGIN
 	AosKernel.AtomicInc(NUDPRcvTotal);
 	IF buffer.len >= UDPHdrLen THEN
@@ -378,12 +393,27 @@ BEGIN
 			IF sum # 0 THEN
 				(* calculate checksum *)
 				(* set pseudo header *)
-				AosNet.Put4(pseudoHdr, 0, fip); (* foreign IP address *)
-				AosNet.Put4(pseudoHdr, 4, lip); (* local IP address *)
-				AosNet.PutNet2(pseudoHdr, 8, IPTypeUDP); (* IP type code of UDP *)
-				AosNet.PutNet2(pseudoHdr, 10, buffer.len); (* UPD length *)
-				sum := AosIP.Checksum1(pseudoHdr, 0, PseudoHdrLen, 0);
-				sum := AosIP.Checksum2(buffer.data, buffer.ofs, tlen, sum);
+				reassembledLength := 0;
+				fragmentBuffer := buffer;
+				WHILE fragmentBuffer # NIL DO
+					INC(reassembledLength, fragmentBuffer.len);
+					fragmentBuffer := fragmentBuffer.nextFragment;
+				END;	
+				
+				pseudoHdrLen := int.WritePseudoHeader(pseudoHdr, fip, lip, IPTypeUDP, reassembledLength);
+				sum := AosIP.Checksum1(pseudoHdr, 0, pseudoHdrLen, 0);
+				
+				IF buffer.nextFragment # NIL THEN
+					(* fragmented packets *)
+					fragmentBuffer := buffer;
+					WHILE fragmentBuffer.nextFragment # NIL DO
+						sum := AosIP.Checksum1(fragmentBuffer.data, fragmentBuffer.ofs, fragmentBuffer.len, sum);						
+						fragmentBuffer := fragmentBuffer.nextFragment;
+					END;					
+					sum := AosIP.Checksum2(fragmentBuffer.data, fragmentBuffer.ofs, fragmentBuffer.len, sum);
+				ELSE			
+					sum := AosIP.Checksum2(buffer.data, buffer.ofs, buffer.len, sum);
+				END;			
 			END;
 			IF sum = 0 THEN
 				s := pool.Lookup(AosNet.GetNet2(buffer.data, buffer.ofs+2));
@@ -391,9 +421,9 @@ BEGIN
 					s.Input(fip, buffer);
 					(* Exit here w/o returning buffer because it is passed to Socket.Input *)
 					RETURN;
-				ELSIF ~int.IsBroadcast(lip) (* fip # AosIP.BroadcastAdr *)THEN
+				ELSIF ~int.IsBroadcast(lip) THEN
 					AosKernel.AtomicInc(NUDPUnknownPort);
-					SendICMPError(fip, buffer); 
+					AosICMP.SendICMP (AosICMP.ICMPDstUnreachable, fip, buffer);
 				END;
 			ELSE
 				AosKernel.AtomicInc(NUDPBadChecksum);
@@ -405,6 +435,7 @@ BEGIN
 		AosKernel.AtomicInc(NUDPTooSmall);
 	END;
 	(* Exit and return buffer here because it is no longer used *)
+	
 	AosNet.ReturnBuffer(buffer);
 END Input;
 
@@ -437,4 +468,5 @@ END AosUDP.
 History:
 27.10.2003	mvt	Complete internal redesign for new interfaces of AosNet and AosIP.
 22.11.2003	mvt	Changed SocketPool to work with a hash table.
+02.05.2005	eb Works with fragmented packets & IPv6 ready (WritePseudoHdr)
 *)

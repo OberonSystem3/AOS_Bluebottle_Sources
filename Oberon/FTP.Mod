@@ -1,8 +1,8 @@
 (* ETH Oberon, Copyright 2001 ETH Zuerich Institut fuer Computersysteme, ETH Zentrum, CH-8092 Zuerich.
 Refer to the "General ETH Oberon System Source License" contract available at: http://www.oberon.ethz.ch/ *)
 
-MODULE FTP; (** portable *)	(* ejz,   *)
-	IMPORT Files, Strings, Input, Display, Fonts, Texts, Oberon, NetSystem;
+MODULE FTP; (** portable *)	(* ejz,  *)
+	IMPORT Files, Strings, Input, Display, Fonts, Texts, Oberon, NetSystem, AosIP;
 
 (** A simple single session FTP Tool using commands. Useful for transfering many files to or from the
 		same server. *)
@@ -62,7 +62,7 @@ MODULE FTP; (** portable *)	(* ejz,   *)
 			res: INTEGER;
 	BEGIN
 		NetSystem.GetIP(host, adr);
-		IF adr = NetSystem.anyIP THEN
+		IF AosIP.AdrsEqual(adr, NetSystem.anyIP) THEN
 			C := NIL; RETURN FALSE
 		END;
 		NetSystem.OpenConnection(C, NetSystem.anyport, adr, port, res);
@@ -234,7 +234,7 @@ MODULE FTP; (** portable *)	(* ejz,   *)
 		COPY(server, S.host); S.dataPort := -1;
 		COPY(user, S.usr); COPY(passwd, S.passw);
 		GetLogin(server, S.usr, S.passw);
-		IF NetSystem.hostIP = NetSystem.anyIP THEN
+		IF AosIP.AdrsEqual(NetSystem.hostIP, NetSystem.anyIP) THEN
 			S.C := NIL;
 			S.reply := "invalid NetSystem.hostIP";
 			S.res := Failed;
@@ -368,7 +368,7 @@ MODULE FTP; (** portable *)	(* ejz,   *)
 	PROCEDURE WaitDataCon(S: Session): NetSystem.Connection;
 		VAR C1: NetSystem.Connection; time: LONGINT;
 	BEGIN
-		IF S.dataIP = NetSystem.anyIP THEN
+		IF AosIP.AdrsEqual(S.dataIP, NetSystem.anyIP) THEN
 			time := Input.Time();
 			REPEAT
 			UNTIL NetSystem.Requested(S.dataC) OR ((Input.Time()-time) > timeOut) OR UserBreak();
@@ -400,7 +400,7 @@ MODULE FTP; (** portable *)	(* ejz,   *)
 	BEGIN
 		S.reply := ""; SetDataPort(S); C := NIL;
 		IF S.res = Interrupted THEN RETURN END;
-		IF S.dataIP = NetSystem.anyIP THEN
+		IF AosIP.AdrsEqual(S.dataIP, NetSystem.anyIP) THEN
 			ReadResponse(S, line)
 		ELSE
 			C := WaitDataCon(S);
@@ -414,7 +414,7 @@ MODULE FTP; (** portable *)	(* ejz,   *)
 			END;
 			ReadResponse(S, S.reply);
 			IF (S.status = FileStatusOk) OR (S.status = FileActionOk) OR (S.status = DataConnectionOpen) THEN
-				IF S.dataIP = NetSystem.anyIP THEN C := WaitDataCon(S) END;
+				IF AosIP.AdrsEqual(S.dataIP, NetSystem.anyIP) THEN C := WaitDataCon(S) END;
 				IF S.res = Done THEN
 					S.res := Done;
 					len := NetSystem.Available(C);
@@ -529,7 +529,7 @@ MODULE FTP; (** portable *)	(* ejz,   *)
 	BEGIN
 		S.reply := ""; SetDataPort(S); C := NIL;
 		IF S.res = Interrupted THEN RETURN END;
-		IF S.dataIP = NetSystem.anyIP THEN
+		IF AosIP.AdrsEqual(S.dataIP, NetSystem.anyIP) THEN
 			ReadResponse(S, line)
 		ELSE
 			C := WaitDataCon(S);
@@ -542,7 +542,7 @@ MODULE FTP; (** portable *)	(* ejz,   *)
 			ReadResponse(S, line);
 			COPY(line, S.reply);
 			IF (S.status = FileStatusOk) OR (S.status = FileActionOk) OR (S.status = DataConnectionOpen) THEN
-				IF S.dataIP = NetSystem.anyIP THEN C := WaitDataCon(S) END;
+				IF AosIP.AdrsEqual(S.dataIP, NetSystem.anyIP) THEN C := WaitDataCon(S) END;
 				IF S.res = Done THEN
 					ReadData(S, C, R)
 				END;
@@ -602,7 +602,7 @@ MODULE FTP; (** portable *)	(* ejz,   *)
 		IF F # NIL THEN
 			SetDataPort(S);
 			IF S.res = Interrupted THEN RETURN END;
-			IF S.dataIP = NetSystem.anyIP THEN
+			IF AosIP.AdrsEqual(S.dataIP, NetSystem.anyIP) THEN
 				ReadResponse(S, line)
 			ELSE
 				C := WaitDataCon(S);
@@ -614,7 +614,7 @@ MODULE FTP; (** portable *)	(* ejz,   *)
 				SendCmd(S, line);
 				ReadResponse(S, S.reply);
 				IF (S.status = FileStatusOk) OR (S.status = FileActionOk) OR (S.status = DataConnectionOpen) THEN 
-					IF S.dataIP = NetSystem.anyIP THEN C := WaitDataCon(S) END;
+					IF AosIP.AdrsEqual(S.dataIP, NetSystem.anyIP) THEN C := WaitDataCon(S) END;
 					IF S.res = Done THEN
 						Files.Set(R, F, 0);
 						WriteData(C, R)
@@ -675,7 +675,7 @@ MODULE FTP; (** portable *)	(* ejz,   *)
 		ReadResponse(S, line);
 		SetDataPort(S);
 		IF S.res = Interrupted THEN SendCmd(S, "TYPE I"); ReadResponse(S, line); RETURN END;
-		IF S.dataIP = NetSystem.anyIP THEN
+		IF AosIP.AdrsEqual(S.dataIP, NetSystem.anyIP) THEN
 			ReadResponse(S, line)
 		ELSE
 			C := WaitDataCon(S);
@@ -688,7 +688,7 @@ MODULE FTP; (** portable *)	(* ejz,   *)
 			ReadResponse(S, line);
 			COPY(line, S.reply);
 			IF (S.status = FileStatusOk) OR (S.status = FileActionOk) OR (S.status = DataConnectionOpen) THEN 
-				IF S.dataIP = NetSystem.anyIP THEN C := WaitDataCon(S) END;
+				IF AosIP.AdrsEqual(S.dataIP, NetSystem.anyIP) THEN C := WaitDataCon(S) END;
 				IF S.res = Done THEN
 					ReadText(C, W)
 				END;
@@ -736,7 +736,7 @@ MODULE FTP; (** portable *)	(* ejz,   *)
 		END;
 		SetDataPort(S);
 		IF S.res = Interrupted THEN SendCmd(S, "TYPE I"); ReadResponse(S, line); RETURN END;
-		IF S.dataIP = NetSystem.anyIP THEN
+		IF AosIP.AdrsEqual(S.dataIP, NetSystem.anyIP) THEN
 			ReadResponse(S, line)
 		ELSE
 			C := WaitDataCon(S);
@@ -748,7 +748,7 @@ MODULE FTP; (** portable *)	(* ejz,   *)
 			SendCmd(S, line);
 			ReadResponse(S, S.reply);
 			IF (S.status = FileStatusOk) OR (S.status = FileActionOk) OR (S.status = DataConnectionOpen) THEN 
-				IF S.dataIP = NetSystem.anyIP THEN C := WaitDataCon(S) END;
+				IF AosIP.AdrsEqual(S.dataIP, NetSystem.anyIP) THEN C := WaitDataCon(S) END;
 				IF S.res = Done THEN
 					WriteText(C, text)
 				END;

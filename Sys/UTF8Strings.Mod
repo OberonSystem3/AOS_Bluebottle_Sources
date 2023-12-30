@@ -1,4 +1,4 @@
- MODULE UTF8Strings;	(** pjm *)
+MODULE UTF8Strings;	(** pjm *)
 
 (** UTF-8 encoded 0X-terminated UCS-32 strings. *)
 
@@ -307,7 +307,7 @@ PROCEDURE UpperCase*(src: ARRAY OF CHAR; VAR dst: ARRAY OF CHAR);
 VAR i: LONGINT;
 BEGIN
 	WHILE (src[i] # 0X) DO
-		IF (src[i] >= "a") & (src[i] < "z") THEN dst[i] := CAP(src[i]) (* this works because non-ASCII chars have bit 7 set *)
+		IF (src[i] >= "a") & (src[i] <= "z") THEN dst[i] := CAP(src[i]) (* this works because non-ASCII chars have bit 7 set *)
 		ELSE dst[i] := src[i]
 		END;
 		INC(i)

@@ -1,40 +1,39 @@
 MODULE MainMenu; (** AUTHOR "TF"; PURPOSE "Menu for Bluebottle"; *)
 
 IMPORT
-	AosOut, XML, AosModules, AosCommands, AosIO, AosFS, AosInputs, 
-	WMMessages, WMStandardComponents, WMComponents, WMTabComponents, 
-	WMEditors, Utilities, AosTextUtilities, AosTexts, 
-	WMWindowManager, WMRectangles;
+	AosOut, XML, AosModules, AosFS, AosInputs,
+	WMMessages, WMStandardComponents, WMComponents, WMTabComponents,
+	WMEditors, Utilities, AosTextUtilities, AosTexts, WMRectangles,
+	WM := WMWindowManager;
 
 CONST
 	MenuFilePrefix = "MenuPage";
 
 TYPE
 	KillerMsg = OBJECT
-	END KillerMsg; 
-	
+	END KillerMsg;
+
 	Window* = OBJECT (WMComponents.FormWindow)
-	VAR 
+	VAR
 		tabs : WMTabComponents.Tabs;
 		pages : ARRAY 100 OF WMComponents.VisualComponent;
 		tabList : ARRAY 100 OF WMTabComponents.Tab;
 		currentPage : WMComponents.VisualComponent;
 		currentPageNr : LONGINT;
 		page : WMStandardComponents.Panel;
-		refresh : WMStandardComponents.Button;
 		form : WMComponents.VisualComponent;
-		
+
 		PROCEDURE CreateForm(): WMComponents.VisualComponent;
 		VAR
 			panel : WMStandardComponents.Panel;
 			toolbar, pagePanel : WMStandardComponents.Panel;
 			tabs : WMTabComponents.Tabs;
 		BEGIN
-			NEW(panel); panel.bounds.SetExtents(1024, 80); panel.fillColor.Set(0); panel.takesFocus.Set(TRUE);
+			NEW(panel); panel.bounds.SetExtents(1024, 60); panel.fillColor.Set(0); panel.takesFocus.Set(TRUE);
 
 		(*	NEW(toolbar); toolbar.bounds.SetWidth(60); toolbar.alignment.Set(WMComponents.AlignLeft); 
 			panel.AddContent(toolbar);
-			NEW(refresh); refresh.caption.SetAOC("reload"); refresh.bounds.SetHeight(20); 
+			NEW(refresh); refresh.caption.SetAOC("reload"); refresh.bounds.SetHeight(20);
 			refresh.alignment.Set(WMComponents.AlignBottom); toolbar.AddContent(refresh); *)
 			
 			NEW(tabs); tabs.fillColor.Set(000600080H); tabs.bounds.SetHeight(20); tabs.alignment.Set(WMComponents.AlignTop);
@@ -50,34 +49,34 @@ TYPE
 
 		PROCEDURE &New();
 		VAR vc : WMComponents.VisualComponent;
-			view : WMWindowManager.ViewPort;
+			view : WM.ViewPort;
 		BEGIN
 			vc := CreateForm();
 			form := vc;
 			currentPageNr := -1;
 			tabs.onSelectTab.Add(TabSelected);
 		(*	refresh.onClick.Add(Refresh); *)
-			
+
 			Init(vc.bounds.GetWidth(), vc.bounds.GetHeight(), TRUE);
 			SetContent(vc);
 			pointerThreshold := 10;
-			manager := WMWindowManager.GetDefaultManager();
-			view := WMWindowManager.GetDefaultView();
+			manager := WM.GetDefaultManager();
+			view := WM.GetDefaultView();
 			manager.Add(ENTIER(view.range.l), ENTIER(view.range.b) - GetHeight(), SELF, {});
 		END New;
-		
-		PROCEDURE SetOriginator(extView : ANY);
-		VAR view : WMWindowManager.ViewPort;
+
+		PROCEDURE SetOriginator*(extView : ANY);
+		VAR view : WM.ViewPort;
 		BEGIN
-			IF (extView # NIL) & (extView IS WMWindowManager.ViewPort) THEN
-				view := extView(WMWindowManager.ViewPort)
-			ELSE view := WMWindowManager.GetDefaultView()
+			IF (extView # NIL) & (extView IS WM.ViewPort) THEN
+				view := extView(WM.ViewPort)
+			ELSE view := WM.GetDefaultView()
 			END;
 			Refresh(NIL, NIL);
 			manager.SetWindowPos(SELF, ENTIER(view.range.l), ENTIER(view.range.b) - GetHeight());
 			manager.ToFront(SELF)
 		END SetOriginator;
-		
+
 		PROCEDURE UpdatePages;
 		VAR i : LONGINT;
 			tab : WMTabComponents.Tab;
@@ -117,7 +116,7 @@ TYPE
 				IF tabList[currentPageNr] # NIL THEN tabs.Select(tabList[currentPageNr]) END
 			END;
 		END UpdatePages;
-		
+
 		PROCEDURE TryLoad(name : ARRAY OF CHAR; pos : LONGINT);
 		VAR x : XML.Content;
 		BEGIN
@@ -130,10 +129,10 @@ TYPE
 				 END
 			END
 		END TryLoad;
-		
-		PROCEDURE LoadPages;
+
+		PROCEDURE LoadPages*;
 		VAR mask : ARRAY 64 OF CHAR;
-			name : ARRAY 256 OF CHAR; flags : SET; 
+			name : ARRAY 256 OF CHAR; flags : SET;
 			time, date, size : LONGINT;
 			i, j : LONGINT;
 			enumerator : AosFS.Enumerator;
@@ -142,10 +141,10 @@ TYPE
 			BEGIN
 				RETURN (ch >= '0') & (ch <= '9')
 			END IsNum;
-			
+	
 		BEGIN
 			NEW(enumerator);
-			FOR i := 0 TO 99 DO 
+			FOR i := 0 TO 99 DO
 				IF pages[i] = currentPage THEN currentPageNr := i END;
 				pages[i] := NIL 
 			END;
@@ -164,7 +163,7 @@ TYPE
 			enumerator.Close;
 			UpdatePages
 		END LoadPages;
-		
+
 		PROCEDURE Refresh(sender, data : ANY);
 		BEGIN
 			DisableUpdate;
@@ -172,7 +171,7 @@ TYPE
 			EnableUpdate;
 			form.Invalidate
 		END Refresh;
-		
+
 		PROCEDURE TabSelected(sender, data : ANY);
 		VAR tab : WMTabComponents.Tab;
 		BEGIN
@@ -185,22 +184,22 @@ TYPE
 					page.AddContent(currentPage);
 					IF ~currentPage.initialized THEN currentPage.Initialize END;
 					currentPage.Reset(SELF, NIL);
-					page.AlignSubComponents;					
+					page.AlignSubComponents;
 				END;
 				EnableUpdate;
 				page.Invalidate
 			END	
 		END TabSelected;
-		
+
 		PROCEDURE Close;
 		BEGIN
 			Close^;
 			window := NIL
 		END Close;
-		
+
 	END Window;
 	
-(* the starter decouples the sensitive callback from the WindowManager. *) 	
+(* the starter decouples the sensitive callback from the WindowManager. *)
 TYPE Starter = OBJECT
 	VAR originator : ANY;
 	
@@ -215,7 +214,7 @@ TYPE Starter = OBJECT
 
 VAR
 	window : Window;
-	manager : WMWindowManager.WindowManager;
+	manager : WM.WindowManager;
 
 (* This procedure is directly called by the window manager. It must be safe. *)
 PROCEDURE MessagePreview(VAR m : WMMessages.Message; VAR discard : BOOLEAN);
@@ -249,22 +248,9 @@ BEGIN {EXCLUSIVE}
 END Cleanup;
 
 BEGIN
-	manager := WMWindowManager.GetDefaultManager();
-	manager.InstallMessagePreview(MessagePreview);
+	manager := WM.GetDefaultManager();
 	AosModules.InstallTermHandler(Cleanup)
 END MainMenu.
 
 S.Free MainMenu WMTabComponents ~
 MainMenu.Open ~
-
-
-Color Codes
- Highlight
-Types and Procedures
-Lock Acquire / Lock Release
-Preferred notation (comment)
-Unsafe / Temporary / Stupid / requires attention
-Permanent Comment 
-Assertion
-Debug
-

@@ -16,9 +16,15 @@ CONST
 	
 	MaxStructs = 1024;	(* maximum number of structures in export block *)
 
+	FileTag = 0BBX;				(* cf. PCM.Mod *)
+	NoZeroCompress = 0ADX;	(* cf. PCM.Mod *)
+	FileVersion* = 0B1X;			(* cf. PCM.Mod *) 
+
 		(* object model exports *)
 	EUEnd = 0;  EURecord = 1;  EUobjScope = 0;  EUrecScope = 1;  EUerrScope = -1;
 	EUProcFlagBit = 31;
+	
+	Sentinel = 0FFFFFFFFH;
 
 		(* compiler flags *)
 	UsesDefinitions = 31;
@@ -28,7 +34,7 @@ CONST
 TYPE
 	ObjHeader = RECORD (* data from object file header *)
 		entries, commands, pointers, types, modules, links, dataLinks: LONGINT;
-		codeSize, dataSize, refSize, constSize: LONGINT;
+		codeSize, dataSize, refSize, constSize, exTableLen, procs, maxPtrs: LONGINT;
 		name: AosModules.Name
 	END;
 
@@ -52,18 +58,20 @@ TYPE
 	END;
 	
 VAR
+	struct: ARRAY MaxStructs OF AosModules.ExportPtr;  (* allocated statically in order to avoid a too large dynamic array for PtrTable in 
+														    AosModules.Module that would increase the boot file substantially. *)														   
 	trace: BOOLEAN;
 
 (* ReadHeader - Read object file header. *)
 
 PROCEDURE ReadHeader(r: AosIO.Reader; VAR h: ObjHeader; VAR res: LONGINT; VAR msg: ARRAY OF CHAR);
-VAR symSize: LONGINT; flags: SET; ignore: AosModules.Module; int: INTEGER; tag: CHAR;
+VAR symSize: LONGINT; flags: SET; ignore: AosModules.Module; tag: CHAR;
 BEGIN
 	r.Char(tag);
-	IF tag = 0BBX THEN
+	IF tag = FileTag THEN
 		r.Char(tag);
-		IF tag = 0ADX THEN r.Char(tag) END;	(* no zero compression in symbol file *)
-		IF (tag = 0AFX) OR (tag = 0B0X) THEN
+		IF tag = NoZeroCompress THEN r.Char(tag) END;	(* no zero compression in symbol file *)
+		IF (tag = FileVersion) THEN
 			r.RawNum(symSize);
 			IF tag = 0B0X THEN	(* new format obj file with flags *)
 				r.RawSet(flags);	(* compilation flags *)
@@ -77,18 +85,21 @@ BEGIN
 				r.SkipBytes(symSize)	(* skip symbols *)
 			END;
 			r.RawLInt(h.refSize);
-			r.RawInt(int);  h.entries := int;
-			r.RawInt(int);  h.commands := int;
-			r.RawInt(int);  h.pointers := int;
-			r.RawInt(int);  h.types := int;
-			r.RawInt(int);  h.modules := int;
-			r.RawInt(int);  h.dataLinks := int;
-			r.RawInt(int);  h.links := int;
+			r.RawLInt(h.entries);  
+			r.RawLInt(h.commands);  
+			r.RawLInt(h.pointers);  
+			r.RawLInt(h.types);  
+			r.RawLInt(h.modules);  
+			r.RawLInt(h.dataLinks); 
+			r.RawLInt(h.links); 
 			r.RawLInt(h.dataSize);
-			r.RawInt(int);  h.constSize := LONG(int) MOD 10000H;
-			r.RawInt(int);  h.codeSize := LONG(int) MOD 10000H;
+			r.RawLInt(h.constSize); 
+			r.RawLInt(h.codeSize);  
+			r.RawLInt(h.exTableLen);
+			r.RawLInt(h.procs);   (* ug *)
+			r.RawLInt(h.maxPtrs);  (* ug *)
 			r.RawString(h.name);
-			IF FALSE THEN
+			IF trace THEN
 				AosOut.String("  name: ");  AosOut.String(h.name);
 				AosOut.String("  symSize: ");  AosOut.Int(symSize, 1);
 				AosOut.String("  refSize: ");  AosOut.Int(h.refSize, 1);  AosOut.Ln;
@@ -102,6 +113,9 @@ BEGIN
 				AosOut.String("  dataSize: ");  AosOut.Int(h.dataSize, 1);
 				AosOut.String("  constSize: ");  AosOut.Int(h.constSize, 1);
 				AosOut.String("  codeSize: ");  AosOut.Int(h.codeSize, 1);  AosOut.Ln;
+				AosOut.String("  exTableLen: ");  AosOut.Int(h.exTableLen, 1); 
+				AosOut.String("  procs: "); AosOut.Int(h.procs, 1); (* ug *)
+				AosOut.String("  maxPtrs: "); AosOut.Int(h.maxPtrs, 1); AosOut.Ln; (* ug *)
 			END;
 			IF r.res # AosIO.Ok THEN res := r.res END
 		ELSE
@@ -174,7 +188,10 @@ BEGIN
 	size := ArrSize(m.entries, SIZE(LONGINT)) + ArrSize(m.commands, SIZE(AosModules.Command)) + 
 		ArrSize(m.pointers, SIZE(LONGINT)) + ArrSize(m.types, SIZE(LONGINT)) +
 		ArrSize(m.modules, SIZE(AosModules.Module)) + ArrSize(dataSize + m.constSize, 1) + 
-		ArrSize(m.codeSize, 1) + ArrSize(m.refSize, 1);
+		ArrSize(m.codeSize, 1) + ArrSize(m.exTableLen, SIZE(AosModules.ExceptionTableEntry)) + 
+		ArrSize(m.procTableLen, SIZE(AosModules.ProcTableEntry)) (* ug *) + 
+		ArrSize(m.procTableLen * m.maxPtrs, SIZE(LONGINT)) (* ug *)  + (* workaround since two-dimensional arrays are not supported by NewArr *)		
+		ArrSize(m.refSize, 1);
 
 	AosHeap.NewSys(block, size);
 	adr := SYSTEM.VAL(LONGINT, block);
@@ -187,6 +204,9 @@ BEGIN
 	NewArr(SYSTEM.VAL(PTR, m.module), m.modules, SIZE(AosModules.Module));
 	NewArr(SYSTEM.VAL(PTR, m.data), dataSize + m.constSize, 1);
 	NewArr(SYSTEM.VAL(PTR, m.code), m.codeSize, 1);
+	NewArr(SYSTEM.VAL(PTR, m.exTable), m.exTableLen, SIZE(AosModules.ExceptionTableEntry));
+	NewArr(SYSTEM.VAL(PTR, m.procTable), m.procTableLen, SIZE(AosModules.ProcTableEntry)); (* ug *) 
+	NewArr(SYSTEM.VAL(PTR, m.ptrTable), m.procTableLen * m.maxPtrs, SIZE(LONGINT)); (* ug *) 
 	NewArr(SYSTEM.VAL(PTR, m.refs), m.refSize, 1);
 	
 	ASSERT(size = 0);	(* account for every byte *)
@@ -197,13 +217,13 @@ END AllocateModule;
 (* ReadEntryBlock - Read the entry block. *)
 
 PROCEDURE ReadEntryBlock(r: AosIO.Reader;  m: AosModules.Module): BOOLEAN;
-VAR tag: CHAR;  i: LONGINT;  int: INTEGER;
+VAR tag: CHAR;  i, num: LONGINT; 
 BEGIN
 	r.Char(tag);
 	IF tag = 82X THEN	(* entry tag *)
 		FOR i := 0 TO m.entries-1 DO
-			r.RawInt(int);
-			m.entry[i] := LONG(int) MOD 10000H + SYSTEM.ADR(m.code[0])
+			r.RawNum(num);
+			m.entry[i] := num + SYSTEM.ADR(m.code[0])
 		END;
 		(*ASSERT((m.entries > 0) & (m.entry[0] = SYSTEM.ADR(m.code[0])));*)	(* entry[0] is beginning of code (cf. OPL.Init) *)
 		RETURN TRUE
@@ -215,14 +235,14 @@ END ReadEntryBlock;
 (* ReadCommandBlock - Read the command block. *)
 
 PROCEDURE ReadCommandBlock(r: AosIO.Reader;  m: AosModules.Module): BOOLEAN;
-VAR tag: CHAR; i, j, adr: LONGINT; int: INTEGER; name: AosModules.Name;
+VAR tag: CHAR; i, j, adr, num: LONGINT; name: AosModules.Name;
 BEGIN
 	r.Char(tag);
 	IF tag = 83X THEN	(* command tag *)
 		FOR i := 0 TO m.commands-1 DO
 			r.RawString(name);
-			r.RawInt(int);
-			adr := LONG(int) MOD 10000H + SYSTEM.ADR(m.code[0]);
+			r.RawNum(num);
+			adr := num + SYSTEM.ADR(m.code[0]);
 			IF name[0] # "$" THEN	(* old-style command without parameter *)
 				m.command[i].name := name;
 				m.command[i].proc := SYSTEM.VAL(AosModules.CommandProc, adr);
@@ -242,14 +262,14 @@ END ReadCommandBlock;
 (* ReadPointerBlock - Read the pointer block. *)
 
 PROCEDURE ReadPointerBlock(r: AosIO.Reader;  m: AosModules.Module): BOOLEAN;
-VAR tag: CHAR;  i, p: LONGINT;
+VAR tag: CHAR;  i, num: LONGINT;
 BEGIN
 	r.Char(tag);
 	IF tag = 84X THEN	(* pointer tag *)
 		FOR i := 0 TO m.pointers-1 DO
-			r.RawLInt(p);
-			ASSERT(p MOD 4 = 0);	(* no deep copy flag *)
-			m.ptrAdr[i] := m.sb + p
+			r.RawNum(num);
+			ASSERT(num MOD 4 = 0);	(* no deep copy flag *)
+			m.ptrAdr[i] := m.sb + num
 		END;
 		RETURN TRUE
 	ELSE
@@ -280,18 +300,18 @@ END ReadImportBlock;
 (* ReadDataLinkBlock - Read the data links block. *)
 
 PROCEDURE ReadDataLinkBlock(r: AosIO.Reader;  dataLinks: LONGINT;  VAR d: ARRAY OF DataLinkRec): BOOLEAN;
-VAR tag: CHAR;  i, j: LONGINT;  int: INTEGER;
+VAR tag: CHAR;  i, j, num: LONGINT; 
 BEGIN
 	r.Char(tag);
 	IF tag = 8DX THEN	(* data links tag *)
 		FOR i := 0 TO dataLinks-1 DO
 			r.Char(tag);  d[i].mod := ORD(tag);
-			r.RawInt(int);  d[i].entry := int;
-			r.RawInt(int);  d[i].fixups := int;
+			r.RawNum(num);  d[i].entry := num;
+			r.RawLInt(num);  d[i].fixups := num;  (* fixed size *)
 			IF d[i].fixups > 0 THEN
 				NEW(d[i].ofs, d[i].fixups);
 				FOR j := 0 TO d[i].fixups-1 DO
-					r.RawInt(int);  d[i].ofs[j] := LONG(int) MOD 10000H
+					r.RawNum(num);  d[i].ofs[j] := num
 				END
 			ELSE
 				d[i].ofs := NIL
@@ -305,16 +325,20 @@ END ReadDataLinkBlock;
 
 (* ReadLinkBlock - Read the link block. *)
 
-PROCEDURE ReadLinkBlock(r: AosIO.Reader;  links: LONGINT;  VAR l: ARRAY OF LinkRec): BOOLEAN;
-VAR tag: CHAR;  i: LONGINT;  int: INTEGER;
+PROCEDURE ReadLinkBlock(r: AosIO.Reader;  links, entries: LONGINT;  VAR l: ARRAY OF LinkRec; VAR f: ARRAY OF LONGINT; VAR caseTableSize: LONGINT): BOOLEAN;
+VAR tag: CHAR;  i, num: LONGINT; 
 BEGIN
 	r.Char(tag);
 	IF tag = 86X THEN	(* links tag *)
 		FOR i := 0 TO links-1 DO
 			r.Char(tag);  l[i].mod := ORD(tag);
 			r.Char(tag);  l[i].entry := ORD(tag);
-			r.RawInt(int);  l[i].link := LONG(int) MOD 10000H
+			r.RawNum(num);  l[i].link := num
 		END;
+		FOR i := 0 TO entries-1 DO
+			r.RawNum(num); f[i] := num;
+		END;
+		r.RawNum(caseTableSize);
 		RETURN TRUE
 	ELSE
 		RETURN FALSE
@@ -343,20 +367,19 @@ END ReadConstBlock;
 (* ReadExportBlock - Read the export block. *)
 
 PROCEDURE ReadExportBlock(r: AosIO.Reader;  m: AosModules.Module): BOOLEAN;
-TYPE ExportPtr = POINTER TO AosModules.ExportDesc;
-VAR tag: CHAR;  structs: LONGINT;  struct: ARRAY MaxStructs OF ExportPtr;	(* rewrite struct without ptr *)
+VAR tag: CHAR;  structs, i: LONGINT;  
 
 	PROCEDURE LoadScope(VAR scope: AosModules.ExportDesc;  level, adr: LONGINT);
-	VAR no1, no2, fp, off: LONGINT;  int: INTEGER;
+	VAR no1, no2, fp, off, num: LONGINT;  
 	BEGIN
-		r.RawInt(int);  scope.exports := int;
+		r.RawLInt(num);  scope.exports := num; (* fixed size *)
 		no1 := 0;  no2 := 0;
 		IF scope.exports # 0 THEN
 			NEW(scope.dsc, scope.exports);
 			scope.dsc[0].adr := adr
 		END;
 		IF level = EUrecScope THEN
-			INC(structs);  struct[structs] := SYSTEM.VAL(ExportPtr, SYSTEM.ADR(scope))
+			INC(structs);  struct[structs] := SYSTEM.VAL(AosModules.ExportPtr, SYSTEM.ADR(scope))
 		END;
 		r.RawNum(fp);
 		WHILE fp # EUEnd DO
@@ -381,6 +404,9 @@ BEGIN
 	IF tag = 88X THEN	(* export tag *)
 		structs := 0;
 		LoadScope(m.export, EUobjScope, 0);
+		IF structs > 0 THEN (* clear struct *)
+			FOR i := 0 TO MaxStructs - 1 DO struct[i] := NIL END
+		END;
 		RETURN TRUE
 	ELSE
 		RETURN FALSE
@@ -421,7 +447,7 @@ VAR tag: CHAR;  i: LONGINT;  name, prevname: AosModules.Name;  mod: AosModules.M
 		REPEAT
 			ASSERT((link >= 0) & (link < m.codeSize));
 			SYSTEM.GET(code + link, instr);
-			nextlink := SYSTEM.LSH(instr, -16);
+			nextlink := instr;
 			SYSTEM.GET(code + link - 1, opcode);	(* backward disassembly safe? *)
 			IF opcode = 0E8X THEN	(* call instruction relative *)
 				SYSTEM.PUT(code + link, fixval - (code + link + 4)) (* + 4: to next instruction *)
@@ -430,7 +456,7 @@ VAR tag: CHAR;  i: LONGINT;  name, prevname: AosModules.Name;  mod: AosModules.M
 				SYSTEM.PUT(code + link, fixval)
 			END;
 			link := nextlink
-		UNTIL link = 0FFFFH
+		UNTIL link = Sentinel
 	END FixupCall;
 	
 	PROCEDURE FixupVar(code, link, fixval: LONGINT);
@@ -513,38 +539,38 @@ END ReadUseBlock;
 
 PROCEDURE ReadTypeBlock(r: AosIO.Reader;  m: AosModules.Module;  VAR type: ARRAY OF TypeRec): BOOLEAN;
 VAR
-	tag: CHAR;  i, j, recSize, newMethods, pointers, method, entry, ofs, base: LONGINT;
-	int: INTEGER;  name: AosModules.Name;  flags: SET;
+	tag: CHAR;  i, j, recSize, newMethods, pointers, method, entry, ofs, base, num: LONGINT;
+	name: AosModules.Name;  flags: SET;
 BEGIN
 	r.Char(tag);
 	IF tag = 8BX THEN	(* type tag *)
 		FOR i := 0 TO m.types-1 DO
 			type[i].init := FALSE;
-			r.RawLInt(recSize);
-			r.RawInt(int);  type[i].entry := int;
-			r.RawInt(int);  type[i].baseMod := int;
-			r.RawLInt(type[i].baseEntry);
-			r.RawInt(int);  type[i].methods := int;
-			IF int = 0 THEN flags := {}	(* unprotected type *)
+			r.RawNum(recSize);
+			r.RawNum(num); type[i].entry := num;
+			r.RawNum(num); type[i].baseMod := num;
+			r.RawNum(num); type[i].baseEntry := num;
+			r.RawNum(num); type[i].methods := num;
+			IF num = 0 THEN flags := {}	(* unprotected type *)
 			ELSE flags := {AosHeap.ProtTypeBit}	(* protected type *)
 			END;
-			r.RawInt(int);  type[i].inhMethods := int;
-			r.RawInt(int);  newMethods := int;
-			r.RawInt(int);  pointers := int;
+			r.RawNum(num); type[i].inhMethods := num;
+			r.RawNum(newMethods);
+			r.RawLInt(pointers);   (* fixed size *)
 			r.RawString(name);
 			AosHeap.NewType(SYSTEM.VAL(PTR, type[i].desc), recSize, pointers, 
 					AosModules.MaxTags + type[i].methods, name, m, flags);
 			ASSERT(SYSTEM.VAL(LONGINT, type[i].desc) MOD 32 = 0);
 			base := SYSTEM.VAL(LONGINT, type[i].desc.tag) + AosModules.Mth0Ofs;	(* read new methods *)
 			FOR j := 0 TO newMethods-1 DO
-				r.RawInt(int);  method := int;
-				r.RawInt(int);  entry := int;
+				r.RawNum(method);
+				r.RawNum(entry);
 				SYSTEM.PUT(base - 4*method, m.entry[entry])
 			END;
 			(* other methods are left NIL *)
 			base := SYSTEM.VAL(LONGINT, type[i].desc.tag) + AosModules.Ptr0Ofs;	(* read pointers *)
 			FOR j := 0 TO pointers-1 DO
-				r.RawLInt(ofs);
+				r.RawNum(ofs);
 				ASSERT(ofs MOD 4 = 0);	(* no deep copy flag *);
 				SYSTEM.PUT(base, ofs);  INC(base, 4)
 			END;
@@ -586,40 +612,45 @@ END FixupGlobals;
 
 (* FixupLinks - Fix up other references. *)
 
-PROCEDURE FixupLinks(m: AosModules.Module;  VAR link: ARRAY OF LinkRec;  VAR res: LONGINT);
+PROCEDURE FixupLinks(m: AosModules.Module;  VAR link: ARRAY OF LinkRec; VAR fixupCounts: ARRAY OF LONGINT; caseTableSize: LONGINT; VAR res: LONGINT);
 VAR i: LONGINT;
 
 	PROCEDURE FixRelative(ofs, val: LONGINT);
 	VAR t, adr: LONGINT;
 	BEGIN
 		ASSERT(val # 0);
-		WHILE ofs # 0FFFFH DO
+		WHILE ofs # Sentinel DO
 			adr := SYSTEM.ADR(m.code[0])+ofs;
 			SYSTEM.GET(adr, t);
 			SYSTEM.PUT(adr, val - (adr+4));	(* relative => no relocation required *)
-			ofs := SYSTEM.LSH(t, -16)
+			ofs := t
 		END
 	END FixRelative;
 	
-	PROCEDURE FixEntry(ofs: LONGINT);
-	VAR t, adr: LONGINT;
+	PROCEDURE FixEntry(ofs: LONGINT; VAR fixupCounts: ARRAY OF LONGINT);
+	VAR t, adr, i: LONGINT;
 	BEGIN
-		WHILE ofs # 0FFFFH DO
+		i := 0;
+		WHILE ofs # Sentinel DO
 			adr := SYSTEM.ADR(m.code[0])+ofs;
 			SYSTEM.GET(adr, t);
-			SYSTEM.PUT(adr, m.entry[t MOD 10000H]);
-			ofs := SYSTEM.LSH(t, -16)
+			WHILE fixupCounts[i] = 0 DO INC(i) END;
+			SYSTEM.PUT(adr, m.entry[i]);
+			DEC(fixupCounts[i]);
+			ofs := t
 		END
 	END FixEntry;
 	
-	PROCEDURE FixCase(ofs: LONGINT);
-	VAR t, adr: LONGINT;
+	PROCEDURE FixCase(ofs, caseTableSize: LONGINT);
+	VAR t, adr, i: LONGINT;
 	BEGIN
-		WHILE ofs # 0FFFFH DO
+		i := caseTableSize;
+		WHILE i > 0 DO
 			adr := m.sb+ofs;
 			SYSTEM.GET(adr, t);
-			SYSTEM.PUT(adr, SYSTEM.ADR(m.code[0]) + t MOD 10000H);
-			ofs := SYSTEM.LSH(t, -16)
+			SYSTEM.PUT(adr, SYSTEM.ADR(m.code[0]) + t);
+			DEC(i);
+			ofs := ofs + 4
 		END
 	END FixCase;
 
@@ -628,9 +659,9 @@ BEGIN
 		ASSERT(link[i].mod = 0);	(* only fix local things *)
 		CASE link[i].entry OF
 			244..253: FixRelative(link[i].link, AosModules.GetKernelProc(link[i].entry))
-			|254: FixEntry(link[i].link)	(* local procedure address *)
-			|255: FixCase(link[i].link)	(* case table *)
-			ELSE res := 3406; RETURN	(* unknown fixup type *)
+			|254: FixEntry(link[i].link, fixupCounts)	(* local procedure address *)
+			|255: FixCase(link[i].link, caseTableSize)	(* case table *)
+			ELSE res := 3406; RETURN				(* unknown fixup type *)
 		END
 	END
 END FixupLinks;
@@ -712,13 +743,127 @@ BEGIN
 	END
 END InitType;
 
+PROCEDURE ReadExTableBlock(r: AosIO.Reader;  m: AosModules.Module): BOOLEAN;
+VAR
+	tag: CHAR;
+	pcFrom, pcTo, pcHandler, i: LONGINT;
+
+	PROCEDURE SelectionSort(exTable: AosModules.ExceptionTable);
+	VAR
+		p, q, min: LONGINT;		
+		entry: AosModules.ExceptionTableEntry;
+	BEGIN
+		FOR p := 0 TO LEN(exTable) - 2 DO
+			min := p;
+			FOR q := p + 1 TO LEN(exTable) - 1 DO
+				IF exTable[min].pcFrom > exTable[q].pcFrom THEN min := q END;
+				entry := exTable[min]; exTable[min] := exTable[p]; exTable[p] := entry;
+			END
+		END
+	END SelectionSort;
+	
+BEGIN
+	NEW(m.exTable, m.exTableLen);	
+	
+	r.Char(tag);				
+	IF tag = 8EX THEN						
+		FOR i := 0 TO m.exTableLen -1 DO
+			r.Char(tag);
+			IF tag = 0FEX THEN
+				r.RawNum(pcFrom);			
+				r.RawNum(pcTo);
+				r.RawNum(pcHandler);
+				m.exTable[i].pcFrom := pcFrom + SYSTEM.ADR(m.code[0]);
+				m.exTable[i].pcTo := pcTo + SYSTEM.ADR(m.code[0]);
+				m.exTable[i].pcHandler := pcHandler + SYSTEM.ADR(m.code[0]);							
+			ELSE
+				RETURN FALSE;
+			END;			
+		END;
+				
+		SelectionSort(m.exTable);
+		RETURN TRUE;
+	ELSE	
+		RETURN FALSE;
+	END;
+	
+	
+END ReadExTableBlock;
+
+PROCEDURE ReadPtrsInProcBlock(r: AosIO.Reader;  m: AosModules.Module): BOOLEAN;
+VAR tag: CHAR; i, j, codeoffset, beginOffset, endOffset, nofptrs, p : LONGINT;
+	
+	PROCEDURE Max(i, j : LONGINT) : LONGINT;
+	BEGIN
+		IF i > j THEN 
+			RETURN i 
+		ELSE 
+			RETURN j 
+		END
+	END Max;
+	
+	PROCEDURE SwapProcTableEntries(p, q : LONGINT);
+	VAR procentry : AosModules.ProcTableEntry;
+		k, i, basep, baseq, ptr : LONGINT;
+	BEGIN
+		k := Max(m.procTable[p].noPtr, m.procTable[q].noPtr);
+		IF k > 0 THEN (* swap entries in ptrTable first *)
+			basep := p * m.maxPtrs; baseq := q * m.maxPtrs;
+			FOR i := 0 TO k - 1 DO
+				ptr := m.ptrTable[basep + i];
+				m.ptrTable[basep + i] := m.ptrTable[baseq + i];
+				m.ptrTable[baseq + i] := ptr
+			END
+		END;
+		procentry := m.procTable[p];
+		m.procTable[p] := m.procTable[q];
+		m.procTable[q] := procentry
+	END SwapProcTableEntries;
+	
+	PROCEDURE SortProcTable();
+	VAR i, j, min : LONGINT;
+	BEGIN
+		FOR i := 0 TO m.procTableLen - 2 DO
+			min := i;
+			FOR j := i + 1 TO m.procTableLen - 1 DO
+				IF m.procTable[j].pcFrom < m.procTable[min].pcFrom THEN min:= j END
+			END;
+			IF min # i THEN SwapProcTableEntries(i, min) END
+		END
+	END SortProcTable;
+	
+BEGIN
+	r.Char(tag);
+	IF tag = 8FX THEN
+		FOR i := 0 TO m.procTableLen - 1 DO
+			r.RawNum(codeoffset);
+			r.RawNum(beginOffset);
+			r.RawNum(endOffset);
+			r.RawLInt(nofptrs);	(* fixed size *)
+			m.procTable[i].pcFrom := codeoffset + SYSTEM.ADR(m.code[0]);
+			m.procTable[i].pcStatementBegin := beginOffset+ SYSTEM.ADR(m.code[0]);
+			m.procTable[i].pcStatementEnd := endOffset + SYSTEM.ADR(m.code[0]);
+			m.procTable[i].noPtr := nofptrs;
+			FOR j := 0 TO nofptrs - 1 DO
+				r.RawNum(p);
+				m.ptrTable[i * m.maxPtrs + j] := p;
+			END
+		END;
+		SortProcTable();
+		RETURN TRUE
+	ELSE
+		RETURN FALSE
+	END
+END ReadPtrsInProcBlock;
+
 (** LoadObj - Load an Active Oberon object file. *)
 
 PROCEDURE LoadObj*(name, fileName: ARRAY OF CHAR;  VAR res: LONGINT;  VAR msg: ARRAY OF CHAR): AosModules.Module;
 VAR
-	f: AosFS.File; r: AosFS.Reader; h: ObjHeader; m: AosModules.Module; i: LONGINT;
+	f: AosFS.File; r: AosFS.Reader; h: ObjHeader; m: AosModules.Module; i, caseTableSize: LONGINT;
 	dataLink: POINTER TO ARRAY OF DataLinkRec;
 	link: POINTER TO ARRAY OF LinkRec;
+	fixupCounts : POINTER TO ARRAY OF LONGINT;
 	type: POINTER TO ARRAY OF TypeRec;
 BEGIN
 	f := AosFS.Old(fileName);
@@ -740,19 +885,23 @@ BEGIN
 			m.refSize := h.refSize;  m.entries := h.entries;  m.commands := h.commands;
 			m.pointers := h.pointers;  m.types := h.types;  m.modules := h.modules;
 			m.dataSize := h.dataSize;  m.constSize := h.constSize;  m.codeSize := h.codeSize;
+			m.exTableLen := h.exTableLen;
+			m.procTableLen := h.procs; (* ug *)
+			m.maxPtrs := h.maxPtrs; (* ug *)
 			AllocateModule(m);
 			IF trace THEN
 				AosOut.Hex(SYSTEM.ADR(m.code[0]), 8);  AosOut.Char(" ");
 				AosOut.String(m.name);  AosOut.Hex(m.sb, 9);  AosOut.Ln
 			END;
-			NEW(dataLink, h.dataLinks);  NEW(link, h.links);  NEW(type, m.types);
+			NEW(dataLink, h.dataLinks);  NEW(link, h.links);  NEW(fixupCounts, h.entries); NEW(type, m.types);
 			IF ReadEntryBlock(r, m) & ReadCommandBlock(r, m) & ReadPointerBlock(r, m) & 
 					ReadImportBlock(r, m, res, msg) & ReadDataLinkBlock(r, h.dataLinks, dataLink^) & 
-					ReadLinkBlock(r, h.links, link^) & ReadConstBlock(r, m) & ReadExportBlock(r, m) & 
+					ReadLinkBlock(r, h.links, h.entries, link^, fixupCounts^, caseTableSize) & ReadConstBlock(r, m) & ReadExportBlock(r, m) & 
 					ReadCodeBlock(r, m) & ReadUseBlock(r, m, dataLink^, res, msg) & 
-					ReadTypeBlock(r, m, type^) & ReadRefBlock(r, m) THEN
+					ReadTypeBlock(r, m, type^) & ReadExTableBlock(r, m)  & ReadPtrsInProcBlock(r, m)  (* ug *) &
+					ReadRefBlock(r, m) THEN
 				IF h.dataLinks # 0 THEN FixupGlobals(m, dataLink^) END;
-				IF h.links # 0 THEN FixupLinks(m, link^, res) END;
+				IF h.links # 0 THEN FixupLinks(m, link^, fixupCounts^, caseTableSize, res) END;
 				IF res = Ok THEN
 					FOR i := 0 TO LEN(type^)-1 DO InitType(m, type^, i) END
 				END
@@ -769,12 +918,13 @@ BEGIN
 	RETURN m
 END LoadObj;
 
-PROCEDURE Trace*;
+PROCEDURE Trace*(par : ANY): ANY;
 BEGIN
 	trace := ~trace;
 	AosOut.String("AosLoader: trace ");
 	IF trace THEN AosOut.String("on") ELSE AosOut.String("off") END;
-	AosOut.Ln
+	AosOut.Ln;
+	RETURN NIL
 END Trace;
 
 BEGIN
@@ -784,3 +934,5 @@ END AosLoader.
 (*
 11.05.98	pjm	Started
 *)
+
+S.Free AosLoader ~

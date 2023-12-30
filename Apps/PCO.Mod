@@ -6,7 +6,7 @@ MODULE PCO; (** AUTHOR "prk / be"; PURPOSE "Parallel Compiler: Intel 386 code pa
 	Based on the OPO module for OP2 by N. Mannhart
 *)
 
-	IMPORT PCM, PCLIR;
+	IMPORT SYSTEM, PCM, PCLIR;
 
 
 	CONST
@@ -52,8 +52,9 @@ MODULE PCO; (** AUTHOR "prk / be"; PURPOSE "Parallel Compiler: Intel 386 code pa
 *)
 
 	(* code and data length per module *)
-	CodeLength 	= 65000;	(* 64KByte Code Lenght per Module *)
-	(*MaxConstLength*	= 64*1024;	(* Max Const size allowed, limited by Object File Format*)*)
+	MaxCodeLength* = 2147483647;	(* 2^31 - 1, i.e. the maximum positive LONGINT number *)
+	InitialCodeLength = 65536;
+	(*MaxConstLength*	= 2147483647;	(* Max Const size allowed, limited by Object File Format, see PCBT.Mod*)*)
 
 	(** i386 Register *)
 		EAX* = 0; ECX* = 1; EDX* = 2; EBX* = 3; ESP* = 4; EBP* = 5; ESI* = 6; EDI* = 7; (** 32 bit register *)
@@ -110,21 +111,31 @@ MODULE PCO; (** AUTHOR "prk / be"; PURPOSE "Parallel Compiler: Intel 386 code pa
 	pc*, dsize*: LONGINT; 		(* code size, data size *)
 	lastImmSize*: SHORTINT;		(* last immediate Size *)
 	code*: PCLIR.CodeArray;	(* i386/i387 code area *)
+	codeLength : LONGINT;
 	errpos*: LONGINT;
 	CodeErr*: BOOLEAN;
 
 (* i386 Code Generator *)
 
-	PROCEDURE PutByteAt* (pos: LONGINT; b: INTEGER);
-	BEGIN
-		IF pos >= CodeLength THEN
-			IF ~CodeErr THEN  PCM.Error(210, -1, ""); CodeErr:= TRUE  END;
-			pc:= 0
-		ELSE
-			code[pos]:= CHR (b)
-		END
-	END PutByteAt;
-	
+   	PROCEDURE PutByteAt* (pos: LONGINT; b: INTEGER);
+   	VAR c: PCLIR.CodeArray;
+   	BEGIN
+       	IF pos >= codeLength THEN
+          		IF codeLength + InitialCodeLength <= MaxCodeLength THEN
+               		codeLength := codeLength + InitialCodeLength;
+               		NEW(c, codeLength);
+               		SYSTEM.MOVE(SYSTEM.ADR(code[0]), SYSTEM.ADR(c[0]), LEN(code));
+               		code := c;
+               		code[pos] := CHR(b); (*fof*)
+           		ELSE
+               		IF ~CodeErr THEN  PCM.Error(210, -1, ""); CodeErr:= TRUE  END;
+               		pc:= 0
+           		END
+       	ELSE
+           		code[pos]:= CHR (b)
+       	END
+   	END PutByteAt;
+
 	PROCEDURE PutByte* (b: INTEGER); 
 	BEGIN
 		PutByteAt(pc, b); INC(pc);
@@ -139,10 +150,18 @@ MODULE PCO; (** AUTHOR "prk / be"; PURPOSE "Parallel Compiler: Intel 386 code pa
 	END PutWord;
 
 	PROCEDURE PutDWordAt* (pos, dw: LONGINT);
+	VAR c: PCLIR.CodeArray;
 	BEGIN
-		IF pos >= CodeLength - 4 THEN
-			IF ~CodeErr THEN  PCM.Error(210, -1, ""); CodeErr:= TRUE  END;
-			pos:= 0
+		IF pos >= codeLength - 4 THEN
+			IF codeLength + InitialCodeLength <= MaxCodeLength THEN
+				codeLength := codeLength + InitialCodeLength;
+				NEW(c, codeLength);
+				SYSTEM.MOVE(SYSTEM.ADR(code[0]), SYSTEM.ADR(c[0]), LEN(code));
+				code := c
+			ELSE
+				IF ~CodeErr THEN  PCM.Error(210, -1, ""); CodeErr:= TRUE  END;
+				pc:= 0
+			END
 		ELSE
 			code[pos]:= CHR ( dw MOD 100H); INC (pos); (* low byte first *)
 			code[pos]:= CHR ( ( dw DIV 100H) MOD 100H); INC (pos);
@@ -887,11 +906,13 @@ MODULE PCO; (** AUTHOR "prk / be"; PURPOSE "Parallel Compiler: Intel 386 code pa
 	END GenFLDCW;
 
 BEGIN
-	NEW(code, CodeLength)
+	codeLength := InitialCodeLength;
+	NEW(code, codeLength)
 END PCO.
 
 
 (*
+	15.11.06	ug	code length not limited to 64K, can be extended by chunks of 64K
 	04.07.01	prk	intel's ret can only free 2^16 bytes of stack, fixed
 	07.05.01	prk	Installable code generators moved to PCLIR; debug function added
 	03.05.01	be	Installable code generators

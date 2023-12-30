@@ -58,7 +58,8 @@ MODULE BMPImages; (** portable **)	(* eos   *)
 		END;
 		WHILE bits < nbits DO	(* blow up to requested number of bits *)
 			res := 2*res+1; INC(bits)
-		END
+		END;
+		RETURN res
 	END Unmask;
 	
 	PROCEDURE Load1 (img: Images.Image; w, h: LONGINT; VAR pal: Images.Palette; VAR r: Files.Rider);

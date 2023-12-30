@@ -377,7 +377,7 @@ BEGIN {EXCLUSIVE}
 	ELSE
 		AWAIT(lockedBy = NIL);
 		lockedBy := me; level := 1;
-		AosActive.SetExceptionHandler(ExceptionInLock)	(* assume no other exception handler is present *)
+(*		AosActive.SetExceptionHandler(ExceptionInLock)	(* assume no other exception handler is present *) *)
 	END
 END LockOberon;
 
@@ -388,7 +388,7 @@ BEGIN {EXCLUSIVE}
 	ASSERT(lockedBy = AosActive.ActiveObject());	(* must hold lock *)
 	DEC(level);
 	IF level = 0 THEN
-		AosActive.SetExceptionHandler(NIL);
+(*		AosActive.SetExceptionHandler(NIL); *)
 		lockedBy := NIL
 	END
 END UnlockOberon;

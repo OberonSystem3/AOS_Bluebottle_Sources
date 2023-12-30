@@ -1,6 +1,11 @@
-(* Aos, Copyright 2001, Pieter Muller, ETH Zurich *)
-
-MODULE Utilities;	(** AUTHOR "be"; PURPOSE "Basic utility functions" *)
+MODULE Utilities; (** AUTHOR "be,tf"; PURPOSE "Basic utility functions" *)
+(**
+ * History:
+ *
+ *	22.12.2006	Fixed search algorithm in procedure Pos, added GenericPos, UP and UpperCaseChar (staubesv)
+ *	23.02.2007	Bugfix: Corrected constants q and d in procedures Pos and GenericPos (staubesv)
+ *	27.02.2007	Bugfix: Buffer.Add: fixed buffer resizing (staubesv)
+ *)
 
 (** Oberon date & time format:
 		time: bits 16-12: hours
@@ -12,13 +17,16 @@ MODULE Utilities;	(** AUTHOR "be"; PURPOSE "Basic utility functions" *)
 					4-0: day of month
 *)
 
-IMPORT AosClock, Reals;
+IMPORT AosClock, AosIO, Reals;
 
 CONST
 	Ok* = 0;
 
 TYPE
 	String* = POINTER TO ARRAY OF CHAR;
+	
+	StringArray* = POINTER TO ARRAY OF String;
+	
 	TDateTime* = RECORD
 		Year*, Month*, Day*,
 		Hour*, Minute*, Second*: LONGINT
@@ -29,6 +37,74 @@ VAR
 	Days-: ARRAY 7 OF ARRAY 10 OF CHAR;	(** day's names (Moday = 0, .... Sunday = 6) *)
 	NoDays: ARRAY 12 OF INTEGER;
 	DateFormat*, TimeFormat*: ARRAY 32 OF CHAR;	(** date and time format strings used by DateToStr/TimeToStr *)
+
+	(** The stringmaker creates an automatically growing character array from the input with an AosIO writer *)
+TYPE
+	Buffer* = OBJECT
+	VAR length : LONGINT;
+		data : String;
+		w : AosIO.Writer;
+		
+		PROCEDURE &Init(initialSize : LONGINT);
+		BEGIN
+			IF initialSize < 16 THEN initialSize := 256 END;
+			NEW(data, initialSize); length := 0;
+		END Init;		
+		
+		PROCEDURE Add*(VAR buf: ARRAY OF CHAR; ofs, len: LONGINT; propagate: BOOLEAN; VAR res: LONGINT);
+		VAR newSize, i : LONGINT; n : String;
+		BEGIN
+			IF length + len + 1 >= LEN(data) THEN
+				newSize := Max(LEN(data) * 2, length + len + 1);
+				NEW(n, newSize); 
+				FOR i := 0 TO length - 1 DO n[i] := data[i] END;
+				data := n;
+			END;
+			WHILE len > 0 DO 
+				data[length] := buf[ofs];
+				INC(ofs); INC(length); DEC(len);
+			END;
+			data[length] := 0X;
+			res := Ok;
+		END Add;
+		
+		(** resets the length of the string to 0. The buffer is reused*)
+		PROCEDURE Clear*;
+		BEGIN
+			data[0] := 0X;
+			length := 0
+		END Clear;
+		
+		(** returns an AosIO.Writer to the string *)
+		PROCEDURE GetWriter*() : AosIO.Writer;
+		BEGIN
+			IF w = NIL THEN NEW(w, SELF.Add, 256) END;
+			RETURN w
+		END GetWriter;
+		
+		(** returns the number of bytes written to the string. The AosIO.Writer is updated *)
+		PROCEDURE GetLength*() : LONGINT;
+		BEGIN
+			IF w # NIL THEN w.Update END;
+			RETURN length
+		END GetLength;
+		
+		(** returns the current string buffer. If the string maker is reused, the content of the string may or may not
+			vary. The application might need to copy the returned string. The AosIO.Writer is updated *)
+		PROCEDURE GetString*() : String;
+		BEGIN
+			IF w # NIL THEN w.Update END;
+			RETURN data
+		END GetString;
+		
+		PROCEDURE Write*(out : AosIO.Writer);
+		BEGIN
+			IF w # NIL THEN w.Update END;
+			out.Bytes(data^, 0, length)
+		END Write;
+		
+	END Buffer;
+
 	
 (** Date and Time functions *)
 
@@ -148,11 +224,15 @@ BEGIN
 	RETURN len
 END Length;
 
-(** returns the position of the first occurrence of pattern in the string or -1 if no occurrence is found *)
-(* Rabin-Karp algorithm, adopted from Sedgewick *)
+(**
+ * Returns the position of the first occurrence of pattern in the string or -1 if no occurrence is found.
+ * Rabin-Karp algorithm, adopted from Sedgewick.
+ *)
 PROCEDURE Pos*(pattern: ARRAY OF CHAR; VAR string: ARRAY OF CHAR): LONGINT;
-CONST q=33554393; d = 32;
-VAR h1, h2, dM, i, j, m, n: LONGINT; check: BOOLEAN;
+CONST 
+	q = 8204957;	(* prime number, {(d+1) * q <= MAX(LONGINT)} *)
+	d = 256;			(* number of different characters *)
+VAR h1, h2, dM, i, j, m, n: LONGINT; found : BOOLEAN;
 BEGIN
 	m := Length(pattern); n := Length(string);
 	IF (m > n) THEN RETURN -1 END;
@@ -160,26 +240,141 @@ BEGIN
 	dM := 1; FOR i := 0 TO m-2 DO dM := (d*dM) MOD q END;
 	h1 := 0; FOR i := 0 TO m-1 DO h1 := (h1*d + ORD(pattern[i])) MOD q END;
 	h2 := 0; FOR i := 0 TO m-1 DO h2 := (h2*d + ORD(string[i])) MOD q END;
-	i := 0;
-	WHILE (h1 # h2) & (i < n-m) DO
+	i := 0; found := FALSE;
+		
+	IF (h1 = h2) THEN (* verify *)
+		j := 0; found := TRUE;
+		WHILE (j < m) DO
+			IF (string[j] # pattern[j]) THEN found := FALSE; j := m; END; (* hash values are equal, but strings are not *)
+			INC(j);
+		END; 
+	END;
+
+	WHILE ~found & (i < n-m) DO
 		h2 := (h2 + d*q - ORD(string[i])*dM) MOD q;
 		h2 := (h2*d + ORD(string[i+m])) MOD q;
 		INC(i);
 		
-		IF (h1 = h2) THEN	(* verify *)
-			check := TRUE; j := 0;
-			WHILE (j < m) & check DO
-				IF (string[i+j] # pattern[j]) THEN INC(h2); j := m END;	(* hash values are equal, but strings are not *)
-				INC(j)
+		IF (h1 = h2) THEN (* verify *)
+			j := 0; found := TRUE;
+			WHILE (j < m) DO
+				IF (string[i + j] # pattern[j]) THEN found := FALSE; j := m; END; (* hash values are equal, but strings are not *)
+				INC(j);
 			END
-		END
+		END;
 	END;
 	
-	IF (h1 = h2) THEN
-		RETURN i
-	ELSE RETURN -1
+	IF found THEN
+		RETURN i;
+	ELSE 
+		RETURN -1
 	END	
 END Pos;
+
+(** More generic version of Pos. Basically the same search algorithm, but can also perform case-insensitive searching and/or 
+ * backwards directed searching.
+ * Returns the position of the first character of the first occurence of 'pattern' in 'text'  in search direction or -1 if pattern not found *)
+PROCEDURE GenericPos*(pattern: ARRAY OF CHAR; from : LONGINT; VAR string: ARRAY OF CHAR; ignoreCase, backwards : BOOLEAN): LONGINT;
+CONST 
+	q = 8204957;	(* prime number, {(d+1) * q <= MAX(LONGINT)} *)
+	d = 256;			(* number of different characters *)
+VAR ch, chp : CHAR; h1, h2, dM, i, j, patternLength, stringLength: LONGINT; found : BOOLEAN;
+BEGIN
+	patternLength := Length(pattern); stringLength := Length(string);
+
+	(* check whether the search pattern can be contained in the text regarding the search direction *)
+	IF backwards THEN
+		IF (patternLength > from + 1) THEN RETURN -1; END;
+	ELSE
+		IF (from + patternLength > stringLength) THEN RETURN -1; END;
+	END;
+
+	dM := 1; FOR i := 0 TO patternLength-2 DO dM := (d*dM) MOD q END;
+
+	(* calculate hash value for search pattern string *)
+	h1 := 0; FOR i := 0 TO patternLength-1 DO
+		IF backwards THEN
+			ch := pattern[patternLength-1-i];
+		ELSE
+			ch := pattern[i];
+		END;
+		IF ignoreCase THEN UpperCaseChar(ch); END;
+		h1 := (h1*d + ORD(ch)) MOD q;
+	END;
+	
+	(* calculate hash value for the first 'patternLength' characters of the text to be searched *)
+	h2 := 0; FOR i := 0 TO patternLength-1 DO 
+		IF backwards THEN
+			ch := string[from - i];
+		ELSE
+			ch := string[from + i];
+		END;
+		IF ignoreCase THEN UpperCaseChar(ch); END;
+		h2 := (h2*d + ORD(ch)) MOD q;
+	END;
+		
+	i := from; found := FALSE;
+	
+	IF (h1 = h2) THEN (* Hash values match, compare strings *)
+		j := 0; found := TRUE;
+		WHILE (j < patternLength) DO
+			ch := string[from + j];
+			chp := pattern[j];
+			IF ignoreCase THEN UpperCaseChar(ch); UpperCaseChar(chp); END;
+			IF (ch # chp) THEN found := FALSE; j := patternLength; END; (* hash values are equal, but strings are not *)
+			INC(j);
+		END;
+	END;
+
+	LOOP
+		(* check wether we're finished *)
+		IF found THEN EXIT; END;
+		IF backwards THEN
+			IF (i < patternLength) THEN EXIT; END;
+		ELSE
+			IF (i >= stringLength-patternLength) THEN EXIT; END;
+		END;
+
+		(* remove last character from hash value *)
+		ch := string[i];
+		IF ignoreCase THEN UpperCaseChar(ch); END;
+		h2 := (h2 + d*q - ORD(ch)*dM) MOD q;
+
+		(* add next character to hash value *)
+		IF backwards THEN
+			ch := string[i-patternLength];
+		ELSE
+			ch := string[i+patternLength];
+		END;
+		IF ignoreCase THEN UpperCaseChar(ch); END;
+		h2 := (h2*d + ORD(ch)) MOD q;
+		
+		IF backwards THEN DEC(i); ELSE INC(i); END;
+		
+		IF (h1 = h2) THEN (* verify *)
+			j := 0; found := TRUE;
+			WHILE (j < patternLength) DO
+				IF backwards THEN 
+					ch := string[i - patternLength + 1 + j]; 
+				ELSE
+					ch := string[i + j];
+				END;
+				chp := pattern[j];
+				IF ignoreCase THEN UpperCaseChar(ch); UpperCaseChar(chp); END;
+				IF (ch # chp) THEN found := FALSE; j := patternLength; END; (* hash values are equal, but strings are not *)
+				INC(j);
+			END
+		END;
+	END;
+	
+	IF found THEN
+		IF backwards THEN RETURN i - patternLength + 1;
+		ELSE RETURN i;
+		END;
+	ELSE 
+		RETURN -1;
+	END;
+END GenericPos;
 
 (** Simple pattern matching with support for "*" and "?" wildcards  - returns TRUE if name matches mask. Patent pending ;-) *)
 PROCEDURE Match*(mask, name: ARRAY OF CHAR): BOOLEAN;
@@ -257,19 +452,18 @@ BEGIN
 END Delete;
 
 (** inserts 'source' at position 'index' into 's' *)
-PROCEDURE Insert*(source: ARRAY OF CHAR; VAR s: ARRAY OF CHAR; index: LONGINT);
-VAR i, j, len: LONGINT;
+PROCEDURE Insert*(src: ARRAY OF CHAR; VAR dst: ARRAY OF CHAR; index: LONGINT);
+VAR i, j, slen, dlen: LONGINT;
 BEGIN
-	len := Length(source);
-	i := index;
-	WHILE (s[i] # 0X) DO
-		s[i+len] := s[i];
-		INC(i);
+	j := index; i := dlen - 1;
+	WHILE i >= j DO
+		dst[i + slen] := dst[i];
+		DEC(i);
 	END;
-	s[i] := 0X;
+	dst[dlen + slen] := 0X;
 	i := index; j := 0;
-	WHILE (i < len) DO
-		s[i] := source[j];
+	WHILE (j < slen) DO
+		dst[i] := src[j];
 		INC(i); INC(j)
 	END
 END Insert;
@@ -294,7 +488,7 @@ PROCEDURE TrimRight*(VAR string: ARRAY OF CHAR; c: CHAR);
 VAR i: LONGINT;
 BEGIN
 	i := Length(string)-1;
-	WHILE (i > 0) & (string[i] = c) DO DEC(i) END;
+	WHILE (i >= 0) & (string[i] = c) DO DEC(i) END;
 	string[i+1] := 0X
 END TrimRight;
 
@@ -305,6 +499,39 @@ BEGIN
 	TrimRight(string, c)
 END Trim;
 
+(** 
+ * Splits 'string' into multiple strings separated by 'separator'.
+ * Result properties: 
+ *	separator = 0X: 	LEN(StringArray) = 1
+ *	separator # 0X: 	LEN(StringArray) = 1 + <Number of occurences of 'ch' in 'string'>
+ *	StringArray[i] # NIL (0 <= i <= LEN(StringArray)-1)
+ *)
+PROCEDURE Split*(VAR string : ARRAY OF CHAR; separator : CHAR) : StringArray;
+VAR i, j, idx, len : LONGINT; result : StringArray; str : ARRAY LEN(string) OF CHAR; s : String;
+BEGIN
+	(* Determine the size of the resulting StringArray *)
+	i := 0; len := 1;
+	WHILE (i < LEN(string)) & (string[i] # 0X) DO 
+		IF string[i] = separator THEN INC(len); END; 
+		INC(i);
+	END;
+	NEW(result, len); idx := 0;
+	
+	i := 0; j := 0; str := ""; 
+	LOOP		
+		IF (string[i] # 0X) & (string[i] # separator) THEN
+			str[j] := string[i]; INC(j);
+		ELSE
+			str[j] := 0X;
+			NEW(s, j+1); COPY(str, s^); (* NewString *)
+			result[idx] := s; INC(idx);
+			IF string[i] =  0X THEN EXIT END;
+			str := ""; j := 0;
+		END;
+		INC(i); IF i >= LEN(string) THEN EXIT END;
+	END;
+	RETURN result;
+END Split;
 
 (** returns the corresponding lower-case letter for "A" <= ch <= "Z" *)
 PROCEDURE LOW*(ch: CHAR): CHAR;
@@ -324,6 +551,18 @@ BEGIN
 		INC(i)
 	END	
 END LowerCase;
+
+(** returns the corresponding upper-case letter for "a" <= ch <= "z" *)
+PROCEDURE UP*(ch : CHAR) : CHAR;
+BEGIN
+	IF ("a" <= ch) & (ch <= "z") THEN ch := CAP(ch); END;
+	RETURN ch;
+END UP;
+
+PROCEDURE UpperCaseChar*(VAR ch : CHAR);
+BEGIN
+	IF ("a" <= ch) & (ch <= "z") THEN ch := CAP(ch); END;
+END UpperCaseChar;
 
 (** converts s to upper-case letters *)
 PROCEDURE UpperCase*(VAR s: ARRAY OF CHAR);
@@ -453,6 +692,20 @@ BEGIN
 	END
 END HexStrToInt;
 
+(* converts a 16.16 fixpoint integer to float *)
+PROCEDURE FixpToFloat*(x: LONGINT): REAL;
+BEGIN
+	RETURN (x / 65536);
+END FixpToFloat;
+
+(* converts a float into a 16.16 fixpoint integer *)
+PROCEDURE FloatToFixp*(x: REAL): LONGINT;
+BEGIN
+	IF x > 65536 THEN x := 65536; RETURN 0;
+	ELSE RETURN ENTIER(x * (65536));
+	END;
+END FloatToFixp; 
+
 (** converts a real value to a string *)
 (* adopted from Strings.Mod *)
 PROCEDURE FloatToStr*(x: LONGREAL; n, f, D: LONGINT; VAR str: ARRAY OF CHAR);
@@ -544,7 +797,7 @@ BEGIN
 			INC(p);
 		END;
 	END;
-	IF (s[p] = "D") OR (s[p] = "E") THEN
+	IF (s[p] = "d") OR (s[p] = "D") OR (s[p] = "e") OR (s[p] = "E") THEN
 		INC(p); e := 0;
 		IF s[p] = "-" THEN negE := TRUE; INC(p) ELSE negE := FALSE END;
 		WHILE (s[p] = "0") DO INC(p) END;
@@ -722,6 +975,196 @@ BEGIN
 	COPY(str, s^);
 	RETURN s
 END NewString;
+
+(* Gets extension of the given name, returns file (without extension) and ext *)
+PROCEDURE GetExtension *(VAR name, file, ext: ARRAY OF CHAR);
+VAR i, j, k: LONGINT; ch: CHAR;
+BEGIN
+	i := 0; j := 0; k := 0;
+	WHILE name[i] # 0X DO
+		IF name[i] = "." THEN j := i+1; k := i; END;
+		INC(i)
+	END;
+	i := 0;
+	REPEAT
+		ch := name[j]; ext[i] := ch; INC(i); INC(j);
+	UNTIL ch = 0X;
+	i := 0;
+	WHILE (i < k) DO
+		ch := name[i]; file[i] := ch; INC(i);
+	END;
+	file[i] := 0X;
+END GetExtension;
+
+(* Returns a new string that is a concatenation of s1 and s2: s := s1 || s2 *)
+PROCEDURE ConcatToNew*(s1 : ARRAY OF CHAR; s2 : ARRAY OF CHAR) : String;
+VAR
+	s : String;
+BEGIN
+	NEW(s, Length(s1) + Length(s2) + 1);
+	Concat(s1, s2, s^);
+	RETURN s;
+END ConcatToNew;
+
+(* Tests if string s ends with the specified suffix *)
+PROCEDURE EndsWith*(suffix : ARRAY OF CHAR; VAR s : ARRAY OF CHAR) : BOOLEAN;
+BEGIN
+	RETURN StartsWith(suffix, Length(s)-Length(suffix), s);
+END EndsWith;
+
+(* Tests if two strings are equal *)
+(* This procedure makes sense, because "proc(..)^ = proc(..)^" is not supported by the compiler! *)
+PROCEDURE Equal*(s1, s2 : String) : BOOLEAN;
+BEGIN
+	ASSERT(s1 # NIL);
+	ASSERT(s2 # NIL);
+	RETURN s1^ = s2^;
+END Equal;
+
+(** Returns TRUE if the 0X-terminated string contains the character 'ch', FALSE otherwise. *)
+PROCEDURE ContainsChar*(VAR string : ARRAY OF CHAR; ch : CHAR; ignoreCase : BOOLEAN) : BOOLEAN;
+VAR char : CHAR; i : LONGINT;
+BEGIN
+	IF ignoreCase THEN UpperCaseChar(ch); END;
+	FOR i := 0 TO LEN(string)-1 DO
+		IF ignoreCase THEN char := UP(string[i]); ELSE char := string[i]; END;
+		IF (char = ch) THEN RETURN TRUE; END;
+		IF string[i] = 0X THEN RETURN FALSE; END;
+	END;
+	RETURN FALSE;
+END ContainsChar;
+
+(* Returns the index within string s of the first occurrence of the specified character *)
+PROCEDURE IndexOfByte2*(ch : CHAR; VAR s : ARRAY OF CHAR) : LONGINT;
+BEGIN
+	RETURN IndexOfByte(ch, 0, s);
+END IndexOfByte2;
+
+(* Returns the index within string s of the first occurrence of the specified character, starting the search at the specified index *)
+PROCEDURE IndexOfByte*(ch : CHAR; fromIndex : LONGINT; VAR s : ARRAY OF CHAR) : LONGINT;
+VAR
+	lenString, i : LONGINT;
+BEGIN
+	lenString := Length(s);
+	IF fromIndex < 0 THEN
+		fromIndex := 0;
+	ELSIF fromIndex >= lenString THEN
+		RETURN -1;
+	END;
+	FOR i := fromIndex TO lenString-1 DO
+		IF s[i] = ch THEN RETURN i; END;
+	END;
+	RETURN -1;
+END IndexOfByte;
+
+(* Returns the index within string s of the last occurrence of the specified character *)
+PROCEDURE LastIndexOfByte2*(ch : CHAR; VAR s : ARRAY OF CHAR) : LONGINT;
+BEGIN
+	RETURN LastIndexOfByte(ch, Length(s)-1, s);
+END LastIndexOfByte2;
+
+(* Returns the index within string s of the last occurrence of the specified character, searching backward starting at the specified index *)
+PROCEDURE LastIndexOfByte*(ch : CHAR; fromIndex : LONGINT; VAR s : ARRAY OF CHAR) : LONGINT;
+VAR
+	lenString, i : LONGINT;
+BEGIN
+	lenString := Length(s);
+	IF fromIndex >= lenString THEN
+		fromIndex := lenString - 1;
+	END;
+	FOR i := fromIndex TO 0 BY -1 DO
+		IF s[i] = ch THEN RETURN i; END;
+	END;
+	RETURN -1;
+END LastIndexOfByte;
+
+(* Returns a new string that is a copy of s in lower-case letters *)
+PROCEDURE LowerCaseInNew*(VAR s : ARRAY OF CHAR) : String;
+VAR
+	n : String;
+BEGIN
+	n := NewString(s);
+	LowerCase(n^);
+	RETURN n;
+END LowerCaseInNew;
+
+(* Tests if string s starts with the specified prefix *)
+PROCEDURE StartsWith2*(prefix : ARRAY OF CHAR; VAR s : ARRAY OF CHAR) : BOOLEAN;
+BEGIN
+	RETURN StartsWith(prefix, 0, s);
+END StartsWith2;
+
+(* Tests if string s starts with the specified prefix beginning a specified index *)
+PROCEDURE StartsWith*(prefix : ARRAY OF CHAR; toffset : LONGINT; VAR s : ARRAY OF CHAR) : BOOLEAN;
+VAR
+	lenString, lenPrefix, i : LONGINT;
+BEGIN
+	lenString := Length(s);
+	lenPrefix := Length(prefix);
+	IF (toffset < 0) OR (toffset > lenString - lenPrefix) THEN
+		RETURN FALSE;
+	END;
+	FOR i := 0 TO lenPrefix-1 DO
+		IF prefix[i] # s[toffset + i] THEN RETURN FALSE; END;
+	END;
+	RETURN TRUE;
+END StartsWith;
+
+(* Returns a new string that is a substring of string s *)
+PROCEDURE Substring2*(beginIndex : LONGINT; VAR s : ARRAY OF CHAR) : String;
+BEGIN
+	RETURN Substring(beginIndex, Length(s), s);
+END Substring2;
+
+(* Returns a new string that is a substring of string s *)
+(* s[endIndex-1] is the last character of the new string *)
+PROCEDURE Substring*(beginIndex : LONGINT; endIndex : LONGINT; VAR s : ARRAY OF CHAR) : String;
+VAR
+	lenString, lenNewString : LONGINT;
+	st : String;
+BEGIN
+	ASSERT(beginIndex >= 0);
+	lenString := Length(s);
+	ASSERT(endIndex <= lenString);
+	lenNewString := endIndex - beginIndex;
+	ASSERT(lenNewString >= 0);
+	NEW(st, lenNewString + 1);
+	Copy(s, beginIndex, lenNewString, st^);
+	RETURN st;
+END Substring;
+
+(* Omitts leading and trailing whitespace of string s *)
+PROCEDURE TrimWS*(VAR s : ARRAY OF CHAR);
+VAR
+	len, start, i : LONGINT;
+BEGIN
+	len := Length(s);
+	start := 0;
+	WHILE (start < len) & (ORD(s[start]) < 33) DO
+		INC(start);
+	END;
+	WHILE (start < len) & (ORD(s[len-1]) < 33) DO
+		DEC(len);
+	END;
+	IF start > 0 THEN
+		FOR i := 0 TO len - start - 1 DO
+			s[i] := s[start + i];
+		END;
+		s[i] := 0X;
+	ELSE
+		s[len] := 0X;
+	END;
+END TrimWS;
+
+(* Returns a new string that is a copy of s in upper-case letters *)
+PROCEDURE UpperCaseInNew*(VAR s : ARRAY OF CHAR) : String;
+VAR
+	n : String;
+BEGIN
+	n := NewString(s);
+	UpperCase(n^);
+	RETURN n;
+END UpperCaseInNew;
 
 BEGIN
 	Months[0] := "January"; Months[1] := "February"; Months[2] := "March"; Months[3] := "April"; Months[4] := "May";

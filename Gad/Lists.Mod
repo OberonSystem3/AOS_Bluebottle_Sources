@@ -15,6 +15,8 @@ MODULE Lists; (** portable *) (* jm 18.4.95 *)
 	18.4.94 - changed scrolling behaviour
 	15.5.95 - changed scrolling behaviour back
 	9.5.95 - changed copy over, now works even when focus ist alredy set (ps - 9.5.96)
+	18.5.05 - left mouse button support fof
+	11.8.06 - wheel support, fof 
 *)
 IMPORT Files, Fonts, Display, Display3, Printer, Printer3, Effects, Objects, Gadgets, Oberon, Input, Texts, 
 	Attributes, FileDir(*, Floppy := Diskette*);
@@ -770,7 +772,7 @@ VAR item, i: Item; Y, nY: INTEGER; keysum: SET; pos: LONGINT; redraw, scroll, sc
 	T: Texts.Text; beg, end, time: LONGINT;
 BEGIN
 	keysum := M.keys;
-	IF (M.keys = {1}) & F.scrollbar & (M.X > x + w - barw) THEN
+	IF ((M.keys = {1}) OR (Oberon.New & (keysum = {2}))) & F.scrollbar & (M.X > x + w - barw) THEN
 		pos := F.bar.pos;
 		TrackSlider(R, F.bar, x + w - barw, y, barw, h);
 		IF F.bar.pos # pos THEN Update(F) END;
@@ -852,6 +854,19 @@ BEGIN
 			END
 		END;
 		M.res := 0;
+(** fof >> *)
+	ELSIF M.keys= {31} THEN (* wheel down or up *) 
+		IF M.ch = 0C2X THEN (* down *) 
+			IF F.beg.next # NIL THEN 
+				F.beg := F.beg.next; INC(F.bar.pos);
+			END; 
+		ELSIF M.ch = 0C1X THEN (* up *) 
+			IF F.beg.prev # NIL THEN 
+				F.beg := F.beg.prev; DEC(F.bar.pos);
+			END; 
+		END;
+		Gadgets.Update(F); 
+(** << fof  *)
 	ELSE Gadgets.framehandle(F, M)
 	END
 END TrackList;

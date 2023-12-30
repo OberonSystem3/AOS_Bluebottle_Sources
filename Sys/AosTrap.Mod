@@ -15,10 +15,14 @@ CONST
 	Trace = FALSE;
 	TestTrap = TRUE;
 
-	Sep = "  "; SepLen = 2;
+	Sep = "  "; SepLen = 2;		
+	
+	(* Process termination halt codes *)	
+	halt* = AosActive.halt;
+	haltUnbreakable* = AosActive.haltUnbreakable;	
 
 TYPE
-	Variable* = RECORD adr, type, size, n, tdadr: LONGINT END;	(** variable descriptor *)
+	Variable* = RECORD adr-, type-, size-, n-, tdadr-: LONGINT END;	(** variable descriptor *)
 
 VAR
 	trapState: ARRAY AosBoot.MaxCPU OF LONGINT;	(* indexed by AosBoot.ID() *)
@@ -91,6 +95,7 @@ BEGIN
 	RETURN proc
 END FindProc;
 
+
 (* Write the specified procedure name and returns parameters for use with NextVar and Variables. *)
 
 PROCEDURE WriteProc0(w: AosIO.Writer; mod: AosModules.Module; pc, fp: LONGINT; VAR refs: AosModules.Bytes;
@@ -119,7 +124,7 @@ BEGIN
 				WHILE ch # 0X DO w.Char(ch); ch := refs[refpos]; INC(refpos) END
 			END
 		END;
-		w.String(" pc="); w.Int(pc, 1)
+		w.String(" pc="); w.Int(pc, 1);
 	END
 END WriteProc0;
 
@@ -328,7 +333,7 @@ END ModuleState;
 
 (* Display call trackback. *)
 
-PROCEDURE StackTraceBack(w: AosIO.Writer; eip, ebp: LONGINT; long, overflow: BOOLEAN);
+PROCEDURE StackTraceBack*(w: AosIO.Writer; eip, ebp: LONGINT; long, overflow: BOOLEAN);
 VAR count, refpos, base: LONGINT; m: AosModules.Module; refs: AosModules.Bytes;
 BEGIN
 	count := 0;	(* frame count *)
@@ -339,7 +344,7 @@ BEGIN
 			IF long & (~overflow OR (count > 0)) THEN	(* show variables *)
 				IF refpos # -1 THEN Variables(w, refs, refpos, base) END;
 				IF (m # NIL) & (base # m.sb) & (count = 0) THEN ModuleState(w, m) END
-			END;
+			END;			
 			IF ebp # 0 THEN (* if ebp is 0 in first frame *)
 				SYSTEM.GET(ebp+4, eip);	(* return addr from stack *)
 				SYSTEM.GET(ebp, ebp);	(* follow dynamic link *)
@@ -513,21 +518,238 @@ BEGIN
 	trapState[id] := 0
 END Show;
 
-(* General exception handler. *)
+PROCEDURE SetLastExceptionState(ex: AosInterrupts.ExceptionState);
+VAR id: LONGINT;
+BEGIN
+	id := AosLocks.AcquirePreemption();
+	AosActive.running[id].exp := ex;
+	AosLocks.ReleasePreemption();
+END SetLastExceptionState;
 
+PROCEDURE GetLastExceptionState*(): AosInterrupts.ExceptionState;
+VAR 
+	id: LONGINT;
+	ex: AosInterrupts.ExceptionState;
+BEGIN
+	id := AosLocks.AcquirePreemption();
+	ex := AosActive.running[id].exp;
+	AosLocks.ReleasePreemption();
+	RETURN ex;
+END GetLastExceptionState;
+
+(**  Handles an exception. Interrupts are on during this procedure. *)
+PROCEDURE HandleException(VAR int: AosInterrupts.State; VAR exc: AosInterrupts.ExceptionState; VAR handled: BOOLEAN);
+VAR
+	fp, sp, pc, handler: LONGINT;
+BEGIN	
+	fp := int.EBP; sp := int.ESP; pc := int.EIP;		
+	handler := AosModules.GetExceptionHandler(pc);
+ 	IF handler # -1 THEN (* Handler in the current PAF *)
+		int.EIP := handler; handled := TRUE;
+		SetTrapVariable(pc, fp); SetLastExceptionState(exc)
+	ELSE			
+		WHILE (fp # 0) & (handler = -1) DO				
+			SYSTEM.GET(fp + 4, pc);
+			pc := pc - 1; (*  CALL instruction, machine dependant!!! *)			
+			handler := AosModules.GetExceptionHandler(pc);				
+			sp :=  fp; (* Save the old framepointer into the stack pointer *)
+			SYSTEM.GET(fp, fp) (* Unwind PAF *)
+		END;	
+		IF handler = -1 THEN 
+			handled := FALSE;
+		ELSE		
+			int.EIP := handler; int.EBP := fp; int.ESP := sp;	
+			SetTrapVariable(pc, fp); SetLastExceptionState(exc);
+			handled := TRUE
+		END
+	END
+END HandleException;
+
+(* 	A simple introspection method, must be adapted if there are any changes to the
+	refs section in a module. *)
+PROCEDURE GetVariableAdr*(pc, fp: LONGINT;  varname: ARRAY OF CHAR ): LONGINT;
+VAR 
+	m: AosModules.Module;
+	v: Variable;
+	adr, pos, base: LONGINT;	
+	name: ARRAY 256 OF CHAR;
+	ch: CHAR;
+BEGIN
+	pos := -1;
+	m := AosModules.ThisModuleByAdr(pc);
+	IF m # NIL THEN			
+		pos := FindProc(m.refs, pc - SYSTEM.ADR(m.code[0]));			
+	
+		IF pos # -1 THEN
+					
+			ch := m.refs[pos]; INC(pos);
+			(* for variables *)	
+			IF ch = "$" THEN 
+				base := m.sb;
+			ELSE 
+				base := fp;
+			END;	
+
+			 (* Read the name *)			
+			WHILE ch # 0X DO ch := m.refs[pos]; INC(pos) END;
+						
+			NextVar(m.refs, pos, base, name, v);		
+
+			WHILE name[0] # 0X DO
+				IF name = varname THEN
+					RETURN v.adr;
+				ELSE
+					NextVar(m.refs, pos, base, name, v);		
+				END							
+			END	
+		END
+	END;		
+	
+	RETURN -1;
+
+END GetVariableAdr;
+
+(* Returns the name of the procedure the pc is in. Searchs in m.refs *)
+TYPE Str128 = ARRAY 128 OF CHAR;
+PROCEDURE GetProcedureName*(pc: LONGINT): Str128;
+VAR
+	methadr, i: LONGINT;
+	ch: CHAR;
+	name: Str128;
+	m: AosModules.Module;
+BEGIN
+	m := AosModules.ThisModuleByAdr(pc);
+
+	IF m # NIL THEN
+
+		DEC(pc, SYSTEM.ADR(m.code[0]));
+
+		methadr := FindProc(m.refs, pc);
+		IF methadr # -1 THEN
+			i := 0;
+			ch := m.refs[methadr]; INC(methadr);				
+			WHILE ch # 0X DO 
+				name[i] := ch; 
+				ch := m.refs[methadr]; 
+				INC(methadr);
+				INC(i);
+			END;			
+		END;		
+		name[i] := 0X;	
+	ELSE
+		name := "Unkown"; (* Better: name := "" *)
+	END;
+	
+	RETURN name;
+END GetProcedureName;
+
+PROCEDURE SetTrapVariable(pc, fp: LONGINT);
+VAR
+	varadr: LONGINT;
+BEGIN
+	varadr := GetVariableAdr(pc, fp, "trap"); 
+	IF varadr # -1 THEN	
+		SYSTEM.PUT8(varadr, 1)
+	END
+END SetTrapVariable;
+
+(* Unbreakable stack trace back with regard to every FINALLY on the way *)
+PROCEDURE Unbreakable(p: AosActive.Process; VAR int: AosInterrupts.State; VAR exc: AosInterrupts.ExceptionState; VAR handled: BOOLEAN);
+VAR
+	ebp, ebpSave, pc, handler, varoff, ebpBottom: LONGINT;
+	hasFinally : BOOLEAN;	
+BEGIN			
+	ebp := int.EBP;
+	pc := int.EIP;		
+	hasFinally := FALSE;	
+	
+	handler := AosModules.GetExceptionHandler(pc);
+	
+	(* Handler in the current PAF *)
+ 	IF handler # -1 THEN
+		int.EIP := handler;		
+		hasFinally := TRUE;
+		SetTrapVariable(pc, ebp);
+	END;
+	
+	(* The first waypoint is the ebp of the top PAF *)
+	ebpSave := ebp;
+	
+	WHILE (ebp # 0) DO
+		(* Did we reach the last PAF? *)
+		SYSTEM.GET(ebp, pc);
+		IF (pc = 0) THEN			
+			ebpBottom := ebp; (* Save the FP of the last PAF *)		
+		END;
+
+		(* Get the return pc *)
+		SYSTEM.GET(ebp + 4, pc);
+
+		handler := AosModules.GetExceptionHandler(pc);
+		
+		(* Save the last framepointer as stackpointer *)
+		IF ~hasFinally THEN 
+			int.ESP :=  ebp;
+		END;		
+
+		SYSTEM.GET(ebp, ebp);
+		
+		(* Here ebp may be 0. *)
+		
+		IF (handler # -1) & (ebp # 0)  THEN (* If AosActive.Terminate has a FINALLY this doesn't work !!! *)
+			IF hasFinally THEN
+				(* Connect Finally to Finally *)
+				SYSTEM.PUT(ebpSave + 4, handler); (* Adapt the return pc *)
+				SYSTEM.PUT(ebpSave, ebp); (* Adapt the dynamic link *)
+				ebpSave := ebp;
+			ELSE
+				int.EIP := handler;
+				int.EBP := ebp;
+				ebpSave := ebp;				
+				hasFinally := TRUE;
+			END;					
+			SetTrapVariable(pc, ebp)
+		END
+	END;
+	
+	(* Now ebp =  0, bottom of the stack, so link the last known return PC to the Termination *)
+	IF ~hasFinally THEN
+		SYSTEM.GET(ebpBottom + 4, pc); (* PC of the Terminate *)
+		int.EIP := pc;	
+		int.EBP := ebpBottom;	
+	ELSIF ebpSave # ebpBottom THEN
+		SYSTEM.GET(ebpBottom + 4, pc); (* PC of the Terminate *)
+		SYSTEM.PUT(ebpSave + 4, pc);
+		SetLastExceptionState(exc)
+	END;		
+	
+	handled := TRUE; (* If FALSE the process could be restarted, may be this is the meaning? *)	
+	
+END Unbreakable;
+
+(* General exception handler. *)
 PROCEDURE Exception(VAR int: AosInterrupts.State);
-VAR t: AosActive.Process; exc: AosInterrupts.ExceptionState; user, trace, handled: BOOLEAN;
-BEGIN	(* interrupts off *)
+VAR t: AosActive.Process; exc: AosInterrupts.ExceptionState; user, traceTrap, handled: BOOLEAN; sp: LONGINT;
+BEGIN	(* interrupts off *)	
 	t := AosActive.running[AosBoot.ID()];	(* t is running process *)
-		(* the following call reenables interrupts, and breaks all locks!  Time slicing should be disabled for this region, even though interrupts are enabled, unless the context switch code can switch back to kernel mode from a user mode process.  Currently AosActive.Timeslice ignores time slice interrupts that happen in kernel mode. *)
+	handled := FALSE; 	
 	AosInterrupts.GetExceptionState(int, exc);
 	user := (int.CS MOD 4 > AosInterrupts.KernelLevel);
-	trace := (exc.locks = {}) & (exc.halt >= MAX(INTEGER)) & (exc.halt <= MAX(INTEGER)+1);
-	handled := FALSE;
-	IF (t.handler # NIL) & ~trace & user THEN t.handler(t, int, exc, handled) END;
-	IF ~handled THEN
-		Show(t, int, exc, exc.halt # MAX(INTEGER)+1);
-		IF ~trace THEN	(* trap *)
+	traceTrap := (exc.locks = {}) & (exc.halt >= MAX(INTEGER)) & (exc.halt <= MAX(INTEGER)+1);
+
+	Show(t, int, exc, exc.halt # MAX(INTEGER)+1);	(* Always show the trap info!*)
+		
+	IF exc.halt = haltUnbreakable THEN 
+		Unbreakable(t, int, exc, handled)
+	ELSIF ~ traceTrap THEN 
+		HandleException( int, exc, handled) 
+	END;				
+			
+	IF ~handled THEN 
+		(* Taken from AosInterrupts to allow the FINALLY in the kernel *)
+		exc.locks := AosLocks.BreakAll();
+		SYSTEM.STI();
+		IF ~traceTrap THEN	(* trap *)
 			IF user THEN	(* return to outer level *)
 				IF Trace THEN
 					AosOut.Enter;
@@ -537,13 +759,18 @@ BEGIN	(* interrupts off *)
 				END;
 				INCL(int.EFLAGS, AosInterrupts.IFBit);	(* enable interrupts *)
 				int.EBP := 0; int.ESP := t.restartSP;	(* reset stack *)
-				int.EIP := t.restartPC	(* restart object body or terminate *)
+				int.EIP := t.restartPC;	(* restart object body or terminate *)
 			ELSE	(* trap was in kernel (interrupt handler) *)	(* fixme: recover from trap in stack traceback *)
 				AosOut.Enter;  AosOut.String("Kernel halt");  AosOut.Exit;
 				AosBoot.Shutdown(FALSE)
-			END
-		ELSE	(* continue after HALT *)
-		END
+			END		
+		END			
+	END;
+	
+	IF AosActive.PleaseHalt IN t.flags THEN 
+		EXCL(t.flags, AosActive.PleaseHalt);
+		IF AosActive.Unbreakable IN t.flags THEN EXCL(t.flags, AosActive.Unbreakable) END;
+		IF AosActive.SelfTermination IN t.flags THEN EXCL(t.flags, AosActive.SelfTermination) END
 	END
 END Exception;
 

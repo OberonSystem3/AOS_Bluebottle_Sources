@@ -1,68 +1,102 @@
 MODULE WMPicView;	(** AUTHOR "tf"; PURPOSE "Open a window with a picture..."; *)
-IMPORT
-	AosIO, AosCommands, Raster, WM := WMWindowManager, Util := TFClasses, 
-	Messages := WMMessages, Rectangles := WMRectangles, AosModules, AosOut;
-	
-TYPE PW*= OBJECT(WM.BufferWindow)
 
-			PROCEDURE &Init(w, h:LONGINT; alpha:BOOLEAN);
-			BEGIN
-				Init^(w, h, alpha);
-				WM.DefaultAddWindow(SELF)
-			END Init;
-			
-			PROCEDURE Close();
-			BEGIN
-				Close^;
-				openList.Remove(SELF); 
-			END Close;
-		END PW;
-		
-VAR openList : Util.List;		
-		
-PROCEDURE Open*(par: PTR): PTR;
-VAR s: AosCommands.Parameters;
-		name : ARRAY 100 OF CHAR;
-		sr : AosIO.StringReader;
-		done : BOOLEAN;
-		
-		img : Raster.Image;
-		mode : Raster.Mode;
-		pw : PW;
+IMPORT
+	AosCommands, AosIO, Utilities, AosCodecs, AosOut, Raster, AosFS,
+	WM := WMWindowManager;
+
+PROCEDURE Open*(par: PTR): PTR; (** filename ~ *)
+VAR fn, name : AosFS.FileName;
+	pw : WM.BufferWindow;
+	res, w, h, x : LONGINT;
+	dec : AosCodecs.ImageDecoder;
+	rdr : AosIO.Reader;
+	ext : ARRAY 16 OF CHAR;
+	sr : AosIO.StringReader;
 BEGIN
-	s := par(AosCommands.Parameters);
-	NEW(sr, LEN(s.str^)); sr.Set(s.str^);
-	sr.String(name);
-	
-	NEW(img); Raster.Load(img, name, done);
-	IF done THEN
-		NEW(pw, img.width, img.height, TRUE);
-		pw.SetTitle(WM.NewString(name));
-		Raster.InitMode(mode, Raster.srcCopy);
-		Raster.Copy(img, pw.img, 0, 0, img.width, img.height, 0, 0, mode);
-		pw.Invalidate(Rectangles.MakeRect(0, 0, img.width, img.height));
+	AosCommands.PosPar(par, sr);
+	AosCommands.GetTok(sr, fn);
+	Utilities.Trim(fn, '"');
+	Utilities.GetExtension(fn, name, ext);
+	Utilities.UpperCase(ext);
+	dec := AosCodecs.GetImageDecoder(ext);
+	IF dec = NIL THEN
+		AosOut.String("WMPicView: No decoder found for "); AosOut.String(ext); AosOut.Ln;
+		RETURN NIL
+	END;
+	rdr := AosCodecs.OpenInputStream(fn);
+	IF rdr # NIL THEN
+		dec.Open(rdr, res);
+		IF res = 0 THEN
+			dec.GetImageInfo(w, h, x, x);
+			NEW(pw, w, h, TRUE);
+			dec.Render(pw.img);
+			WM.DefaultAddWindow(pw);
+		ELSE
+			AosOut.String("WMPicView: Could not open decoder for file "); AosOut.String(fn); AosOut.Ln;
+		END;
+	ELSE
+		AosOut.String("WMPicView: Could not open inputstream for file "); AosOut.String(fn); AosOut.Ln;
 	END;
 	RETURN NIL
 END Open;
 
-PROCEDURE Cleanup;
-VAR p : PTR; m : Messages.Message; has : BOOLEAN;
+PROCEDURE Convert*(par: PTR): PTR;
+VAR fni, fno,
+	inName, outName : AosFS.FileName;
+	res : LONGINT;
+	dec : AosCodecs.ImageDecoder;
+	enc : AosCodecs.ImageEncoder;
+	img : Raster.Image;
+	rdr : AosIO.Reader;
+	outX, inX : ARRAY 16 OF CHAR;
+	f : AosFS.File;
+	w : AosFS.Writer;
+	sr : AosIO.StringReader;
 BEGIN
-	m.msgType := Messages.MsgClose;
-	REPEAT
-		has := openList.GetCount() > 0;
-		IF has THEN 
-			p := openList.GetItem(0); p(WM.Window).manager.Remove(p(WM.Window));
-			openList.Remove(p)
-		END	
-	UNTIL ~has;
-END Cleanup;
+	AosCommands.PosPar(par, sr);
+	sr.String(fni);
+	Utilities.GetExtension(fni, inName, inX);
+	Utilities.UpperCase(inX);
 
-BEGIN
-	NEW(openList);
-	AosModules.InstallTermHandler(Cleanup)
+	AosCommands.GetTok(sr, fno);
+	Utilities.GetExtension(fno, outName, outX);
+	Utilities.UpperCase(outX);
+
+	dec := AosCodecs.GetImageDecoder(inX);
+	IF dec = NIL THEN
+		AosOut.String("No decoder found for "); AosOut.String(inX); AosOut.Ln;
+		RETURN NIL
+	END;
+
+	enc := AosCodecs.GetImageEncoder(outX);
+	IF enc = NIL THEN
+		AosOut.String("No encoder found for "); AosOut.String(outX); AosOut.Ln;
+		RETURN NIL
+	END;
+
+	rdr := AosCodecs.OpenInputStream(fni);
+	IF rdr # NIL THEN
+		dec.Open(rdr, res);
+		IF res = 0 THEN
+			dec.GetNativeImage(img);
+
+			f := AosFS.New(fno);
+			AosFS.OpenWriter(w, f, 0);
+			enc.Open(w);
+			enc.WriteImage(img, res);
+			IF res = 0 THEN
+				AosFS.Register(f);
+				AosOut.String("Done");
+			ELSE
+				AosOut.String("Not converted");
+			END
+		END
+	END;
+	RETURN NIL
+END Convert;
+
 END WMPicView.
 
-
-S.Free WMPicView~
-WMPicView.Open BluebottlePic0.png ~
+S.Free WMPicView ~
+WMPicView.Open  	errorpos.png ~
+WMPicView.Convert BluebottlePic0.png temp.gif ~

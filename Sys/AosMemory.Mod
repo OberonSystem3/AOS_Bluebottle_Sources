@@ -1,11 +1,11 @@
 (* Aos, Copyright 2001, Pieter Muller, ETH Zurich *)
 
- MODULE AosMemory; (** AUTHOR "pjm"; PURPOSE "Virtual address space management"; *)
+MODULE AosMemory; (** AUTHOR "pjm"; PURPOSE "Virtual address space management"; *)
 
 IMPORT SYSTEM, AosBoot, AosLocks, AosOut;
 
 CONST
-	Stats = TRUE;	(* maintain statistical counters *)
+	Stats* = TRUE;	(* maintain statistical counters *)
 	Trace = FALSE;	(* write out verbose trace info *)
 	TraceStack = FALSE;	(* write out stack trace info *)
 	
@@ -146,10 +146,10 @@ VAR
 	freeStack: ARRAY (MaxUserStacks+31) DIV 32 OF SET;	(* free stack bitmap *)
 	freeStackIndex: LONGINT;	(* current position in bitmap (rotates) *)
 	
-	Nbigskips: LONGINT;	(* number of times a stack was extended leaving a hole *)
-	Nfilled: LONGINT;	(* number of times a "hole" in a stack was filled *)
-	NnewStacks, NnewStackLoops, NnewStackInnerLoops, NdisposeStacks, 
-	NlostPages, NreservePagesUsed, NmaxUserStacks: LONGINT;
+	Nbigskips-: LONGINT;	(* number of times a stack was extended leaving a hole *)
+	Nfilled-: LONGINT;	(* number of times a "hole" in a stack was filled *)
+	NnewStacks-, NnewStackLoops-, NnewStackInnerLoops-, NdisposeStacks-, 
+	NlostPages-, NreservePagesUsed-, NmaxUserStacks-: LONGINT;
 	
 (* Load global descriptor table *)
 
@@ -561,10 +561,22 @@ END NewStack;
 PROCEDURE -GetProcessPtr*(): PTR;
 CONST Mask = -MaxUserStackSize; Ofs = MaxUserStackSize-4;
 CODE {SYSTEM.i386}
+	POP EAX
 	MOV EAX, Mask
 	AND EAX, ESP
 	MOV EAX, Ofs[EAX]
 END GetProcessPtr;
+
+(** True iff current process works on a kernel stack *)
+
+PROCEDURE WorkingOnKernelStack*(): BOOLEAN;
+VAR id, esp: LONGINT;
+BEGIN
+	ASSERT(KernelStackSize # MaxUserStackSize - UserStackGuardSize); (* detection does only work with this assumption *)
+	SYSTEM.GETREG(SYSTEM.ESP, esp);
+	id := AosBoot.ID(); 
+	RETURN (esp >= proc[id].stack.low) & (esp <= proc[id].stack.high)
+END WorkingOnKernelStack;
 
 (** Deallocate a stack.  Current thread should not dispose its own stack.  Uses privileged instructions. *)
 
@@ -603,6 +615,8 @@ END ValidStack;
 
 (** Get user stack pointer. *)
 
+(* ug: not used *)
+(*
 PROCEDURE GetUserStack*(VAR userSP: LONGINT);
 VAR esp0, ss: LONGINT;
 BEGIN
@@ -621,6 +635,7 @@ BEGIN
 		END
 	END
 END GetUserStack;
+*)
 
 (** Update the stack snapshot of the current processor.  (for AosProcessors) *)
 

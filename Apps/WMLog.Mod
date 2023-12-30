@@ -1,43 +1,43 @@
 MODULE WMLog;	(** AUTHOR "TF"; PURPOSE "Display the kernel log"; *)
 
 IMPORT
-	SYSTEM, AosOut, AosBeep, Texts := AosTexts, AosKernel, AosModules, UTF8Strings;
+	SYSTEM, AosOut, AosIO, AosTexts, AosTextUtilities, AosKernel, AosModules;
 
 CONST
-	Width = 700;
-	Height = 800;
 	BufSize = 8192 * 16; (* Kernel buffer size *)
-	MaxLogLength = 50000; (* keep MaxLogLength characters in the log *)
 	UpdateInterval = 200;	(* ms *)
 	LocalBuf = 4096 * 2;
 
-VAR buf: POINTER TO ARRAY OF CHAR;
-	kernelLog- : Texts.UnicodeText;
-	
+VAR buf : POINTER TO ARRAY OF CHAR;
+	kernelLog- : AosTexts.Text;
+
 TYPE
 	(* periodically poll the kernel log buffer *)
 	Logger = OBJECT
 	VAR  
 		timer : AosKernel.Timer; 
-		alive, dead : BOOLEAN; 
-		buf: ARRAY LocalBuf OF CHAR;
-		bufPos, ucspos : LONGINT;
-		char : Texts.Char32;
-		ucs32buf : ARRAY 256 OF Texts.Char32;
-		
+		alive, dead, added : BOOLEAN; 
+		buf : ARRAY LocalBuf OF CHAR;
+		bufPos : LONGINT;
+		ch : CHAR;
+		tw : AosTextUtilities.TextWriter;
+		w : AosIO.Writer;
+
 		PROCEDURE &Open;
 		BEGIN
 			dead := FALSE; alive := TRUE;
-			NEW(timer)
+			NEW(timer);
+			NEW(tw, kernelLog);
+			w := tw.GetWriter()
 		END Open;
-		
+
 		PROCEDURE Close;
 		BEGIN {EXCLUSIVE}
 			AosOut.CloseBuffer;
 			alive := FALSE; timer.Wakeup;
-			AWAIT(dead);
+			AWAIT(dead)
 		END Close;
-		
+
 		PROCEDURE Get() : CHAR;
 		VAR res : CHAR;
 		BEGIN
@@ -49,47 +49,34 @@ TYPE
 			INC(bufPos);
 			RETURN res
 		END Get;
-		
-		PROCEDURE GetUTF8Char(VAR u : Texts.Char32) : BOOLEAN;
-		VAR ch : ARRAY 8 OF CHAR; i : LONGINT;
-		BEGIN
-			ch[0] := Get();
-			FOR i := 1 TO ORD(UTF8Strings.CodeLength[ORD(ch[0])]) - 1 DO ch[i] := Get() END;
-			i := 0;
-			RETURN UTF8Strings.DecodeChar(ch, i, u)
-		END GetUTF8Char;
-		
+
 	BEGIN {ACTIVE}
+		(* pre loading the fonts so traps can be displayed even when the disk is causing the trap *)
+		tw.SetFontName("Courier"); w.String("Log started"); 
+		tw.SetFontName("Oberon"); w.Ln;
 		WHILE alive DO
-			ucspos := 0; bufPos := 0;
+			bufPos := 0; added := FALSE;
 			LOOP
-				IF GetUTF8Char(char) THEN END;	(* 0X (end), 0DX (CR), 0AX (LF), 0EX (FixedFont), 0FX (NormalFont) *)
-				IF (char = 0) OR ~alive THEN EXIT END;
-				ucs32buf[ucspos] := char; INC(ucspos);
-				IF ucspos = 255 THEN
-					ucs32buf[ucspos] := 0;
-					kernelLog.AcquireWrite;
-					kernelLog.InsertUCS32(kernelLog.GetLength(), ucs32buf);
-					kernelLog.ReleaseWrite;
-					ucspos := 0
-				END;	
+				ch := Get();
+				IF ch # 0X THEN 
+					IF ch = 0EX THEN tw.SetFontName("Courier"); tw.SetFontColor(0800000FFH)
+					ELSIF ch = 0FX THEN tw.SetFontName("Oberon"); tw.SetFontColor(0FFH)
+					ELSE w.Char(ch); added := TRUE;
+					END;
+				END;	(* 0X (end), 0DX (CR), 0AX (LF), 0EX (FixedFont), 0FX (NormalFont) *)
+				IF (ch = 0X) OR ~alive THEN EXIT END;
 			END;
-			ucs32buf[ucspos] := 0;
-			IF ucs32buf[0] # 0 THEN
-				kernelLog.AcquireWrite;
-				kernelLog.InsertUCS32(kernelLog.GetLength(), ucs32buf);
-				kernelLog.ReleaseWrite 
-			END;
+			IF added THEN w.Update END;
 			timer.Sleep(UpdateInterval)
 		END;
-		BEGIN{EXCLUSIVE} dead := TRUE END;
+		BEGIN {EXCLUSIVE} dead := TRUE END;
 		logger := NIL
 	END Logger;
 
 VAR logger : Logger;
 
 PROCEDURE Start*(par : PTR) : PTR;
-VAR mod: AosModules.Module; 
+VAR mod : AosModules.Module; 
 	kernelLockOberon, kernelUnlockOberon, systemStopLog : AosModules.CommandProc;
 BEGIN {EXCLUSIVE}
 	IF logger # NIL THEN AosOut.Enter; AosOut.String("Logger already running! "); AosOut.Exit; RETURN NIL END;
@@ -137,10 +124,11 @@ BEGIN
 END Cleanup;
 
 BEGIN
-	IF Start(NIL) = NIL THEN END;
 	NEW(kernelLog);
+	IF Start(NIL) = NIL THEN END;
 	AosModules.InstallTermHandler(Cleanup)
 END WMLog.
 
-
+WMLog.Start ~
+WMLog.Stop ~
 S.Free LogWindow WMLog ~

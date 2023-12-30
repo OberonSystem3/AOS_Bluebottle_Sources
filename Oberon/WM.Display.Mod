@@ -588,7 +588,7 @@ BEGIN
 END SetMode;
 
 (** Display a picture.  Used internally by Pictures module only. *)
-PROCEDURE DisplayBlock*(adr, dx, dy, w, h, sx, sy, mode: LONGINT);
+PROCEDURE DisplayBlock*(adr, dx, dy, w, h, sx, sy, mode: LONGINT; VAR palette: ARRAY OF LONGINT (* fof *));
 VAR pw, pd, src, dst, rdx, tdy, col: LONGINT; ch, prev, prevmap: CHAR;
 BEGIN
 	rdx := sx+w-1;  tdy := sy+h-1;	(* (sx,sy) bottom left & (rdx,tdy) top right *)
@@ -621,10 +621,12 @@ BEGIN
 						FOR tdy := 0 TO h-1 DO
 							FOR rdx := 0 TO w-1 DO
 								SYSTEM.GET(src, ch); INC(src); col := palette[ORD(ch)];
-								SYSTEM.PUT(dst, SHORT(SYSTEM.VAL(LONGINT, 
+								SYSTEM.PUT(dst, SHORT(  SYSTEM.VAL(LONGINT, 
 										SYSTEM.VAL(SET, ASH(col, 15-23)) * {11..15} +
 										SYSTEM.VAL(SET, ASH(col, 10-15)) * {5..10} +
-										SYSTEM.VAL(SET, ASH(col, 4-7)) * {0..4})));
+										SYSTEM.VAL(SET, ASH(col, 4-7)) * {0..4}
+										))) ;
+										
 								INC(dst, 2)
 							END;
 							INC(src, -w-pw)

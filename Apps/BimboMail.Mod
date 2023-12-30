@@ -1,12 +1,14 @@
 MODULE BimboMail; (** AUTHOR "TF"; PURPOSE "Simple Mail Reader"; *)
 
 IMPORT
-	AosOut, AosModules, AosCommands, AosIO, AosFS,
+	AosModules,  WMGrids, WMStringGrids, MailStorage, WMGraphics,
 	WMMessages, WMStandardComponents, WMComponents, 
-	WMTextView, WMEditors, Utilities, AosTextUtilities, AosTexts, 
-	WMWindowManager, WMGrids, WMStringGrids, MailStorage, WMGraphics;
+	WMEditors, Utilities, AosTextUtilities, AosTexts, 
+	WM := WMWindowManager;
 
-CONST TempFilename = "BimboMail.Temp";
+CONST
+	TempFilename = "BimboMail.Temp";
+
 TYPE
 	KillerMsg = OBJECT
 	END KillerMsg; 
@@ -15,7 +17,6 @@ TYPE
 	VAR currentMailbox : MailStorage.Storage;
 		messageList : WMStringGrids.StringGrid;
 		messageText : WMEditors.Editor;
-		colWidths : WMGrids.Spacings;
 		
 		PROCEDURE CreateForm(): WMComponents.VisualComponent;
 		VAR
@@ -23,7 +24,6 @@ TYPE
 			toolbar, mailboxSelection, mailContentPanel : WMStandardComponents.Panel;
 			mailboxEntries : WMStringGrids.StringGrid;
 			mailText : WMEditors.Editor;
-			colWidths : WMGrids.Spacings;
 			vResizer : WMStandardComponents.Resizer;
 		BEGIN
 			NEW(panel); panel.bounds.SetExtents(800, 700); panel.fillColor.Set(0FFFFFFFFH); panel.takesFocus.Set(TRUE);
@@ -53,7 +53,7 @@ TYPE
 			mailText.readOnly.Set(TRUE);
 			RETURN panel
 		END CreateForm;
-		
+
 		PROCEDURE SetMailbox(mb : MailStorage.Storage);
 		VAR i : LONGINT;
 			hFrom, hTo, hSubject, hDate : ARRAY 128 OF CHAR;
@@ -79,6 +79,7 @@ TYPE
 		PROCEDURE &New();
 		VAR vc : WMComponents.VisualComponent;
 			mb : MailStorage.Storage;
+			colWidths : WMGrids.Spacings;
 			i : LONGINT;
 			str : ARRAY 32 OF CHAR;
 		BEGIN
@@ -87,8 +88,8 @@ TYPE
 			
 			Init(vc.bounds.GetWidth(), vc.bounds.GetHeight(), FALSE);
 			SetContent(vc);
-			manager := WMWindowManager.GetDefaultManager();
-			manager.Add(100, 100, SELF, {WMWindowManager.FlagFrame});
+			manager := WM.GetDefaultManager();
+			manager.Add(100, 100, SELF, {WM.FlagFrame});
 			SetTitle(Utilities.NewString("Bimbo Mail"));
 			
 			messageList.fixedRows.Set(1);
@@ -118,17 +119,17 @@ TYPE
 		PROCEDURE GetTitleStr(col: LONGINT; VAR x : ARRAY OF CHAR);
 		BEGIN
 			CASE col OF
-				|0 : COPY("From", x)
-				|1 : COPY("Subject", x)
-				|2 : COPY("Date", x)
+				| 0 : COPY("From", x)
+				| 1 : COPY("Subject", x)
+				| 2 : COPY("Date", x)
 			ELSE COPY("", x);
 			END
 		END GetTitleStr;
 		
 		PROCEDURE Close;
 		BEGIN
-			DecCount;
-			Close^
+			Close^;
+			DecCount
 		END Close;
 		
 		PROCEDURE Handle(VAR x: WMMessages.Message);
@@ -196,57 +197,48 @@ TYPE
 				END
 			END
 		END MessageClick;
+
 	END Window;
-	
+
 VAR
 	nofWindows : LONGINT;
 	
 PROCEDURE Open*(par : ANY) : ANY;
-VAR inst : Window;
+VAR winstance : Window;
 BEGIN
-	NEW(inst);
+	NEW(winstance);
 	RETURN NIL
 END Open;
 
 PROCEDURE IncCount;
 BEGIN {EXCLUSIVE}
-	INC(nofWindows);
+	INC(nofWindows)
 END IncCount;		
 
 PROCEDURE DecCount;
 BEGIN {EXCLUSIVE}
-	DEC(nofWindows);
+	DEC(nofWindows)
 END DecCount;		
 
 PROCEDURE Cleanup;
 VAR die : KillerMsg;
 	 msg : WMMessages.Message;
-	 m : WMWindowManager.WindowManager;
+	 m : WM.WindowManager;
 BEGIN {EXCLUSIVE}
-	NEW(die); msg.ext := die; msg.msgType := WMMessages.MsgExt;
-	m := WMWindowManager.GetDefaultManager();
+	NEW(die);
+	msg.ext := die;
+	msg.msgType := WMMessages.MsgExt;
+	m := WM.GetDefaultManager();
 	m.Broadcast(msg);
 	AWAIT(nofWindows = 0)
 END Cleanup;
 
 BEGIN
-	AosModules.InstallTermHandler(Cleanup); 
+	AosModules.InstallTermHandler(Cleanup)
 END BimboMail.
 
-S.Free BimboMail MailStorage AosPOP3Client 
-BimboMail.Open 
+BimboMail.Open ~
+S.Free BimboMail MailStorage AosPOP3Client ~
 
-PED.Open MailStorage.Mod 
-PED.Open AosPOP3Client.Mod 
-
-
-Color Codes
- Highlight
-Types and Procedures
-Lock Acquire / Lock Release
-Preferred notation (comment)
-Unsafe / Temporary / Stupid / requires attention
-Permanent Comment 
-Assertion
-Debug
-
+PET.Open MailStorage.Mod ~
+PET.Open AosPOP3Client.Mod ~

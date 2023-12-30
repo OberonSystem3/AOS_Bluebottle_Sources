@@ -3,8 +3,7 @@
 MODULE PCC; (** AUTHOR "prk / be"; PURPOSE "Parallel Compiler: intermediate code generation"; *)
 
 IMPORT
-		PCDebug,
-		PCM, PCBT, PCLIR, PCS, PCT, SYSTEM;
+	PCDebug, PCM, PCBT, PCLIR, PCS, PCT, SYSTEM;
 
 CONST
 	Trace = FALSE;
@@ -95,12 +94,12 @@ CONST
 		(*Useful constants*)
 	none* = PCLIR.none;
 	
-		(*Type Descriptor Constants*)
-	BaseTypesTable = -8;	(*table with all record extensions*)
-	MethodTable = -72;
-	IntfMethodTable = 4;
-	ArrayFirstElem = 8;	(* first array element *)
-	ArrayDimTable = 12;	(* dimension table in dyn arrays *)
+		(*Type Descriptor Constants in addresses *)
+	BaseTypesTable = -2;	(*table with all record extensions*)
+	MethodTable = -18;
+	IntfMethodTable = 1;
+	ArrayFirstElem = 2;	(* first array element *)
+	ArrayDimTable = 3;	(* dimension table in dyn arrays *)
 	
 TYPE
 	Code* = PCLIR.Code;
@@ -158,7 +157,7 @@ BEGIN
 	ASSERT(level >= 0);
 	reg := PCLIR.FP;
 	WHILE level > 0 DO
-		PCLIR.EmitLoadRelative(code, PCLIR.Address, FALSE, reg, 8, reg);
+		PCLIR.EmitLoadRelative(code, PCLIR.Address, FALSE, reg, PCT.AddressSize*2, reg);
 		DEC(level)
 	END;
 END GetActivationFrame;
@@ -185,14 +184,14 @@ BEGIN
 			tmpType := x.type;
 			x.type := PCT.Ptr; y := x;
 			Load(code, x);
-			INC(y.offs, 4); Load(code, y); x.breg := y.adr;
+			INC(y.offs, PCT.AddressSize); Load(code, y); x.breg := y.adr;
 			x.type := tmpType
 		ELSE
 			size := PCT.Ptr.size(PCBT.Size);
 			LoadAdr(code, x);
 			tmpReg := x.adr;
 			PCLIR.EmitLoadRelative(code, size.type, size.signed, x.adr, 0, tmpReg);	(*procAddr*)
-			PCLIR.EmitLoadRelative(code, size.type, size.signed, x.breg, 4, tmpReg);	(*self*)
+			PCLIR.EmitLoadRelative(code, size.type, size.signed, x.breg, PCT.AddressSize, tmpReg);	(*self*)
 		END
 	ELSIF x.mode = Var THEN
 		GetActivationFrame(code, x.level, frame);
@@ -228,7 +227,7 @@ BEGIN
 		GetActivationFrame(code, x.level, frame);
 		IF openarr THEN
 			x.breg := frame;
-			x.boffs := x.offs + x.type(PCT.Array).opendim * 4;	(* offset of dim0 *)
+			x.boffs := x.offs + x.type(PCT.Array).opendim * PCLIR.CG.ParamAlign;	(* offset of dim0 *)
 		END;
 		PCLIR.EmitLoadRelative(code, PCLIR.Address, FALSE, x.adr, x.offs, frame);
 	ELSIF x.mode = Var THEN
@@ -240,9 +239,10 @@ BEGIN
 			PCLIR.EmitLoadConst(code, temp, PCLIR.Address, FALSE, x.offs);
 			PCLIR.Emit12(code, PCLIR.add, x.adr, x.adr, temp);
 		END
-		
 	ELSIF x.mode = Abs THEN
 		PCLIR.EmitLoadAddr(code, x.adr, x.offs, x.var)
+	ELSIF x.type = PCT.NilType THEN (* ejz *)
+		PCLIR.EmitLoadConst(code, x.adr, PCLIR.Address, FALSE, 0)
 	ELSE
 		HALT(MAX(INTEGER));
 		PCM.LogWLn; PCM.LogWStr("LoadAdr, unimplemented mode: "); PCM.LogWNum(x.mode);
@@ -384,7 +384,7 @@ BEGIN
 	ELSIF t IS PCT.Array THEN
 		mode := t(PCT.Array).mode;
 		IF mode = PCT.open THEN
-			DEC(arr.boffs, 4); arr.type := t;
+			DEC(arr.boffs, PCT.AddressSize); arr.type := t;
 			len.mode := RegRel; len.adr := arr.breg; len.offs := arr.boffs; len.type := PCT.Int32;
 			GetArrayBaseSize(code, size, arr);
 			DOp(code, PCS.times, size, len)
@@ -418,7 +418,7 @@ BEGIN
 		ELSE
 			ASSERT(t.mode = PCT.open);
 			ASSERT(arr.mode IN {Reg, RegRel});
-			res.mode := RegRel; res.adr := arr.breg; res.offs := arr.boffs - dim*4; res.type := PCT.Int32
+			res.mode := RegRel; res.adr := arr.breg; res.offs := arr.boffs - dim*PCT.AddressSize; res.type := PCT.Int32
 		END
 	END
 END ArrayDim;
@@ -431,21 +431,21 @@ BEGIN
 		td := r;
 		NilCheck(code, td);
 		Load(code, td);
-		td.mode := RegRel;  td.offs := -4;  td.type := PCT.Ptr;
+		td.mode := RegRel;  td.offs := -PCT.AddressSize;  td.type := PCT.Ptr;
 		rec := r.type(PCT.Pointer).baseR;
 	ELSIF r.type = PCT.Ptr THEN
 		td := r;
 		NilCheck(code, td);
 		Load(code, td);
-		td.mode := RegRel;  td.offs := -4;  td.type := PCT.Ptr;
+		td.mode := RegRel;  td.offs := -PCT.AddressSize;  td.type := PCT.Ptr;
 		ASSERT(~superclass, 111);
 	ELSIF r.deref THEN	(*this is a dereferenced pointer*)
 		td := r;
 		LoadAdr(code, td);
-		td.mode := RegRel;  td.offs := -4;  td.type := PCT.Ptr;
+		td.mode := RegRel;  td.offs := -PCT.AddressSize;  td.type := PCT.Ptr;
 		rec := r.type(PCT.Record);
 	ELSIF r.mode = Ref THEN
-		td.mode := Var;  td.level := r.level; td.offs := r.offs+4;  td.type := PCT.Ptr;
+		td.mode := Var;  td.level := r.level; td.offs := r.offs+PCT.AddressSize;  td.type := PCT.Ptr;
 		ASSERT(td.level >= 0);
 		rec := r.type(PCT.Record)
 	ELSE
@@ -456,7 +456,7 @@ BEGIN
 		level := rec.size(PCBT.RecSize).level;
 		ASSERT(level > 0);
 		Load(code, td);
-		td.mode := RegRel;  td.offs := BaseTypesTable - 4*(level-1);  td.type := PCT.Ptr
+		td.mode := RegRel;  td.offs := BaseTypesTable*PCT.AddressSize - PCT.AddressSize*(level-1);  td.type := PCT.Ptr
 	END
 END GetTD;
 
@@ -474,7 +474,7 @@ BEGIN
 	IF equal THEN
 		trapNo := PCM.TypeEqualTrap;
 	ELSE
-		td.mode := RegRel;  td.offs := BaseTypesTable - 4 * rec.size(PCBT.RecSize).level;
+		td.mode := RegRel;  td.offs := BaseTypesTable * PCT.AddressSize - PCT.AddressSize * rec.size(PCBT.RecSize).level;
 		Load(code, td);
 		trapNo := PCM.TypeCheckTrap
 	END;
@@ -514,30 +514,31 @@ END GenConv;
 
 (** Enter - create a procedure activation frame, allocate size bytes local variables *)
 
-PROCEDURE Enter*(code: Code; adr: PCM.Attribute);
+PROCEDURE Enter*(code: Code; callconv: LONGINT; adr: PCM.Attribute); (* ejz *)
 BEGIN
-	PCLIR.EmitEnter(code, PCBT.OberonCC, adr)
+	PCLIR.EmitEnter(code, callconv, adr) (* ejz *)
 END Enter;
 
 (** Leave - remove a procedure activation frame, remove size bytes of parameters *)
 
-PROCEDURE Leave*(code: Code;  proc: PCT.Proc);
-VAR size: LONGINT;
+PROCEDURE Leave*(code: Code; callconv: LONGINT; proc: PCT.Proc; adr: PCM.Attribute (* ug *)); (* ejz *)
+VAR size: LONGINT; padr: PCBT.Procedure (* ug *);
 BEGIN
 	size := 0;
-	IF (proc # NIL) THEN
-		size :=  proc.adr(PCBT.Procedure).parsize-8;
+	IF proc # NIL THEN
+		padr := proc.adr(PCBT.Procedure); (* ug *)
+		size := padr.parsize - PCLIR.CG.ParamAlign * 2;
 		IF (proc.type IS PCT.Record) THEN
-			INC(size, 8)
+			INC(size, PCT.AddressSize * 2)
 		ELSIF (proc.type IS PCT.Array) THEN
 			IF proc.type(PCT.Array).mode = PCT.open THEN
 				size := 0;
 			ELSE
-				INC(size, 4);
+				INC(size, PCT.AddressSize);
 			END;
 		END
 	END;
-	PCLIR.EmitExit(code, PCBT.OberonCC, size)
+	PCLIR.EmitExit(code, callconv, size, adr (* ug *)) (* ejz *)
 END Leave;
 
 (* StackAllocate - allocate size bytes on the stack, return new top of stack *)
@@ -545,18 +546,18 @@ END Leave;
 PROCEDURE StackAllocate(code: Code; size: LONGINT; VAR tos: Item);
 VAR reg: PCLIR.Register;
 BEGIN
-	INC(size, (-size) MOD 4);	(*align up to 4*)
+	INC(size, (-size) MOD PCLIR.CG.ParamAlign);	(*align up *)
 	PCLIR.EmitLoadConst(code, reg, PCLIR.Address, FALSE, size);
 	PCLIR.Emit12(code, PCLIR.sub, tos.adr, PCLIR.SP, reg);
 	PCLIR.Emit01(code, PCLIR.loadsp, tos.adr);
-	tos.mode := RegRel; tos.adr := PCLIR.SP; tos.offs := 0; tos.type := PCT.Int32
+	tos.mode := RegRel; tos.adr := PCLIR.SP; tos.offs := 0; tos.type := PCT.Address
 END StackAllocate;
 
 PROCEDURE FreeStack*(code: Code;  type: PCT.Struct);
 VAR  size: LONGINT;  reg: PCLIR.Register;
 BEGIN
 	size := GetStaticSize(type);
-	INC(size, (-size) MOD 4);	(*align*)
+	INC(size, (-size) MOD PCLIR.CG.ParamAlign);	(*align*)
 	PCLIR.EmitLoadConst(code, reg, PCLIR.Address, FALSE, size);
 	PCLIR.Emit12(code, PCLIR.add, reg, PCLIR.SP, reg);
 	PCLIR.Emit01(code, PCLIR.loadsp, reg);
@@ -603,13 +604,13 @@ BEGIN
 		len.mode := Reg; len.type := PCT.Int32;
 		PCLIR.EmitLoadRelative(code, PCLIR.Address, FALSE, src, 0, PCLIR.SP);
 		size.mode := Reg; size.type := PCT.Int32;
-		PCLIR.EmitLoadRelative(code, PCLIR.Address, FALSE, size.adr, -4, src);
-		offs := 8;
+		PCLIR.EmitLoadRelative(code, PCLIR.Address, FALSE, size.adr, -PCT.AddressSize, src);
+		offs := PCT.AddressSize*2;
 		WHILE (type # NIL) & (type IS PCT.Array) & (type(PCT.Array).mode = PCT.open) DO
 			PCLIR.EmitLoadRelative(code, PCLIR.Address, FALSE, len.adr, -offs, src);
 			DOp(code, PCS.times, size, len);
 			type := type(PCT.Array).base;
-			INC(offs, 4);
+			INC(offs, PCT.AddressSize);
 		END;
 		staticSize := GetStaticSize(type);
 		IF staticSize > 1 THEN
@@ -623,7 +624,7 @@ BEGIN
 	(* avoid producing wrong code ??? *)
 	PCLIR.Emit01(code, PCLIR.push, PCLIR.FP);
 	PCLIR.Emit10(code, PCLIR.pop, reg3, PCLIR.Address);
-	PCLIR.EmitLoadConst(code, const, PCLIR.Address, FALSE, parSize + 4);
+	PCLIR.EmitLoadConst(code, const, PCLIR.Address, FALSE, parSize + PCT.AddressSize);
 	PCLIR.Emit12(code, PCLIR.add, reg2, reg3, const);
 	
 		(*allocate*)
@@ -635,7 +636,7 @@ BEGIN
 	
 	PCLIR.EmitLoadRelative(code, PCLIR.Address, FALSE, base, parSize, PCLIR.FP);
 	PCLIR.Emit01(code, PCLIR.push, base);
-	PCLIR.EmitLoadRelative(code, PCLIR.Address, FALSE, reg3, 4, PCLIR.FP);	(* IP *)
+	PCLIR.EmitLoadRelative(code, PCLIR.Address, FALSE, reg3, PCT.AddressSize, PCLIR.FP);	(* IP *)
 	PCLIR.Emit01(code, PCLIR.push, reg3);
 	PCLIR.EmitLoadRelative(code, PCLIR.Address, FALSE, reg3, 0, PCLIR.FP); 	(* FP *)
 	PCLIR.Emit01(code, PCLIR.push, reg3);
@@ -643,7 +644,7 @@ BEGIN
 	
 	itemType := x.type;
 	type := proc.type;
-	offs := 4;
+	offs := PCT.AddressSize;
 	WHILE (type # NIL) & (type IS PCT.Array) & (type(PCT.Array).mode = PCT.open) DO
 		IF itemType(PCT.Array).mode = PCT.static THEN
 			PCLIR.EmitLoadConst(code, reg3, PCLIR.Int32, FALSE, itemType(PCT.Array).len);
@@ -651,15 +652,15 @@ BEGIN
 			PCLIR.EmitLoadRelative(code, PCLIR.Address, FALSE, reg3, -offs, src);
 		END;
 		PCLIR.EmitStoreRelative(code, -offs, base, reg3);
-		INC(offs, 4);
+		INC(offs, PCT.AddressSize);
 		itemType := itemType(PCT.Array).base;
 		type := type(PCT.Array).base;
 	END;
 	
 	IF x.type(PCT.Array).mode = PCT.open THEN
-		offs := 20;
+		offs := PCT.AddressSize*5;
 	ELSE
-		offs := 16;
+		offs := PCT.AddressSize*4;
 	END;
 	PCLIR.EmitLoadConst(code, reg3, PCLIR.Int32, FALSE, offs);
 	PCLIR.Emit12(code, PCLIR.add, src, PCLIR.SP, reg3);
@@ -674,15 +675,15 @@ BEGIN
 	
 		(* set FP *)
 	PCLIR.Emit10(code, PCLIR.pop, reg, PCLIR.Address);
-	PCLIR.EmitLoadConst(code, reg3, PCLIR.Address, FALSE, 12);
+	PCLIR.EmitLoadConst(code, reg3, PCLIR.Address, FALSE, PCT.AddressSize*3);
 	PCLIR.Emit12(code, PCLIR.sub, reg, reg, reg3);
 	PCLIR.Emit01(code, PCLIR.loadfp, reg);
 	
 		(* restore array base, caller's IP and FP *)
-	PCLIR.EmitLoadRelative(code, PCLIR.Address, FALSE, reg3, 8, PCLIR.SP);
-	PCLIR.EmitStoreRelative(code, 8, PCLIR.FP, reg3);
-	PCLIR.EmitLoadRelative(code, PCLIR.Address, FALSE, reg3, 4, PCLIR.SP);
-	PCLIR.EmitStoreRelative(code, 4, PCLIR.FP, reg3);
+	PCLIR.EmitLoadRelative(code, PCLIR.Address, FALSE, reg3, PCT.AddressSize*2, PCLIR.SP);
+	PCLIR.EmitStoreRelative(code, PCT.AddressSize*2, PCLIR.FP, reg3);
+	PCLIR.EmitLoadRelative(code, PCLIR.Address, FALSE, reg3, PCT.AddressSize, PCLIR.SP);
+	PCLIR.EmitStoreRelative(code, PCT.AddressSize, PCLIR.FP, reg3);
 	PCLIR.EmitLoadRelative(code, PCLIR.Address, FALSE, reg3, 0, PCLIR.SP);
 	PCLIR.EmitStoreRelative(code, 0, PCLIR.FP, reg3);
 	
@@ -723,7 +724,7 @@ BEGIN
 	GenConv(code, PCLIR.convu, size, PCLIR.Address, FALSE);
 	
 	PCLIR.EmitLoadRelative(code, PCLIR.Address, FALSE, base, parSize, PCLIR.FP);
-	PCLIR.EmitLoadConst(code, const, PCLIR.Int32, FALSE, GetDims(proc.type)*4 + 4);
+	PCLIR.EmitLoadConst(code, const, PCLIR.Address, FALSE, GetDims(proc.type)*PCT.AddressSize + PCT.AddressSize);
 	PCLIR.Emit12(code, PCLIR.sub, reg2, base, const);
 	
 		(*allocate*)
@@ -764,7 +765,7 @@ BEGIN
 
 	PCLIR.EmitLoadRelative(code, PCLIR.Address, FALSE, base, parSize, PCLIR.FP);
 	PCLIR.Emit01(code, PCLIR.push, base);
-	PCLIR.EmitLoadRelative(code, PCLIR.Address, FALSE, reg3, 4, PCLIR.FP);	(* IP *)
+	PCLIR.EmitLoadRelative(code, PCLIR.Address, FALSE, reg3, PCT.AddressSize, PCLIR.FP);	(* IP *)
 	PCLIR.Emit01(code, PCLIR.push, reg3);
 	PCLIR.EmitLoadRelative(code, PCLIR.Address, FALSE, reg3, 0, PCLIR.FP); 	(* FP *)
 	PCLIR.Emit01(code, PCLIR.push, reg3);
@@ -775,19 +776,19 @@ BEGIN
 	offs := 0;
 	WHILE (type # NIL) & (type IS PCT.Array) & (type(PCT.Array).mode = PCT.open) DO
 		IF itemType(PCT.Array).mode = PCT.static THEN
-			PCLIR.EmitLoadConst(code, reg3, PCLIR.Int32, FALSE, itemType(PCT.Array).len);
+			PCLIR.EmitLoadConst(code, reg3, PCLIR.Address, FALSE, itemType(PCT.Array).len);
 		ELSE
 			PCLIR.EmitLoadRelative(code, PCLIR.Address, FALSE, reg3, x.boffs - offs, x.breg);
 		END;
-		PCLIR.EmitStoreRelative(code, - 4 - offs, base, reg3);
-		INC(offs, 4);
+		PCLIR.EmitStoreRelative(code, - PCT.AddressSize - offs, base, reg3);
+		INC(offs, PCT.AddressSize);
 		itemType := itemType(PCT.Array).base;
 		type := type(PCT.Array).base;
 	END;
 
 		(*move*)
 	PCLIR.Emit12(code, PCLIR.add, x.adr, x.adr, size.adr);
-	PCLIR.EmitLoadConst(code, const, PCLIR.Int32, FALSE, 1);
+	PCLIR.EmitLoadConst(code, const, PCLIR.Address, FALSE, 1);
 	PCLIR.Emit12(code, PCLIR.sub, x.adr, x.adr, const);
 	PCLIR.Emit12(code, PCLIR.add, reg, reg, size.adr);
 	PCLIR.Emit12(code, PCLIR.sub, reg, reg, const);
@@ -795,14 +796,14 @@ BEGIN
 	
 		(* set FP *)
 	PCLIR.Emit10(code, PCLIR.pop, reg, PCLIR.Address);
-	PCLIR.EmitLoadConst(code, reg3, PCLIR.Address, FALSE, 12);
+	PCLIR.EmitLoadConst(code, reg3, PCLIR.Address, FALSE, PCT.AddressSize*3);
 	PCLIR.Emit12(code, PCLIR.sub, reg, reg, reg3);
 	PCLIR.Emit01(code, PCLIR.loadfp, reg);
 	
 		(* restore array base, caller's IP and FP *)
-	PCLIR.EmitLoadRelative(code, PCLIR.Address, FALSE, reg3, 8, PCLIR.SP);
+	PCLIR.EmitLoadRelative(code, PCLIR.Address, FALSE, reg3, PCT.AddressSize*2, PCLIR.SP);
 	PCLIR.EmitStoreRelative(code, 8, PCLIR.FP, reg3);
-	PCLIR.EmitLoadRelative(code, PCLIR.Address, FALSE, reg3, 4, PCLIR.SP);
+	PCLIR.EmitLoadRelative(code, PCLIR.Address, FALSE, reg3, PCT.AddressSize, PCLIR.SP);
 	PCLIR.EmitStoreRelative(code, 4, PCLIR.FP, reg3);
 	PCLIR.EmitLoadRelative(code, PCLIR.Address, FALSE, reg3, 0, PCLIR.SP);
 	PCLIR.EmitStoreRelative(code, 0, PCLIR.FP, reg3);
@@ -887,6 +888,7 @@ BEGIN
 	DOp(code, PCS.times, size, bsize);
 	Load(code, size);
 		(*allocate*)
+	Convert (code, size, PCT.Address, TRUE);
 	PCLIR.Emit12(code, PCLIR.sub, reg, PCLIR.SP, size.adr);
 	IF ~aligned THEN
 		PCLIR.EmitLoadConst(code, mask, PCLIR.Address, FALSE, 0FFFFFFFCH);
@@ -931,7 +933,7 @@ BEGIN
 	PCLIR.Emit01(code, PCLIR.loadsp, reg2);
 	IF fp.type IS PCT.Record THEN
 		PCLIR.Emit01(code, PCLIR.push, reg);
-		PCLIR.EmitLoadConst(code, temp, PCLIR.Address, FALSE, 4);
+		PCLIR.EmitLoadConst(code, temp, PCLIR.Address, FALSE, PCT.AddressSize);
 		PCLIR.Emit12(code, PCLIR.add, reg, PCLIR.SP, temp);
 		PCLIR.Emit01(code, PCLIR.push, reg)
 	ELSE
@@ -946,7 +948,7 @@ PROCEDURE PushRetDesc2*(code: Code; proc: PCT.Proc);
 BEGIN
 	parSize := proc.adr(PCBT.Procedure).parsize;
 	IF proc.type IS PCT.Record THEN
-		size.mode := Var; size.offs := parSize+4; size.level := 0; size.type := PCT.Int32;
+		size.mode := Var; size.offs := parSize+PCT.AddressSize; size.level := 0; size.type := PCT.Int32;
 		dst.mode := Var; dst.offs := parSize; dst.level := 0; dst.type := PCT.Int32;
 		Load(code, size); PCLIR.Emit01(code, PCLIR.push, size.adr);
 		Load(code, dst); PCLIR.Emit01(code, PCLIR.push, dst.adr)
@@ -977,11 +979,11 @@ BEGIN
 	*)
 	ASSERT(dims > 0);
 	INC(dims);
-	PCLIR.EmitLoadConst(code, reg, PCLIR.Address, FALSE, dims*4);
+	PCLIR.EmitLoadConst(code, reg, PCLIR.Address, FALSE, dims*PCT.AddressSize);
 	PCLIR.Emit12(code, PCLIR.sub, reg2, PCLIR.SP, reg);
 	PCLIR.Emit01(code, PCLIR.loadsp, reg2);
 	
-	PCLIR.EmitLoadConst(code, reg, PCLIR.Address, FALSE, dims*4);
+	PCLIR.EmitLoadConst(code, reg, PCLIR.Address, FALSE, dims*PCT.AddressSize);
 	PCLIR.Emit12(code, PCLIR.add, reg2, PCLIR.SP, reg);
 	PCLIR.Emit01(code, PCLIR.push, reg2);
 END PushOpenAryRetDesc;
@@ -1017,7 +1019,7 @@ BEGIN
 			PCLIR.EmitLoadConst(code, len, PCLIR.Int32, FALSE, actual(PCT.Array).len);
 		ELSE
 			PCLIR.EmitLoadRelative(code, PCLIR.Address, FALSE, reg, 0, base);
-			PCLIR.EmitLoadRelative(code, PCLIR.Address, FALSE, len, -(4*dims), reg);
+			PCLIR.EmitLoadRelative(code, PCLIR.Address, FALSE, len, -(PCT.AddressSize*dims), reg);
 		END;
 		PCLIR.Emit01(code, PCLIR.push, len);
 		
@@ -1025,10 +1027,10 @@ BEGIN
 		formal := formal(PCT.Array).base;
 		actual := actual(PCT.Array).base;
 	END;
-	PCLIR.EmitLoadConst(code, const, PCLIR.Int32, FALSE, 4);
+	PCLIR.EmitLoadConst(code, const, PCLIR.Int32, FALSE, PCT.AddressSize);
 	PCLIR.Emit12(code, PCLIR.add, base, base, const);
 	PCLIR.Emit01(code, PCLIR.push, base);
-	(* INC(ofs, (dims-1)*4 + 4); *)
+	(* INC(ofs, (dims-1)*PCT.AddressSize + PCT.AddressSize); *)
 END PushOpenAryParams;
 
 PROCEDURE PrepStack*(code: Code; formal, actual: PCT.Struct);
@@ -1048,10 +1050,10 @@ BEGIN
 		act := act(PCT.Array).base;
 	END;
 	IF dims > 0 THEN
-		PCLIR.EmitLoadConst(code, const, PCLIR.Int32, FALSE, dims*4 + 4);
+		PCLIR.EmitLoadConst(code, const, PCLIR.Int32, FALSE, dims*PCT.AddressSize + PCT.AddressSize);
 		PCLIR.Emit12(code, PCLIR.sub, top, PCLIR.SP, const);
 		PCLIR.Emit01(code, PCLIR.loadsp, top);
-		PCLIR.EmitLoadConst(code, const, PCLIR.Int32, FALSE, dims*4 + 4);
+		PCLIR.EmitLoadConst(code, const, PCLIR.Int32, FALSE, dims*PCT.AddressSize + PCT.AddressSize);
 		PCLIR.Emit12(code, PCLIR.add, base, PCLIR.SP, const);
 		PCLIR.Emit01(code, PCLIR.push, base);
 	ELSE
@@ -1063,7 +1065,7 @@ BEGIN
 		PCLIR.EmitLoadConst(code, const, PCLIR.Int32, FALSE, size);
 		PCLIR.Emit12(code, PCLIR.add, base, PCLIR.SP, const);
 		PCLIR.Emit01(code, PCLIR.push, base);
-		PCLIR.EmitLoadConst(code, const, PCLIR.Int32, FALSE, 4);
+		PCLIR.EmitLoadConst(code, const, PCLIR.Int32, FALSE, PCT.AddressSize);
 		PCLIR.Emit12(code, PCLIR.add, topStatic, PCLIR.SP, const);
 		PCLIR.Emit01(code, PCLIR.push, topStatic);
 	END;
@@ -1079,16 +1081,16 @@ BEGIN
 			DEC(openAryParams);
 		END;
 		IF type IS PCT.Record THEN
-			PCLIR.EmitLoadRelative(code, PCLIR.Int32, FALSE, reg, 4, base);	(* size *)
+			PCLIR.EmitLoadRelative(code, PCLIR.Int32, FALSE, reg, PCT.AddressSize, base);	(* size *)
 			PCLIR.Emit01(code, PCLIR.push, reg);
 			PCLIR.EmitLoadRelative(code, PCLIR.Address, FALSE, reg, 0, base);	(* link *)
 			PCLIR.Emit01(code, PCLIR.push, reg);
-			INC(ofs, 8);
+			INC(ofs, PCT.AddressSize*2);
 		ELSE
 			ASSERT(type IS PCT.Array);
 			PCLIR.EmitLoadRelative(code, PCLIR.Address, FALSE, reg, 0, base);	(* link *)
 			PCLIR.Emit01(code, PCLIR.push, reg);
-			INC(ofs, 4);
+			INC(ofs, PCT.AddressSize);
 		END;
 	END;
 END FixRetDesc;
@@ -1133,9 +1135,9 @@ END CopyBlock;
 
 PROCEDURE MoveBlock*(code: Code;  VAR dstAdr, srcAdr, size: Item);
 BEGIN
-	ASSERT(dstAdr.type = PCT.Int32);
-	ASSERT(srcAdr.type = PCT.Int32);
-	ASSERT(size.type = PCT.Int32);
+	ASSERT(dstAdr.type = PCT.Address);
+	ASSERT(srcAdr.type = PCT.Address);
+	ASSERT(size.type = PCT.Address);
 	Load(code, dstAdr); Load(code, srcAdr); Load(code, size);
 	PCLIR.Emit03(code, PCLIR.move, srcAdr.adr, dstAdr.adr, size.adr)
 END MoveBlock;
@@ -1288,7 +1290,7 @@ END SetHWReg;
 
 PROCEDURE GetMemory*(code: Code;  VAR adr: Item;  type: PCT.Struct);
 BEGIN
-	ASSERT(adr.type = PCT.Int32);
+	ASSERT(adr.type = PCT.Address);
 	Load(code, adr);
 	adr.mode := RegRel; adr.offs := 0; adr.type := type;
 	Load(code, adr);	(* projection could change the type and thus the move width! *)
@@ -1437,8 +1439,8 @@ BEGIN
 	|  setfn:
 			ASSERT(PCT.IsCardinalType(a.type), setfn*10);
 			Load(code, a);
-			GenConv(code, PCLIR.convs, a, PCLIR.Int32, FALSE);
-			PCLIR.EmitLoadConst(code, reg, PCLIR.Int32, FALSE, 0);
+			GenConv(code, PCLIR.convs, a, PCLIR.Set, FALSE);
+			PCLIR.EmitLoadConst(code, reg, PCLIR.Set, FALSE, 0);
 			PCLIR.Emit12(code, PCLIR.bts, a.adr, reg, a.adr);
 			a.type := PCT.Set
 	|  absfn:
@@ -1667,7 +1669,7 @@ BEGIN
 		Load(code, b);
 		InitCC(a, ccF, a.adr, b.adr)
 	ELSIF operand = PCS.in THEN
-		ASSERT(a.type = PCT.Int32);
+		ASSERT(a.type = PCT.SetType);
 		Load(code, a); Load(code, b);
 		InitCC(a, ccF, b.adr, a.adr)
 	ELSIF (a.type IS PCT.Delegate) & (b.type IS PCT.Delegate) & ~(PCT.StaticMethodsOnly IN a.type.flags) & ~(PCT.StaticMethodsOnly IN b.type.flags) THEN
@@ -1791,12 +1793,12 @@ BEGIN
 			x.mode := RegRel;
 			x.breg := x.adr;
 			IF arr.mode = PCT.open THEN
-				x.boffs := ArrayFirstElem + arr.opendim * 4;	(*array dimensions*)
+				x.boffs := ArrayFirstElem * PCT.AddressSize + arr.opendim * PCLIR.CG.ParamAlign;	(*array dimensions*)
 			ELSE
 				ASSERT(arr.mode = PCT.static);
-				x.boffs := ArrayFirstElem + 4;
+				x.boffs := ArrayFirstElem * PCT.AddressSize + PCLIR.CG.ParamAlign;
 			END;
-			x.offs := x.boffs+4;  INC(x.offs, (-x.offs) MOD 8);	(* x.offs MOD 8 = 0 *)
+			x.offs := x.boffs+PCLIR.CG.ParamAlign;  INC(x.offs, (-x.offs) MOD 8);	(* x.offs MOD 8 = 0 *)
 			x.type := arr;
 	ELSE
 		PCDebug.ToDo(PCDebug.NotImplemented);
@@ -1838,7 +1840,7 @@ BEGIN
 		GenConv(code, PCLIR.convu, index, PCLIR.Address, FALSE);	(*assume index is > 0 *)
 		PCLIR.Emit12(code, PCLIR.add, x.adr, x.adr, index.adr);
 		x.mode := RegRel; x.offs := 0; x.type := type.base;
-		DEC(x.boffs, 4);
+		DEC(x.boffs, PCT.AddressSize);
 	ELSE
 		PCDebug.ToDo(PCDebug.NotImplemented);
 	END;
@@ -1863,7 +1865,7 @@ BEGIN
 	Load(code, x);
 	mthAdr := mth.adr(PCBT.Method);
 	x.mode := Reg;
-	PCLIR.EmitLoadRelative(code, PCLIR.Address, FALSE, x.adr, MethodTable - 4*mthAdr.mthNo, x.adr);
+	PCLIR.EmitLoadRelative(code, PCLIR.Address, FALSE, x.adr, MethodTable * PCT.AddressSize - PCT.AddressSize*mthAdr.mthNo, x.adr);
 	x.breg := t;
 	x.type := MethodType
 END Method;
@@ -1877,10 +1879,10 @@ BEGIN
 	END;
 	IF PCT.interface IN mth.boundTo.mode THEN
 		InterfaceLookup(code, self, mth.boundTo, x);
-		off := IntfMethodTable + 4*mthAdr.mthNo
+		off := IntfMethodTable * PCT.AddressSize + PCT.AddressSize*mthAdr.mthNo
 	ELSE
 		GetTD(code, self, x, supercall);
-		off := MethodTable - 4*mthAdr.mthNo
+		off := MethodTable * PCT.AddressSize - PCT.AddressSize*mthAdr.mthNo
 	END;
 	Load(code, x);
 	x.mode := Reg;
@@ -1920,7 +1922,7 @@ END SysNewRec;
 
 PROCEDURE SysNewBlock*(code: Code;  x, size: Item);
 BEGIN
-	Convert(code, size, PCT.Int32, FALSE);
+	Convert(code, size, PCT.Size, FALSE);
 	LoadAdr(code, x);  PCLIR.Emit01(code, PCLIR.push, x.adr);
 	Load(code, size);  PCLIR.Emit01(code, PCLIR.push, size.adr);
 	PCLIR.Emit0C(code, PCLIR.syscall, PCBT.newsys)
@@ -1929,11 +1931,11 @@ END SysNewBlock;
 PROCEDURE SysNewArray*(code: Code;  VAR ptr: Item;  btyp: PCT.Struct;  nofElem: Item;  nofDims: LONGINT);
 VAR size, offset, td: Item;  reg: PCLIR.Register; label: Label;
 BEGIN
-	Convert(code, nofElem, PCT.Int32, FALSE);
+	Convert(code, nofElem, PCT.Size, FALSE);
 	Load(code, nofElem);
 	
 	(* check array length here, because the allocated size may be > 0 even if the length is < 0, e.g. with SysBlocks *)
-	PCLIR.EmitLoadConst(code, reg, PCLIR.Int32, TRUE, -1);
+	PCLIR.EmitLoadConst(code, reg, PCLIR.SizeType, TRUE, -1);
 	PCLIR.Emit02C(code, PCLIR.jgt, nofElem.adr, reg, none);
 	label := code.pc-1;
 	PCLIR.Emit0C(code, PCLIR.trap, PCM.ArraySizeTrap);
@@ -1941,9 +1943,9 @@ BEGIN
 	PCLIR.Emit0C(code, PCLIR.label, 0);
 	
 	IF ~btyp.size(PCBT.Size).containPtrs THEN
-		MakeIntConst(size, GetStaticSize(btyp), PCT.Int32);
+		MakeIntConst(size, GetStaticSize(btyp), PCT.Size);
 		DOp(code, PCS.times, size, nofElem);
-		MakeIntConst(offset, ArrayDimTable+4+8*(nofDims DIV 2), PCT.Int32);
+		MakeIntConst(offset, ArrayDimTable * PCT.AddressSize +PCT.AddressSize+PCT.AddressSize*2*(nofDims DIV 2), PCT.Size);
 		DOp(code, PCS.plus, size, offset);
 		SysNewBlock(code, ptr, size);
 	ELSE
@@ -1961,7 +1963,7 @@ BEGIN
 		END;
 		Load(code, td); PCLIR.Emit01(code, PCLIR.push, td.adr);
 		Load(code, nofElem);  PCLIR.Emit01(code, PCLIR.push, nofElem.adr);
-		PCLIR.EmitLoadConst(code, reg, PCLIR.Int32, TRUE, nofDims);
+		PCLIR.EmitLoadConst(code, reg, PCLIR.SizeType, TRUE, nofDims);
 		PCLIR.Emit01(code, PCLIR.push, reg);
 		PCLIR.Emit0C(code, PCLIR.syscall, PCBT.newarr)
 	END;
@@ -1971,8 +1973,8 @@ PROCEDURE SetArrayDim*(code: Code;  VAR ptr: Item;  nofDims, dim: LONGINT);
 VAR  offs: LONGINT;  size: PCLIR.Register;
 BEGIN
 	IF ptr.mode # Reg THEN  Load(code, ptr)  END;
-	offs := ArrayDimTable+4*(nofDims-1-dim);
-	PCLIR.Emit10(code, PCLIR.pop, size, PCLIR.Int32);
+	offs := ArrayDimTable * PCT.AddressSize +PCT.AddressSize*(nofDims-1-dim);
+	PCLIR.Emit10(code, PCLIR.pop, size, PCLIR.Address);
 	PCLIR.EmitStoreRelative(code, offs, ptr.adr, size)
 END SetArrayDim;
 
@@ -1985,7 +1987,7 @@ BEGIN
 		Load(code, self)
 	END;
 	PCLIR.Emit01(code, PCLIR.push, self.adr);
-	MakeIntConst(const, True, PCT.Int32);
+	MakeIntConst(const, True, PCT.Address);
 	Load(code, const);
 	PCLIR.Emit01(code, PCLIR.push, const.adr);
 	IF lock THEN
@@ -2005,15 +2007,15 @@ BEGIN
 	MakeTD(mth, rec);  Load(code, mth);
 	
 	mth.mode := RegRel; mth.type := PCT.Ptr(*body.type*);
-	mth.offs := MethodTable - 4 * body.adr(PCBT.Method).mthNo;
+	mth.offs := MethodTable * PCT.AddressSize - PCT.AddressSize * body.adr(PCBT.Method).mthNo;
 	Load(code, mth);
 	IF PCT.active IN rec.mode THEN
 		PCLIR.Emit01(code, PCLIR.push, mth.adr);
-		PCLIR.EmitLoadConst(code, reg, PCLIR.Int8, TRUE, rec.prio);
+		PCLIR.EmitLoadConst(code, reg, PCLIR.Int32, TRUE, rec.prio);
 		PCLIR.Emit01(code, PCLIR.push, reg);
 		val := 0;
 		IF  PCT.safe IN rec.mode THEN  INC(val, 1)  END;
-		PCLIR.EmitLoadConst(code, reg, PCLIR.Int8, FALSE, val);
+		PCLIR.EmitLoadConst(code, reg, PCLIR.Address, FALSE, val); (* set *)
 		PCLIR.Emit01(code, PCLIR.push, reg);
 		
 		ASSERT(self.type IS PCT.Pointer);
@@ -2029,7 +2031,7 @@ BEGIN
 		END;
 *)
 		Load(code, self);
-		PCLIR.EmitLoadRelative(code, PCLIR.Address, FALSE, reg, -4, self.adr);	(*td*)
+		PCLIR.EmitLoadRelative(code, PCLIR.Address, FALSE, reg, -PCT.AddressSize, self.adr);	(*td*)
 		PCLIR.Emit01(code, PCLIR.push, reg);
 		PCLIR.Emit01(code, PCLIR.push, self.adr);
 		PCLIR.Emit01(code, PCLIR.callreg, mth.adr)
@@ -2052,8 +2054,7 @@ BEGIN
 			dest.type := PCT.Int32; source.type := PCT.Int32
 		END;
 		IF source.mode = CC THEN  LoadCC(code, source)
-		ELSIF source.mode # Reg THEN  Load(code, source)
-		END;
+		ELSIF source.mode # Reg THEN Load(code, source) END;
 		LoadAdr(code, dest);
 		PCLIR.EmitStoreRelative(code, 0, dest.adr, source.adr);
 	ELSIF dest.type IS PCT.Record THEN
@@ -2079,7 +2080,7 @@ BEGIN
 		LoadAdr(code, dest);
 		PCLIR.EmitStoreRelative(code, 0, dest.adr, source.adr);
 		IF ~(PCT.StaticMethodsOnly IN dest.type.flags) THEN
-			PCLIR.EmitStoreRelative(code, 4, dest.adr, GetDelegateSelfReg(code, source, mode))
+			PCLIR.EmitStoreRelative(code, PCT.AddressSize, dest.adr, GetDelegateSelfReg(code, source, mode))
 		END
 	ELSE
 		PCDebug.ToDo(PCDebug.NotImplemented)
@@ -2087,18 +2088,27 @@ BEGIN
 END Assign;
 
 PROCEDURE GenTrap*(code: Code; nr: LONGINT);
-BEGIN PCLIR.Emit0C(code, PCLIR.trap, nr)
+BEGIN 
+	PCLIR.Emit0C(code, PCLIR.trap, nr);
+	(* TrapCollector.Say(scope, nr);	*)
 END GenTrap;
 
-PROCEDURE Return*(code: Code;  x: Item;  proc: PCT.Proc);
-VAR  parSize, mode: LONGINT;  size, dst: Item;  type: PCT.Struct;
+PROCEDURE Return*(code: Code;  x: Item;  proc: PCT.Proc; rtypeAddr: SYSTEM.ADDRESS (* ug *));
+VAR  parSize, mode: LONGINT;  size, dst, hdst: Item;  type: PCT.Struct;	(* ug: hdst stands for hiddendst *) 
 BEGIN
 	type := proc.type;
+	IF PCT.ContainsPointer(type) THEN
+		hdst.mode := Var; hdst.offs := rtypeAddr; hdst.level := 0; hdst.type := PCT.Int32;
+	END;
 	mode := x.mode;
 	IF (type IS PCT.Basic) OR PCT.IsPointer(type) THEN
 		IF Statistics THEN INC(ARetBasic) END;
 		Load(code, x);
-		PCLIR.Emit01(code, PCLIR.ret, x.adr);
+		IF PCT.ContainsPointer(type) THEN
+			Load(code, hdst); 
+			PCLIR.EmitStoreRelative(code, 0, hdst.adr, x.adr);
+		END;
+		PCLIR.Emit01(code, PCLIR.ret, x.adr)
 	ELSIF type IS PCT.Record THEN
 		IF Statistics THEN INC(ARetRec) END;
 		parSize := proc.adr(PCBT.Procedure).parsize;
@@ -2106,6 +2116,9 @@ BEGIN
 		dst.mode := Var; dst.offs := parSize; dst.level := 0; dst.type := PCT.Int32;
 		LoadAdr(code, x); x.type := PCT.Int32;
 		MoveBlock(code, dst, x, size);
+		IF PCT.ContainsPointer(type) THEN
+			MoveBlock(code, hdst, x, size);
+		END
 	ELSIF type IS PCT.Array THEN
 		IF type(PCT.Array).mode = PCT.open THEN			
 			IF Statistics THEN INC(ARetOpenArray) END;
@@ -2121,6 +2134,9 @@ BEGIN
 			dst.mode := Var; dst.offs := parSize; dst.level := 0; dst.type := PCT.Int32;
 			LoadAdr(code, x); x.type := PCT.Int32;
 			MoveBlock(code, dst, x, size);
+			IF PCT.ContainsPointer(type) THEN
+				MoveBlock(code, hdst, x, size)
+			END
 		END
 	ELSE
 		IF Statistics THEN INC(ARetElse) END;
@@ -2128,29 +2144,47 @@ BEGIN
 		Load(code, x);
 		PCLIR.Emit01(code, PCLIR.ret, x.adr);
 		IF (type IS PCT.Delegate) & ~(PCT.StaticMethodsOnly IN type.flags) THEN
-			PCLIR.Emit01(code, PCLIR.ret2, GetDelegateSelfReg(code, x, mode))
+			PCLIR.Emit01(code, PCLIR.ret2, GetDelegateSelfReg(code, x, mode));
+			Load(code, hdst);
+			PCLIR.EmitStoreRelative(code, 4, hdst.adr, GetDelegateSelfReg(code, x, mode)); (* Delegate SELF pointer stored at offset 4 relative to hdst.addr *)
 		END
 	END
 END Return;
 
-PROCEDURE SYScopy*(code: Code;  x, y: Item;  get: BOOLEAN);
+PROCEDURE SYScopy*(code: Code;  x, y: Item;  get: BOOLEAN);(* fof remark: called by getfn or putfn in PCB *)
 BEGIN
-	IF x.mode # Reg THEN
-		x.type := PCT.Ptr;
-		Load(code, x)
-	ELSE
-		GenConv(code, PCLIR.convu, x, PCLIR.Address, FALSE)
-	END;
-	x.mode := RegRel;  x.offs := 0;  x.type := y.type;
-	IF get THEN
-		Assign(code, y, x)
-	ELSE
-		Assign(code, x, y)
-	END
+   (** fof >> *)
+       (* the following LoadCC  must be called here because otherwise in code produced by procedure Assign the address of destination is loaded
+           within a part that might be stepped over while checking OR or & statements.
+           example:
+               PROCEDURE Test*;
+               VAR  d,e,f: BOOLEAN; adr: LONGINT;
+               BEGIN
+                   d := TRUE; e := TRUE; adr := SYSTEM.ADR(f);
+                   SYSTEM.PUT(adr, d OR e);
+               END Test;
+           produces an access violation error.
+           *)
+
+      	IF y.mode = CC THEN LoadCC( code, y ) END;
+       (** << fof  *)
+
+   IF x.mode # Reg THEN
+       x.type := PCT.Ptr;
+       Load(code, x)
+   ELSE
+       GenConv(code, PCLIR.convu, x, PCLIR.Address, FALSE)
+   END;
+   x.mode := RegRel;  x.offs := 0;  x.type := y.type;
+   IF get THEN
+       Assign(code, y, x)
+   ELSE
+       Assign(code, x, y)
+   END
 END SYScopy;
 
 PROCEDURE SYSaddress*(code: Code;  VAR x: Item);
-BEGIN	LoadAdr(code, x);  x.type := PCT.Int32
+BEGIN	LoadAdr(code, x);  x.type := PCT.Address
 END SYSaddress;
 
 PROCEDURE Inline*(code: Code;  VAR x: PCM.Attribute);
@@ -2158,6 +2192,7 @@ BEGIN
 	PCLIR.EmitInline(code, x);
 END Inline;
 
+(* obsolete since May 22, 2007: ug *)
 (**-----------Passivate----------------*)
 (*
 AWAIT (cond);
@@ -2190,7 +2225,7 @@ PROCEDURE AwaitExit*(code: Code;  cond: Item);
 BEGIN
 	Load(code, cond);
 	PCLIR.Emit01(code, PCLIR.ret, cond.adr);
-	PCLIR.EmitExit(code, PCBT.OberonPassivateCC, 4)
+	PCLIR.EmitExit(code, PCBT.OberonPassivateCC, PCT.AddressSize, NIL)
 END AwaitExit;
 
 PROCEDURE Await*(code: Code;  self: Item;  adr: PCM.Attribute);
@@ -2215,7 +2250,7 @@ BEGIN
 		LoadAdr(code, self)
 	END;
 	PCLIR.Emit01(code, PCLIR.push, self.adr);
-	PCLIR.EmitLoadConst(code, reg, PCLIR.Int32, FALSE, False);
+	PCLIR.EmitLoadConst(code, reg, PCLIR.Address, FALSE, False);
 	PCLIR.Emit01(code, PCLIR.push, reg);
 	PCLIR.Emit0C(code, PCLIR.syscall, PCBT.passivate);
 	FixJmp(code, label);
@@ -2245,19 +2280,19 @@ PROCEDURE RestoreRegisters*(code: Code);
 BEGIN  PCLIR.Emit00(code, PCLIR.loadregs);
 END RestoreRegisters;
 
-PROCEDURE ParamArray(code: Code;  VAR ap: Item;  formaltype: PCT.Struct;  reference: BOOLEAN);
+PROCEDURE ParamArray(code: Code;  VAR ap: Item;  formaltype: PCT.Struct;  reference, notag: BOOLEAN); (* ejz  *)
 VAR  aptype: PCT.Struct;  res, res2: Item;  dim: LONGINT;  fptype: PCT.Array;
 BEGIN
 	fptype := formaltype(PCT.Array);  aptype := ap.type;
 	dim := 0;
+
 	IF  (fptype.mode = PCT.open) OR reference THEN	(* prepare "reference" *)
 		LoadAdr(code, ap);
 		reference := TRUE
 	ELSE
 		reference := FALSE;
 	END;
-	
-	WHILE (fptype # NIL) & (fptype.mode = PCT.open) DO
+	WHILE ~notag & (fptype # NIL) & (fptype.mode = PCT.open) DO (* ejz *)
 		IF fptype.base = PCT.Byte THEN
 			IF (aptype = PCT.String) THEN
 				MakeIntConst(res, ap.value, PCT.Int32)
@@ -2284,6 +2319,7 @@ BEGIN
 	IF reference THEN
 		PCLIR.Emit01(code, PCLIR.push, ap.adr)
 	ELSE
+		ASSERT(~notag); (* ejz *)
 		dim := GetStaticSize(fptype);
 		StackAllocate(code, dim, res);
 		CopyBlock(code, res, ap, dim)
@@ -2293,7 +2329,7 @@ END ParamArray;
 
 (** Param -  Push actual parameter on the stack *)
 
-PROCEDURE Param*(code: Code; VAR ap: Item;  formaltype: PCT.Struct;  reference: BOOLEAN);
+PROCEDURE Param*(code: Code; VAR ap: Item;  formaltype: PCT.Struct;  reference, notag: BOOLEAN); (* ejz *)
 VAR res: Item;  mode, size: LONGINT;  name: ARRAY 32 OF CHAR;
 BEGIN
 	IF (formaltype IS PCT.Basic) OR (formaltype IS PCT.Pointer) THEN
@@ -2306,15 +2342,18 @@ BEGIN
 	ELSIF formaltype IS PCT.Record THEN
 		IF Statistics THEN INC(AParRec) END;
 		IF reference THEN
-			GetTD(code, ap, res, FALSE);  Load(code, res);  PCLIR.Emit01(code, PCLIR.push, res.adr);
+			IF ~notag THEN (* ejz *)
+				GetTD(code, ap, res, FALSE);  Load(code, res);  PCLIR.Emit01(code, PCLIR.push, res.adr)
+			END;
 			LoadAdr(code, ap);  PCLIR.Emit01(code, PCLIR.push, ap.adr)
 		ELSE
+			ASSERT(~notag); (* ejz *)
 			size := GetStaticSize(formaltype);
 			StackAllocate(code, size, res);  CopyBlock(code, res, ap, size)
 		END
 	ELSIF formaltype IS PCT.Array THEN
 		IF Statistics THEN INC(AParArray) END;
-		ParamArray(code, ap, formaltype, reference)
+		ParamArray(code, ap, formaltype, reference, notag) (* ejz *)
 	ELSIF (formaltype IS PCT.Delegate) THEN
 		IF Statistics THEN INC(AParProc) END;
 		IF reference THEN
@@ -2377,11 +2416,17 @@ BEGIN
 	END
 END Result;
 
+PROCEDURE DefFinallyLabel*(code: Code; obj: PCT.Symbol);
+BEGIN  
+	PCLIR.EmitFinallyLabel(code, obj.adr);
+END DefFinallyLabel;
+
 (** Define a label *)
 
 PROCEDURE DefLabel*(code: Code; VAR pc: Label);
 BEGIN  pc := code.pc; PCLIR.Emit0C(code, PCLIR.label, 0)
 END DefLabel;
+
 
 (** Jump to label. If label is none, then autodefine *)
 
@@ -2463,8 +2508,8 @@ BEGIN
 	WHILE m # NIL DO
 		o := PCT.FindSameSignature(rec.scope, m.name, m.scope.firstPar, TRUE);
 		IF o # NIL THEN	(*checked in PCT*)
-			mth := td; mth.mode := RegRel; mth.offs := MethodTable - 4*o.adr(PCBT.Method).mthNo;
-			dst := x; dst.mode := RegRel; dst.offs := IntfMethodTable + 4*m.adr(PCBT.Method).mthNo;
+			mth := td; mth.mode := RegRel; mth.offs := MethodTable * PCT.AddressSize - PCT.AddressSize*o.adr(PCBT.Method).mthNo;
+			dst := x; dst.mode := RegRel; dst.offs := IntfMethodTable * PCT.AddressSize + PCT.AddressSize*m.adr(PCBT.Method).mthNo;
 			Assign(code, dst, mth)
 		END;
 		m := m.nextProc

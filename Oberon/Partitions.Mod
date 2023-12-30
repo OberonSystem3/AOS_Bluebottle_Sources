@@ -1,7 +1,7 @@
 (* ETH Oberon, Copyright 2001 ETH Zuerich Institut fuer Computersysteme, ETH Zentrum, CH-8092 Zuerich.
 Refer to the "General ETH Oberon System Source License" contract available at: http://www.oberon.ethz.ch/ *)
 
- MODULE Partitions; (** non-portable *)
+MODULE Partitions; (** non-portable *)
 (** AUTHOR "pjm"; PURPOSE "Partitioning and formatting tool"; *)
 
 (* Partitioning and formatting tool for N2KFS and AosFS. *)
@@ -14,7 +14,7 @@ CONST
 	
 	BS = 512;
 	BootLoaderName = "OBL.Bin";
-	BootFileName = "Native.Bin";
+	BootFileName = "AosIDE.Bin";
 	MinPartSize = 64;	(* absolute minimum number of sectors in Oberon partition *)
 
 	N2KSS = 2048;
@@ -38,7 +38,7 @@ CONST
 	FSID0 = 5245424FH;
 	FSIDOBL = 44494449H;
 	FSVer = 1;
-	FSRes = 512*1024 DIV BS;	(* default blocks reserved for boot file *)
+	FSRes = 640*1024 DIV BS;	(* default blocks reserved for boot file *)
 	
 	LoaderSize = 4;	(* size of OBL.Bin in blocks *)
 	
@@ -785,6 +785,7 @@ CONST Size = 4*BS;
 VAR
 	b: ARRAY Size OF CHAR; i, tsize, rsize, lsize: LONGINT; 
 	f: Files.File; r: Files.Rider; geo: Disks.GetGeometryMsg;
+	size : LONGINT;
 BEGIN
 	ASSERT(dev.blockSize = BS);
 	GetGeometry(dev, geo, res);
@@ -800,7 +801,9 @@ BEGIN
 		lsize := Files.Length(f) DIV BS;
 		ASSERT(lsize = LoaderSize);
 			(* set parameters in boot loader *)
-		IF ~(Disks.Removable IN dev.flags) THEN	(* Windows 2000 workaround *)
+		dev.getSize(dev, size, res);
+(*		IF ~(Disks.Removable IN dev.flags) THEN	(* Windows 2000 workaround *) *)
+		IF (size > DisketteLimit) THEN (* Windows 2000 workaround *)
 			Put2(b, 0BH, 0);	(* bytes per sector *)
 			b[0DH] := 0X;	(* sectors per cluster *)
 			Put2(b, 11H, 0);	(* root directory size *)

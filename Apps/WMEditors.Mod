@@ -1,9 +1,14 @@
 MODULE WMEditors;	(** AUTHOR "TF"; PURPOSE "Editor component"; *)
-
+(**
+ * History:
+ *
+ *	21.03.2006	Call the finalizer of the TextView associated to a editor instance in Editor.Finalize (staubesv)
+ *)
+ 
 IMPORT
 	AosModules, WMComponents, AosIO, UTF8Strings, AosCommands, 
 	AosTexts, AosTextUtilities, WMEvents, WMProperties, AosInputs, Utilities, 
-	WMStandardComponents, WMTextView, WMInputModes, AosOut;
+	WMStandardComponents, WMTextView, WMInputMethods, AosOut, UndoManager;
 	
 TYPE
 	String = Utilities.String;
@@ -20,7 +25,7 @@ TYPE
 	VAR tv- : WMTextView.TextView;
 		vScrollbar- : WMStandardComponents.Scrollbar;
 		hScrollbar- : WMStandardComponents.Scrollbar;
-		ime : WMInputModes.IME; 
+		ime : WMInputMethods.IME; 
 		multiLine-, readOnly- : WMProperties.BooleanProperty;
 		text- : AosTexts.Text;
 		utilreader : AosTexts.TextReader;
@@ -30,6 +35,7 @@ TYPE
 		currentFlags : SET;
 		allowIME* : BOOLEAN;
 		allowScrollbars- : WMProperties.BooleanProperty;
+		undoMgr*: UndoManager.UndoManager;
 
 		PROCEDURE &Init;
 		BEGIN
@@ -57,6 +63,27 @@ TYPE
 			tv.SetExtKeyEventHandler(KeyPressed);
 			tv.SetExtPointerDownHandler(MousePressed)
 		END Init;
+		
+		PROCEDURE SetUndoManager*(uMgr: UndoManager.UndoManager);
+		BEGIN
+			undoMgr := uMgr;
+		END SetUndoManager;
+		
+		PROCEDURE Undo*;
+		BEGIN
+			IF undoMgr # NIL THEN
+				undoMgr.Undo();
+				tv.cursor.SetPosition(undoMgr.actualPos)
+			END
+		END Undo;
+				
+		PROCEDURE Redo*;
+		BEGIN
+			IF undoMgr # NIL THEN
+				undoMgr.Redo();
+				tv.cursor.SetPosition(undoMgr.actualPos)
+			END
+		END Redo;		
 		
 		PROCEDURE SetFocus*;
 		BEGIN
@@ -117,6 +144,7 @@ TYPE
 		PROCEDURE InsertChar*(ch : AosTexts.Char32);
 		VAR buf : ARRAY 2 OF AosTexts.Char32;
 		BEGIN
+			IF tv.selection.b - tv.selection.a # 0 THEN DeleteSelection() END;
 			buf[0] := ch; buf[1] := 0;
 			text.InsertUCS32(tv.cursor.GetPosition(), buf) (* cursor moves automagically *)
 		END InsertChar;
@@ -138,7 +166,10 @@ TYPE
 		BEGIN
 			text.AcquireWrite;
 			AosTexts.clipboard.AcquireRead;
-			AosTexts.clipboard.CopyToText(0, AosTexts.clipboard.GetLength(), text, tv.cursor.GetPosition());
+			IF AosTexts.clipboard.GetLength() > 0 THEN
+				IF tv.selection.b - tv.selection.a # 0 THEN DeleteSelection() END;
+				text.CopyFromText(AosTexts.clipboard, 0, AosTexts.clipboard.GetLength(),tv.cursor.GetPosition())
+			END;
 			AosTexts.clipboard.ReleaseRead;
 			text.ReleaseWrite
 		END Paste;
@@ -189,7 +220,7 @@ TYPE
 			ctrl := flags * AosInputs.Ctrl # {};
 			IF ctrl THEN (* put into different module ??? *)
 				pos := tv.cursor.GetPosition();
-				tv.StartCommand(pos);
+				tv.StartCommand(pos, flags * AosInputs.Shift # {});
 			ELSE
 				IF multiLine.Get() THEN
 					pos := tv.cursor.GetPosition();
@@ -198,7 +229,7 @@ TYPE
 					nofWhitespace := Utilities.Min(nofWhitespace, pos - lineStart);
 					InsertChar(AosTexts.NewLineChar);
 					IF nofWhitespace > 0 THEN
-						text.CopyToText(lineStart, nofWhitespace, text, pos + 1)
+						text.CopyFromText(text, lineStart, nofWhitespace, pos+1);
 					END;
 				END
 			END;
@@ -237,9 +268,15 @@ TYPE
 					tv.ViewToTextPos(x, y, pos);
 					utilreader.SetPosition(pos);
 					utilreader.ReadCh(ch);
-					IF utilreader.attributes # NIL THEN
+					IF utilreader.cstyle # NIL THEN
+						handled := TRUE;
+						selectionText.SetCharacterStyle(a, b - a, utilreader.cstyle);
+					ELSIF utilreader.attributes # NIL THEN
 						handled := TRUE;
 						selectionText.SetAttributes(a, b - a, utilreader.attributes.Clone())
+					END;
+					IF utilreader.pstyle # NIL THEN
+						selectionText.SetParagraphStyle(a, b - a, utilreader.pstyle);
 					END;
 					selectionText.ReleaseWrite
 				END;
@@ -249,12 +286,12 @@ TYPE
 		
 		PROCEDURE KeyPressed*(ucs : LONGINT; flags : SET; VAR keySym : LONGINT; VAR handled : BOOLEAN);
 		BEGIN
+			handled := TRUE;
 			currentFlags := flags;
 			tv.SetFlags(flags);
 			IF readOnly.Get() THEN RETURN END;
 			IF AosInputs.Release IN flags THEN RETURN END;
 			text.AcquireWrite;
-			handled := TRUE;
 			(* relaying the navigation keys to the view *)
 			IF keySym = 14H THEN (* Ctrl-T *)
 				text.CheckHealth
@@ -262,6 +299,16 @@ TYPE
 				tv.SelectAll
 			ELSIF keySym = 03H THEN (* Ctrl-C *)
 				tv.CopySelection
+			ELSIF keySym = 19H THEN (* Ctrl-Y *)
+				IF undoMgr # NIL THEN 
+					undoMgr.Redo
+				END
+			ELSIF keySym = 1AH THEN (* Ctrl-Z *)
+				IF undoMgr # NIL THEN 
+					undoMgr.Undo
+				END			
+			ELSIF keySym = 0FF09H THEN (* Tab *)				
+			      InsertChar(AosTexts.TabChar)
  			ELSIF (keySym = 0FF63H) & (flags * AosInputs.Ctrl # {}) THEN  (*Ctrl Insert *) 
  				tv.CopySelection
 			ELSIF keySym = 0FF51H THEN (* Cursor Left *)
@@ -293,7 +340,7 @@ TYPE
 			ELSIF (keySym = 0FF63H) & (flags * AosInputs.Shift # {}) THEN  (* Shift Insert *) Paste 
 			ELSIF (keySym = 0FF1BH) THEN onEscape.Call(NIL); FocusNext (* Escape *)
 			ELSIF (keySym = 00020H) & (flags * AosInputs.Ctrl # {}) & allowIME (* Ctrl-Space *)  THEN
-				IF ime = NIL THEN ime := WMInputModes.GetIME("");
+				IF ime = NIL THEN ime := WMInputMethods.GetIME("");
 					IF ime # NIL THEN	
 						text.ReleaseWrite;
 						ime.SetCurrentText(text, tv);
@@ -311,7 +358,9 @@ TYPE
 					macroData.text := text;
 					macroData.cursor := tv.cursor;
 					macros.Call(macroData);
-					IF ~macroData.handled THEN InsertChar(ucs) END
+					IF ~macroData.handled THEN 
+						IF ucs > 26 THEN InsertChar(ucs) END
+					END
 				END
 			END;
 			text.ReleaseWrite
@@ -335,6 +384,7 @@ TYPE
 		BEGIN
 			Finalize^;
 			IF ime # NIL THEN ime.Hide END;
+			IF tv # NIL THEN tv.Finalize; END;
 		END Finalize;
 	
 	END Editor;

@@ -1,6 +1,6 @@
 (* Aos, Copyright 2001, Pieter Muller, ETH Zurich *)
 
- MODULE AosInterrupts; (** AUTHOR "pjm"; PURPOSE "Low-level interrupt handling"; *)
+MODULE AosInterrupts; (** AUTHOR "pjm"; PURPOSE "Low-level interrupt handling"; *)
 
 IMPORT SYSTEM, AosBoot, AosLocks, AosOut, AosHeap(*NEW*);
 
@@ -23,7 +23,7 @@ CONST
 
 	IDTSize = 64;
 	
-	TraceSpurious = FALSE;	(* print a message on spurious hardware interrupts *)
+	TraceSpurious = FALSE;	(* no message on spurious hardware interrupts *)
 	HandleSpurious = TRUE OR TraceSpurious;	(* do not trap on spurious interrupts *)
 	
 	IntA0 = 020H;	IntA1 = 021H;	(* Interrupt Controller 1 *)
@@ -310,7 +310,6 @@ PROCEDURE GetExceptionState*(VAR int: State;  VAR exc: ExceptionState);
 VAR id: LONGINT;  level0: BOOLEAN;
 BEGIN
 		(* save all state information while interrupts are still disabled *)
-	exc.locks := AosLocks.BreakAll();
 	exc.halt := -int.INT;  id := AosBoot.ID();
 	IF int.INT = PF THEN exc.pf := CR2() ELSE exc.pf := 0 END;
 	GetCR0to4(exc.CR);
@@ -333,8 +332,6 @@ BEGIN
 		AosBoot.Fill32(SYSTEM.ADR(exc.FPU[0]), LEN(exc.FPU)*SIZE(SET), 0)
 	END;
 	AosBoot.SetupFPU;
-		(* now allow interrupts *)
-	SYSTEM.STI();
 	level0 := (int.CS MOD 4 = KernelLevel);
 	IF int.INT = BP THEN	(* breakpoint (HALT) *)
 		IF level0 THEN

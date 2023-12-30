@@ -1055,7 +1055,7 @@ BEGIN
 				res := 0; EXIT
 			END ;
 			IF ~(("A" <= CAP(ch)) & (CAP(ch) <= "Z")
-				OR ("0" <= ch) & (ch <= "9") OR (ch = ".")) THEN res := 3; EXIT
+				OR ("0" <= ch) & (ch <= "9") OR (ch = ".") OR (ch = "_")) THEN res := 3; EXIT
 			END ;
 			IF i = FnLength-1 THEN res := 4; EXIT END
 		END

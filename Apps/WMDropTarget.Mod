@@ -9,6 +9,7 @@ CONST
 	TypeURL* = 2;
 	TypeImage* = 3;
 	TypeUser* = 4;
+	TypeInt32* = 5;
 	
 	ResOk = 0;
 	ResFailed = -1;
@@ -31,12 +32,16 @@ TYPE
 		pos* : AosTexts.TextPosition;	
 	END DropText;
 	
+	DropInt32* = OBJECT(DropInterface)
+		PROCEDURE Set*(i : LONGINT);
+		BEGIN
+		END Set;
+	END DropInt32;
+	
 	DropURLs* = OBJECT(DropInterface)
 		PROCEDURE URL*(url : ARRAY OF CHAR; VAR res : LONGINT);
 		BEGIN
-			
 		END URL;
-		
 	END DropURLs;
 
 	DropFiles* = OBJECT(DropInterface)

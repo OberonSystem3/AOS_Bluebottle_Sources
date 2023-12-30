@@ -23,7 +23,7 @@ TYPE
 			Init^(PluginName)
 		END Init;
 		
-		PROCEDURE CanHandle(host: WebHTTPServer.Host; VAR request: WebHTTP.RequestHeader) : BOOLEAN;
+		PROCEDURE CanHandle(host: WebHTTPServer.Host; VAR request: WebHTTP.RequestHeader; secure : BOOLEAN) : BOOLEAN;
 		VAR name, ext: AosFS.FileName; f: AosFS.File; newuri : ARRAY 4096 OF CHAR;
 		BEGIN
 			HTTPSupport.RemoveVariablesFromURI(request.uri, newuri);
@@ -371,8 +371,10 @@ TYPE
 	PROCEDURE GenerateDynamicWebpage(f: AosFS.File; request: HTTPSupport.HTTPRequest; w: AosIO.Writer);
 	VAR scanner: XMLScanner.Scanner; parser: XMLParser.Parser; doc: XML.Document;
 		root: XML.Element; rootContent: XML.Content; errormsg: ARRAY 1024 OF CHAR;
+		reader : AosFS.Reader;
 	BEGIN  (* f # NIL *)
-		NEW(scanner, f);
+		NEW(reader, f, 0);
+		NEW(scanner, reader);
 		NEW(parser, scanner);
 		scanner.reportError := ReportXMLParserScannerError;
 		parser.reportError := ReportXMLParserScannerError;
@@ -388,16 +390,14 @@ TYPE
 		END;
 		
 		IF doc # NIL THEN
-			root := doc.GetRoot(); rootContent := root;
-			IF (TransformXMLTree(rootContent, request, 0, w)) THEN (* transformation worked successfully *)
-				(* Must be allowed in XML-module setDoc: 
-					IF (rootContent IS XML.Element) THEN 
-						root := rootContent(XML.Element);
-				    	doc.SetRoot(root) 
-				    ELSE 
-				    	Error "transformation result has not a root element"
-				    END
-				 *)
+			rootContent := doc;
+			IF (TransformXMLTree(f, rootContent, request, 0, w)) THEN (* transformation worked successfully *)
+				(* SetDocument should be provided by the XML module *)
+				IF (rootContent IS XML.Element) THEN
+					root := rootContent(XML.Element);
+				ELSE 
+				    (* Error "transformation result has not a root element"*)
+				END;
 				w.String(DocType); w.Ln;
 				doc.Write(w, 0); (* externalize transformation result *)
 			END
@@ -406,7 +406,7 @@ TYPE
 	END GenerateDynamicWebpage;
 	
 	(* returns true iff the transformation worked without an error *)
-	PROCEDURE TransformXMLTree(VAR n: XML.Content; VAR request: HTTPSupport.HTTPRequest; 
+	PROCEDURE TransformXMLTree(file: AosFS.File; VAR n: XML.Content; VAR request: HTTPSupport.HTTPRequest; 
 		transformationDepth: INTEGER;  w: AosIO.Writer) : BOOLEAN; 
 	VAR enum, resultEnum: XMLObjects.Enumerator; pChild, pResultChild: PTR; elem: XML.Element; 
 		child, newChild, resultChild: XML.Content; errormsg: ARRAY 256 OF CHAR; wasTransformed: BOOLEAN;
@@ -416,7 +416,8 @@ TYPE
 			elem := n(XML.Element); elemName := elem.GetName();
 			Utilities.Concat("In element '", elemName^, errormsg);
 			Utilities.Append(errormsg, "': Maximum recursive transformation steps reached. There could be an endless loop in a transformation procedure.");
-			ReportGeneratorError(elem.GetFile(), w, elem.GetPos(), 0, 0, errormsg);
+			ReportGeneratorError(file, w, elem.GetPos(), 0, 0, errormsg);
+			AosOut.String("Error in Stream: "); AosOut.String(errormsg); AosOut.Ln; 
 			RETURN FALSE (* stop the further traversal *)
 		ELSIF ((n # NIL) & (n IS XML.Container)) THEN
 			(* pre-postorder traversal with recursive traversal of the post transformation result
@@ -427,7 +428,7 @@ TYPE
 			IF (n IS XML.Element) THEN
 				elem := n(XML.Element);
 				IF (IsActive(elem))THEN
-					IF (~TransformActiveElement(n, PreTransformation, request, w)) THEN RETURN FALSE END;
+					IF (~TransformActiveElement(file, n, PreTransformation, request, w)) THEN RETURN FALSE END;
 					wasTransformed := TRUE
 				END
 			END;
@@ -439,7 +440,7 @@ TYPE
 				enum := snapshot.GetContents();
 				WHILE (enum.HasMoreElements()) DO
 					pChild := enum.GetNext(); child := pChild(XML.Content); newChild := child;
-					IF (~TransformXMLTree(newChild, request, transformationDepth, w)) THEN RETURN FALSE END;
+					IF (~TransformXMLTree(file, newChild, request, transformationDepth, w)) THEN RETURN FALSE END;
 					IF (newChild # NIL) THEN 
 						IF ((newChild IS XML.Container) & (~(newChild IS XML.Element))) THEN (* avoid nested containers *)
 							resultContainer := newChild(XML.Container);
@@ -458,13 +459,13 @@ TYPE
 				IF (n IS XML.Element) THEN 
 					elem := n(XML.Element);
 					IF (IsActive(elem)) THEN
-						IF (~TransformActiveElement(n, PostTransformation, request, w)) THEN RETURN FALSE END
+						IF (~TransformActiveElement(file, n, PostTransformation, request, w)) THEN RETURN FALSE END
 					END
 				END
 			END;
 			IF (wasTransformed) THEN
 				(* transformation of the transformation result is needed *)
-				IF (~TransformXMLTree(n, request, transformationDepth+1, w)) THEN RETURN FALSE END;
+				IF (~TransformXMLTree(file, n, request, transformationDepth+1, w)) THEN RETURN FALSE END;
 				IF (DEBUG) THEN Log(elem) END
 			END
 		END; (* transformation result could be not a container *)
@@ -523,7 +524,7 @@ TYPE
 	
 	(** if isPreTransformation is TRUE then PreTansform() is called otherwise PostTransform(), 
 	 *  returns true iff the transformation worked without an error *)
-	PROCEDURE TransformActiveElement(VAR n: XML.Content; isPreTransformation: BOOLEAN; 
+	PROCEDURE TransformActiveElement(file: AosFS.File; VAR n: XML.Content; isPreTransformation: BOOLEAN; 
 		request: HTTPSupport.HTTPRequest; w: AosIO.Writer) : BOOLEAN;
 	VAR moduleName, objName, elemName, objectId, oidAttrVal: Utilities.String; elem: XML.Element;
 		activeElemFact: ActiveElementFactory; errormsg: ARRAY 256 OF CHAR; activeElem: DynamicWebpage.ActiveElement;
@@ -561,7 +562,8 @@ TYPE
 				Utilities.Append(errormsg, objName^); 
 				Utilities.Append(errormsg, "'. If you use a statefull active element then you must identify the instance with the xml attribute '");
 				Utilities.Append(errormsg, DynamicWebpage.XMLAttributeObjectIdName); Utilities.Append(errormsg, "'.");
-				ReportGeneratorError(elem.GetFile(), w, elem.GetPos(), 0, 0, errormsg);
+				ReportGeneratorError(file, w, elem.GetPos(), 0, 0, errormsg);
+				AosOut.String("Error in Stream: "); AosOut.String(errormsg); AosOut.Ln; 
 				RETURN FALSE (* stop transformation process *)
 			END
 		ELSE
@@ -569,7 +571,8 @@ TYPE
 			Utilities.Append(errormsg, "': The active element '");
 			Utilities.Append(errormsg, moduleName^); Utilities.Append(errormsg, ".");
 			Utilities.Append(errormsg, objName^); Utilities.Append(errormsg, "' is not defined.");
-			ReportGeneratorError(elem.GetFile(), w, elem.GetPos(), 0, 0, errormsg);
+			ReportGeneratorError(file, w, elem.GetPos(), 0, 0, errormsg);
+			AosOut.String("Error in Stream: "); AosOut.String(errormsg); AosOut.Ln; 
 			RETURN FALSE (* stop transformation process *)
 		END;
 				

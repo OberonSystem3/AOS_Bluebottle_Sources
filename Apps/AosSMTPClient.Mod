@@ -61,7 +61,7 @@ TYPE
 			AosDNS.HostByName(server, fip, res);
 			IF res = AosDNS.Ok THEN
 				NEW(connection);
-				connection.Open(AosIP.NilAdr, fip, port, res);
+				connection.Open(AosTCP.NilPort, fip, port, res);
 				IF res = AosTCP.Ok THEN
 					open := TRUE;
 					AosIO.OpenReader(r, connection.Receive);
@@ -276,4 +276,3 @@ TYPE
 	END SMTPSession;	
 
 END AosSMTPClient.
- 

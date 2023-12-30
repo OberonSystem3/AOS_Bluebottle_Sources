@@ -6,7 +6,7 @@ IMPORT SYSTEM, AosOut, AosPlugins, AosKernel, AosActive, AosModules;
 
 CONST
 	MaxLinkAdrSize* = 8; (** largest link address size in bytes *)
-	MaxPacketSize* = 1500; (** maximum amount of data bytes in a link layer frame *)
+	MaxPacketSize* = 1600; (** maximum amount of data bytes in a link layer frame *)
 	MaxNofBuffers = 10000; (* maximum number of buffers allowed within the whole net system *)
 
 	(** Constants for LinkDevice.type *)
@@ -32,7 +32,7 @@ TYPE
 
 	(** Buffer for passing network packets to upper layer protocols *)
 	Buffer* = POINTER TO RECORD
-		data*: ARRAY MaxPacketSize OF CHAR;
+		data*:ARRAY MaxPacketSize OF CHAR;
 		ofs*: LONGINT; (** valid data starts at this offset *)
 		len*: LONGINT; (** length of valid data *)
 		l3ofs*: LONGINT; (** the layer 3 header starts at this offset *)
@@ -42,12 +42,26 @@ TYPE
 		int*: LONGINT; (** used in AosTCP, AosUDP and AosICMP, but can be used by any upper layer protocol *)
 		set*: SET; (** used in AosTCP, but can be used by any upper layer protocol *)
 		next*, prev*: Buffer; (** for queueing the buffer *)
+		nextFragment*: Buffer; (** next buffer of a fragmented packet *)
 	END;
+
+
+	(* List of type i.e. 800X for IP *)
+	TypeList = POINTER TO RECORD
+		next: TypeList;
+		type: LONGINT;
+		recList: ReceiverList;
+	END;
+
 
 	ReceiverList = POINTER TO RECORD
 		next: ReceiverList;
-		type: LONGINT;
+		owner: ANY;
 		receiver: Receiver;
+		isPacketValid: IsPacketValid;
+		isPacketForSingleRec: IsPacketForSingleRec;
+		isPacketAccepted: IsPacketAccepted;
+		isForwardingOn: BOOLEAN;
 	END;
 
 	SendSnifferList = POINTER TO RECORD
@@ -73,11 +87,13 @@ TYPE
 			sendCount-, recvCount-: HUGEINT; (** number of bytes sent and received *)
 			calcChecksum-: SET; (** these checksums are calculated by the device hardware when sending. *)
 			
+			typeList: TypeList; (* List of types i.e. 0800X for IP, holds all receiver for a certain type *)
 			recList: ReceiverList; (* receiver list *)
 			sendSnifferList: SendSnifferList; (* list for send sniffers *)
 			recvSnifferList: RecvSnifferList; (* list for receive sniffers *)
 
-			item: ReceiverList; (* temporary item in receiver list *)
+			typeItem: TypeList; (* temporary item in type list *)
+			recItem: ReceiverList; (* temporary item in receiver list *)
 			sniffer: RecvSnifferList; (* temporary item in receive sniffer list *)
 			
 			discard: BOOLEAN; (* shall the current packet be discarded? (used in active body) *)
@@ -86,10 +102,14 @@ TYPE
 			(* queue for buffers waiting for upcall *)
 			upBufFirst, upBufLast: Buffer;
 			buf: Buffer; (* temporary buffer for active body *)
+			bufSec: Buffer; (* temporary buffer for multiple interfaces listening *)
 			
 			(* timer and packet count for loopback bandwidth control *)
 			timer: AosKernel.MilliTimer;
 			packetCount: LONGINT;
+			
+			i: LONGINT;
+			
 			
 		(** Constructor - Initialize the driver and the device.
 			NOTE:
@@ -111,6 +131,7 @@ TYPE
 			SELF.recvCount := 0;
 			SELF.calcChecksum := {};
 			
+			typeList := NIL;
 			recList := NIL;
 			upBufFirst := NIL;
 			
@@ -142,8 +163,8 @@ TYPE
 			RETURN LinkUnknown;
 		END Linked;
 		
-		(** Send a packet. Called by its user. Can be called concurrently. *)
 		
+		(** Send a packet. Called by its user. Can be called concurrently. *)
 		PROCEDURE Send*(dst: LinkAdr; type: LONGINT; VAR l3hdr, l4hdr, data: ARRAY OF CHAR; h3len, h4len, dofs, dlen: LONGINT; loopback: BOOLEAN);
 		VAR
 			sniffer: SendSnifferList;
@@ -215,55 +236,111 @@ TYPE
 			END	
 		END Loopback;
 
-		(** Install a receiver for the given type. Only one receiver can be installed per type! *)
-		PROCEDURE InstallReceiver*(type: LONGINT; r: Receiver);
-		VAR item: ReceiverList;
-		BEGIN {EXCLUSIVE}
-			(* can run concurrently with active body *)
+
+		(** Install a receiver for the given type. *)
+		PROCEDURE InstallReceiver*(owner: ANY; 
+									    type: LONGINT; 
+									    receiver: Receiver; 
+									    isPacketValid: IsPacketValid; 
+									    isPacketForSingleRec: IsPacketForSingleRec; 
+									    isPacketAccepted: IsPacketAccepted;
+									   isForwardingOn: BOOLEAN);
+		VAR
+			typeItem: TypeList;
+		 	recItem: ReceiverList;
+		 	
+		BEGIN {EXCLUSIVE}	(* can run concurrently with active body *)
+			ASSERT(owner # NIL);
 			ASSERT(~finalized);
-			ASSERT(r # NIL);
-			
-			(* test if there is already a receiver installed for this type *)
-			item := recList;
-			WHILE item # NIL DO
-				ASSERT(item^.type # type);
-				item := item^.next;
+			ASSERT(receiver # NIL);
+			ASSERT(isPacketValid # NIL);
+			ASSERT(isPacketForSingleRec # NIL);
+			ASSERT(isPacketAccepted # NIL);
+		
+			(* exists the type already? *)
+			typeItem := typeList;
+			WHILE (typeItem # NIL) & (typeItem^.type # type) DO
+				typeItem := typeItem^.next;
 			END;
 			
-			(* create new entry *)
-			NEW(item);
-			item^.type := type;
-			item^.receiver := r;
-			item^.next := recList;
-			recList := item;
+			IF typeItem = NIL THEN
+				(* create new type item *)
+				NEW(typeItem);
+				typeItem^.next := typeList;
+				typeItem^.type := type;
+				typeItem^.recList := NIL;
+				typeList := typeItem;
+			END;
+			
+			(* create a new receiver list item *)
+			NEW(recItem);
+			recItem^.owner := owner;
+			recItem^.receiver := receiver;
+			recItem^.isPacketValid := isPacketValid;
+			recItem^.isPacketForSingleRec := isPacketForSingleRec;
+			recItem^.isPacketAccepted := isPacketAccepted;
+			recItem^.isForwardingOn := isForwardingOn;
+			recItem^.next := typeItem^.recList;
+			typeItem^.recList := recItem;
 		END InstallReceiver;
 
+
 		(** Remove the currently installed receiver for the given type. *)
-		PROCEDURE RemoveReceiver*(type: LONGINT);
-		VAR item: ReceiverList;
-		BEGIN {EXCLUSIVE}
-			(* can run concurrently with active body *)
+		PROCEDURE RemoveReceiver*(owner: ANY; type: LONGINT);
+		VAR 
+			typeItem: TypeList;
+			recItem: ReceiverList;
+			typeItemDel: TypeList;
+			
+			
+		BEGIN {EXCLUSIVE}		(* can run concurrently with active body *)
+			ASSERT(owner # NIL);
 			ASSERT(~finalized);
 			
-			(* remove receiver *)
-			IF recList = NIL THEN
-				(* empty list - nothing to remove *)
-			ELSIF recList^.type = type THEN
-				(* remove first item *)
-				recList := recList^.next;
-			ELSE
-				(* search list *)
-				item := recList;
-				WHILE (item^.next # NIL) & (item^.next^.type # type) DO
-					item := item^.next;
-				END;
-				IF item^.next # NIL THEN
-					item^.next := item^.next^.next;
+			(* search type *)
+			typeItem := typeList;
+			WHILE (typeItem # NIL) & (typeItem^.type # type) DO
+				typeItem := typeItem^.next;
+			END;
+			
+			IF typeItem # NIL THEN
+				(* search and remove receiver *)
+				recItem := typeItem^.recList;
+				
+				IF (recItem # NIL) & (recItem^.owner = owner) THEN
+					(* remove first item *)
+					typeItem^.recList := recItem^.next;
 				ELSE
-					(* no receiver found for this type *)
+					(* search list *)	
+					WHILE (recItem^.next # NIL) & (recItem^.next^.owner # owner) DO
+						recItem := recItem^.next;
+					END;
+					
+					IF recItem^.next # NIL THEN
+						(* found a receiver *)
+						recItem^.next := recItem^.next^.next;
+					END;
+				END;
+			
+				(* If there is no receiver anymore remove type *)
+				IF typeItem^.recList = NIL THEN
+					typeItemDel := typeItem;
+					typeItem := typeList;
+					
+					IF (typeItem = typeItemDel) THEN
+						(* remove first type *)
+						typeList := typeItem^.next;
+					ELSE
+						(* search type list *)
+						WHILE (typeItem^.next # typeItemDel) DO
+							typeItem := typeItem^.next;
+						END;
+						typeItem^.next := typeItem^.next^.next;
+					END;
 				END;
 			END;
 		END RemoveReceiver;
+
 
 		(** Install a sniffer for sent packets *)
 		PROCEDURE InstallSendSniffer*(s: SendSniffer);
@@ -386,19 +463,85 @@ TYPE
 				sniffer := sniffer^.next;
 			END;
 			IF ~discard THEN
-				(* search for receiver *)
-				item := recList;
-				WHILE (item # NIL) & (item^.type # buf.int) DO
-					item := item^.next;
+				(* search for type *)
+				typeItem := typeList;			
+				WHILE (typeItem # NIL) & (typeItem^.type # buf.int) DO
+					typeItem := typeItem^.next;
 				END;
-				discard := (item = NIL);
+				IF typeItem # NIL THEN			
+					(* type item found check if packet is valid *)
+					recItem := typeItem^.recList;
+					IF (recItem # NIL) & (recItem^.isPacketValid(buf)) THEN
+						IF recItem^.next # NIL THEN
+							(* multiple receivers installed *)
+							IF ~(recItem^.isPacketForSingleRec(buf)) THEN				
+								(* multiple receivers copy buffer *)
+								WHILE recItem^.next # NIL DO															
+									bufSec := GetNewBuffer();
+									(* copy buffer *)
+									FOR i := 0 TO MaxPacketSize - 1 DO
+										bufSec^.data[i] := buf^.data[i];
+									END;
+									bufSec^.ofs := buf^.ofs;
+									bufSec^.len := buf^.len;
+									bufSec^.l3ofs := buf^.l3ofs;
+									bufSec^.l4ofs := buf^.l4ofs;
+									bufSec^.src := buf^.src;
+									bufSec^.calcChecksum := buf^.calcChecksum;
+									bufSec^.int := buf^.int;
+									bufSec^.set := buf^.set;
+								
+									(* deliver copied buffer to interface *)												
+ 									recItem^.receiver(SELF, typeItem^.type, bufSec);
+									recItem := recItem^.next;
+								END;
+						
+								(* deliver original buffer *)		
+								recItem^.receiver(SELF, typeItem^.type, buf);
+							ELSE
+								(* search for a single receiver *)
+								WHILE (recItem # NIL) & ~(recItem^.isPacketAccepted(buf)) DO														
+									recItem := recItem^.next;
+								END;
+								IF recItem # NIL THEN
+									(* deliver buffer *)	
+									recItem^.receiver(SELF, typeItem^.type, buf);
+								ELSE
+									(* Packet is not accepted ip ipforwarding is turned on deliver it *)
+									recItem := typeItem^.recList;
+									IF recItem^.isForwardingOn THEN
+										(* deliver buffer *)									
+										recItem^.receiver(SELF, typeItem^.type, buf);
+									ELSE
+										discard := TRUE;
+									END;
+								END;
+							END;
+						ELSE
+							(* single receiver deliver buffer directly *)
+							IF recItem^.isPacketAccepted(buf) OR ~(recItem^.isPacketForSingleRec(buf)) THEN
+								recItem^.receiver(SELF, typeItem^.type, buf);
+							ELSE
+								(* Packet is not accepted ip ipforwarding is turned on deliver it *)
+								IF recItem^.isForwardingOn THEN
+									(* deliver buffer *)
+									recItem^.receiver(SELF, typeItem^.type, buf);
+								ELSE
+									discard := TRUE;
+								END;
+							END;
+						END;
+					ELSE
+						discard := TRUE;
+					END;				
+				ELSE		
+					discard := TRUE;
+				END;		
 			END;
+			
 			IF discard THEN
 				(* discard packet and return buffer *)
 				ReturnBuffer(buf);
-			ELSE
-				(* do upcall *)
-				item^.receiver(SELF, item^.type, buf);
 			END;
 		END;
 	END LinkDevice;
@@ -413,6 +556,9 @@ TYPE
 		buffer is passed to. It has not necessarily to be returned within the receiver upcall.
 	*)
 	Receiver* = PROCEDURE {DELEGATE} (dev: LinkDevice; type: LONGINT; buffer: Buffer);
+	IsPacketForSingleRec* = PROCEDURE {DELEGATE} (buffer: Buffer): BOOLEAN;	(* Checks if an incoming packet should be sent to only one installed receivers *)
+	IsPacketAccepted* = PROCEDURE {DELEGATE} (buffer: Buffer): BOOLEAN;	(* Checks if an incoming packet is accepted from a certain installed receiver *)
+	IsPacketValid* = PROCEDURE {DELEGATE} (VAR buffer: Buffer): BOOLEAN;	(* Checks if an incoming packet is valid *)
 	
 	(* Sniffer for sent packets. May modify type, headers and data. Return TRUE if packet shall be discarded. *)
 	(* Must be able to handle concurrent calls. e.g. by declaring itself as EXCLUSIVE. *)
@@ -431,8 +577,8 @@ VAR
 	nofFreeBuf: LONGINT; (* number of free buffers *)
 	freeBufList: Buffer; (* free buffer list *)
 
-(** Get a new buffer - return NIL if MaxNofBuffers is exceeded *)
 
+(** Get a new buffer - return NIL if MaxNofBuffers is exceeded *)
 PROCEDURE GetNewBuffer*(): Buffer;
 VAR item: Buffer;
 BEGIN {EXCLUSIVE}
@@ -452,14 +598,22 @@ BEGIN {EXCLUSIVE}
 	RETURN item;
 END GetNewBuffer;
 
-(** Return a buffer to be reused *)
 
+(** Return a buffer to be reused *)
 PROCEDURE ReturnBuffer*(buf: Buffer);
+VAR
+	oldBuffer: Buffer;
+	
 BEGIN {EXCLUSIVE}
-	ASSERT(buf # NIL);
-	buf.next := freeBufList;
-	freeBufList := buf;
-	AosKernel.AtomicInc(nofFreeBuf);
+	oldBuffer := buf;
+	WHILE buf # NIL DO
+		buf.next := freeBufList;
+		freeBufList := buf;
+		AosKernel.AtomicInc(nofFreeBuf);
+		oldBuffer := buf;
+		buf := buf.nextFragment;
+		oldBuffer.nextFragment := NIL;
+	END;
 END ReturnBuffer;
 
 (* Passed to registry.Enumerate() to Finalize each registered LinkDevice *)
@@ -592,8 +746,29 @@ BEGIN
 	AosOut.String(s);
 END OutLinkAdr;
 
-(** Copy data from array to array *)
 
+(** Are two link addresses equl *)
+PROCEDURE LinkAdrsEqual*(adr1: LinkAdr; adr2: LinkAdr): BOOLEAN;
+VAR
+	i: LONGINT;
+	adrsEqual: BOOLEAN;
+	
+BEGIN
+	adrsEqual := TRUE;
+	i := 0;
+	WHILE (i<8) & (adr1[i] = adr2[i]) DO
+		INC(i); 
+	END;
+	
+	IF i < 8 THEN
+		adrsEqual := FALSE;
+	END;
+	
+	RETURN adrsEqual;
+END LinkAdrsEqual;
+
+
+(** Copy data from array to array *)
 PROCEDURE Copy*(VAR from, to: ARRAY OF CHAR; fofs, tofs, len: LONGINT);
 BEGIN
 	IF len > 0 THEN
@@ -625,6 +800,7 @@ History:
 16.11.2003	mvt	Added support for checksum calclulation by the device.
 25.11.2003	mvt	Added l3ofs and l4ofs to Buffer type.
 17.12.2003	mvt	Changed variable "linked" to method "Linked".
+02.05.2005	eb	Supports multiple interfaces per device.
 *)
 
 (**

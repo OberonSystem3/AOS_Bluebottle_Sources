@@ -3,13 +3,32 @@ MODULE WMBackdrop;	(** AUTHOR "TF"; PURPOSE "Backdrop images"; *)
 (* 03-04-03	RG: Context menu support added *)
 
 IMPORT
-	AosOut, AosIO, AosModules, AosCommands, Utilities, WMRectangles, Raster, WMMessages, 
-	WMWindowManager, WMGraphics, TFClasses, WMPopups, WMComponents, WMRestorable, XML;
-		
+	AosKernel, AosFS, AosOut, AosIO, AosModules, AosCommands, Utilities, WMRectangles, Raster, WMMessages, 
+	WMWindowManager, WMGraphics, TFClasses, WMPopups, WMComponents, WMRestorable, WMDialogs, XML;
+
+CONST
+	ImagesFile = "Wallpapers.txt";
+
 TYPE
+
+	ImageInfo = RECORD
+		filename: AosFS.FileName;
+		img: WMGraphics.Image;
+	END;
+
 	Window = OBJECT(WMWindowManager.Window)
-	VAR img : WMGraphics.Image;
+	VAR 
+		img : WMGraphics.Image;
 		picname : ARRAY 256 OF CHAR;
+		changeable, stop: BOOLEAN;
+		interval: LONGINT; (* in seconds *)
+		timer : AosKernel.Timer;
+		currentImg: LONGINT;		
+		
+		PROCEDURE & New;
+		BEGIN
+			NEW(timer);
+		END New;
 		
 		PROCEDURE Draw*(canvas : WMGraphics.Canvas; w, h, q : LONGINT);
 		BEGIN
@@ -35,11 +54,49 @@ TYPE
 				ELSIF keys={2} THEN
 					NEW(contextMenu);
 					contextMenu.Add("Full screen", HandleFullScreen);
+					IF (imgList # NIL) & (LEN(imgList) > 0) THEN contextMenu.Add("Next", Change) END;
+					IF changeable THEN						
+						contextMenu.Add("Stop Change", HandleChangeable)
+					ELSE
+						contextMenu.Add("Change", HandleChangeable)
+					END;
 					contextMenu.Add("Remove", HandleRemove);
 					contextMenu.Popup(bounds.l+x, bounds.t+y)
 				END
 			END
 		END PointerDown;
+		
+		PROCEDURE SetChangeable(c: BOOLEAN);
+		BEGIN{EXCLUSIVE}
+			changeable := c
+		END SetChangeable;
+		
+		
+		PROCEDURE HandleChangeable(sender, data: PTR);
+		VAR str: ARRAY 32 OF CHAR; dr: LONGINT;
+		BEGIN
+			IF changeable THEN
+				SetChangeable(FALSE);
+				timer.Wakeup();
+			ELSE
+				str := "1800";
+				dr := WMDialogs.QueryString("Interval (in sec.)", str);
+				IF dr = WMDialogs.ResOk THEN
+					Utilities.StrToInt(str, dr);
+					IF dr > 0 THEN
+						interval := dr * 1000;
+					ELSE
+						interval := 30 * 1000;
+					END
+				ELSE
+					interval := 30 * 1000;
+				END;
+
+				SetChangeable(TRUE);
+			END
+		END HandleChangeable;
+		
+		
 		
 		PROCEDURE HandleFullScreen(sender, par: PTR);
 		VAR view : WMWindowManager.ViewPort; w, h : REAL; originator : PTR; 
@@ -55,18 +112,22 @@ TYPE
 		
 		PROCEDURE HandleRemove(sender, par: PTR);
 		BEGIN
+			Stop();
 			manager.SetFocus(SELF);
 			manager.Remove(SELF);
 			windowList.Remove(SELF)
 		END HandleRemove;
 		
 		PROCEDURE Handle(VAR x: WMMessages.Message);
-		VAR data : XML.Element; a : XML.Attribute; n : ARRAY 10 OF CHAR;
+		VAR data : XML.Element; a : XML.Attribute; n : ARRAY 32 OF CHAR;
 		BEGIN
 			IF (x.msgType = WMMessages.MsgExt) & (x.ext # NIL) THEN
 				IF (x.ext IS WMRestorable.Storage) THEN
 					NEW(data);  n := "Data"; data.SetName(n);
 					NEW(a); n := "file"; a.SetName(n); a.SetValue(picname); data.AddAttribute(a);
+					NEW(a); n := "changeable"; a.SetName(n); 
+					IF changeable THEN Utilities.IntToStr(interval, n); ELSE n := "0" END;
+					a.SetValue(n); data.AddAttribute(a);
 					x.ext(WMRestorable.Storage).Add("Backdrop", "WMBackdrop.Restore", SELF, data)
 				ELSE Handle^(x)
 				END
@@ -74,9 +135,66 @@ TYPE
 			END
 		END Handle;
 
+		PROCEDURE Change(sender, data: ANY);
+		VAR index, x, y, w, h: LONGINT; img : WMGraphics.Image;
+		BEGIN
+			IF imgList # NIL THEN
+				
+				REPEAT
+					INC(currentImg);
+					index := currentImg  MOD LEN(imgList);
+				UNTIL (imgList[index].filename # "");
+								
+				AosOut.String("Changing to  "); AosOut.String(imgList[index].filename); AosOut.Ln; 
+
+				IF imgList[index].img = NIL THEN					
+					img := GetImage(imgList[index].filename, GetWidth(), GetHeight());
+					IF img = NIL THEN 
+						AosOut.String("Image could not be loaded."); AosOut.Ln; 
+						RETURN 
+					ELSE
+						imgList[index].img := img;
+					END
+				END;
+				BEGIN{EXCLUSIVE}
+					COPY(imgList[index].filename, picname);				
+					SELF.img := imgList[index].img;
+					Invalidate(WMRectangles.MakeRect(0, 0, GetWidth(), GetHeight()))
+				END
+			END
+		END Change;
+		
+		PROCEDURE Stop;
+		BEGIN
+			BEGIN{EXCLUSIVE}
+				stop := TRUE;	
+			END;
+			timer.Wakeup();
+			BEGIN {EXCLUSIVE}
+				AWAIT(~stop)
+			END
+		END Stop;
+				
+
+	BEGIN {ACTIVE}
+		LOOP		
+			BEGIN {EXCLUSIVE} 
+				AWAIT(changeable OR stop);		
+			END;
+			IF stop THEN EXIT END;
+			Change(NIL, NIL);
+			timer.Sleep(interval);					
+			IF stop THEN EXIT END
+		END;
+		
+		BEGIN{EXCLUSIVE}
+			stop := FALSE;
+		END
 	END Window;
 	
-VAR windowList : TFClasses.List;
+VAR 
+	windowList : TFClasses.List;
+	imgList: POINTER TO ARRAY OF ImageInfo;
 	followPointer : WMWindowManager.PointerInfo;
 	
 PROCEDURE DefaultPos(VAR x, y, w, h : LONGINT);
@@ -92,23 +210,38 @@ BEGIN
 	h := ENTIER(view.range.b - view.range.t);
 END DefaultPos;
 
-PROCEDURE GetImage(name : ARRAY OF CHAR) : WMGraphics.Image;
-VAR img : WMGraphics.Image;
+PROCEDURE GetImage(name : ARRAY OF CHAR; w, h : LONGINT) : WMGraphics.Image;
+VAR img, t : WMGraphics.Image;
 	done : BOOLEAN;
-	i, count : LONGINT; ptr : PTR;
+	i, count : LONGINT; ptr : ANY;
+	c : WMGraphics.BufferCanvas;
 BEGIN
 	img := NIL;
 	windowList.Lock;
 	i := 0; count := windowList.GetCount();
 	WHILE (img = NIL) & (i < count) DO 
 		ptr := windowList.GetItem(i);
-		IF ptr(Window).picname = name THEN img := ptr(Window).img END;
+		IF (ptr(Window).picname = name) & (
+			(ptr(Window).img.width = w) & (ptr(Window).img.height = h) 
+			OR ( (w = 0) OR (h = 0)))
+		 THEN 
+			img := ptr(Window).img 
+		END;
 		INC(i)
 	END;
 	windowList.Unlock;
-	IF img = NIL THEN NEW(img); Raster.Load(img, name, done); 
-		IF ~done THEN img := NIL END;
+	IF img = NIL THEN 
+		t := WMGraphics.LoadImage(name, TRUE);
+		IF t # NIL THEN 
+			IF w = 0 THEN w := t.width END;
+			IF h = 0 THEN h := t.height END;
+			NEW(img); Raster.Create(img, w, h, Raster.BGR565);
+			NEW(c, img);
+			c.ScaleImage(t, WMRectangles.MakeRect(0, 0, t.width-1, t.height-1), WMRectangles.MakeRect(0, 0, w, h), 
+				WMGraphics.ModeCopy, WMGraphics.ScaleBilinear);
+		END	
 	END;
+		
 	AosOut.Ln; 
 	RETURN img	
 END GetImage;
@@ -141,40 +274,41 @@ VAR manager : WMWindowManager.WindowManager;
 BEGIN {EXCLUSIVE}
 	s := par(AosCommands.Parameters);
 	NEW(sr, LEN(s.str^)); sr.Set(s.str^);
-	sr.Token(name); sr.SkipWhitespace();
+	sr.String(name); sr.SkipWhitespace();
 	(* search if img is already loaded... *)
-	
-	img := GetImage(name);
 
-	IF img # NIL THEN sr.SkipWhitespace();
-		DefaultPos(tx, ty, tw, th);
-		IF sr.Peek() = '?' THEN x := tx 
-		ELSE x := 0;
-			IF (sr.Peek() >= '0') & (sr.Peek() <= '9') OR (sr.Peek() = '-') THEN sr.Int(x, TRUE) END; sr.SkipWhitespace()
-		END;
-		
-		IF sr.Peek() = '?' THEN y := ty
-		ELSE y := 0;
-			IF (sr.Peek() >= '0') & (sr.Peek() <= '9') OR (sr.Peek() = '-') THEN sr.Int(y, TRUE) END; sr.SkipWhitespace()
-		END;
-		IF sr.Peek() = '?' THEN w := tw
-		ELSE w := img.width;
-			IF (sr.Peek() >= '0') & (sr.Peek() <= '9') OR (sr.Peek() = '-') THEN sr.Int(w, TRUE) END; sr.SkipWhitespace()
-		END;
-		IF sr.Peek() = '?' THEN h := th
-		ELSE h := img.height; 
-			IF (sr.Peek() >= '0') & (sr.Peek() <= '9') OR (sr.Peek() = '-') THEN sr.Int(h, TRUE) END; sr.SkipWhitespace()
-		END;
-		NEW(bw);
-		COPY(name, bw.picname);
-		bw.bounds := WMRectangles.MakeRect(0, 0, w, h);
-		bw.img := img;
-		windowList.Add(bw);
-		bw.SetPointerInfo(followPointer);
-		manager := WMWindowManager.GetDefaultManager();
-		manager.Add(x, y, bw, {});
-		Rearrange
+	DefaultPos(tx, ty, tw, th);
+	IF sr.Peek() = '?' THEN x := tx; sr.SkipBytes(1); sr.SkipWhitespace();
+	ELSE x := 0;
+		IF (sr.Peek() >= '0') & (sr.Peek() <= '9') OR (sr.Peek() = '-') THEN sr.Int(x, TRUE) END; sr.SkipWhitespace();
 	END;
+	
+	IF sr.Peek() = '?' THEN y := ty; sr.SkipBytes(1); sr.SkipWhitespace();
+	ELSE y := 0;
+		IF (sr.Peek() >= '0') & (sr.Peek() <= '9') OR (sr.Peek() = '-') THEN sr.Int(y, TRUE) END; sr.SkipWhitespace();
+	END;
+	IF sr.Peek() = '?' THEN w := tw; sr.SkipBytes(1); sr.SkipWhitespace();
+	ELSE w := 0;
+		IF (sr.Peek() >= '0') & (sr.Peek() <= '9') OR (sr.Peek() = '-') THEN sr.Int(w, TRUE) END; sr.SkipWhitespace();
+	END;
+	IF sr.Peek() = '?' THEN h := th; sr.SkipBytes(1); sr.SkipWhitespace();
+	ELSE h := 0; 
+		IF (sr.Peek() >= '0') & (sr.Peek() <= '9') OR (sr.Peek() = '-') THEN sr.Int(h, TRUE) END; sr.SkipWhitespace();
+	END;
+	img := GetImage(name, w, h);
+	
+	IF img = NIL THEN AosOut.String("Image could not be loaded."); AosOut.Ln; RETURN NIL END;
+	
+	NEW(bw);
+	COPY(name, bw.picname);
+	bw.bounds := WMRectangles.MakeRect(0, 0, w, h);
+	bw.img := img;
+	windowList.Add(bw);
+(*		bw.SetPointerInfo(followPointer); *)
+	manager := WMWindowManager.GetDefaultManager();
+	manager.Add(x, y, bw, {WMWindowManager.FlagStayOnBottom});
+	Rearrange;
+
 	RETURN NIL
 END AddBackdropImage;
 
@@ -189,7 +323,7 @@ BEGIN
 			xml := par(WMRestorable.Context).appData(XML.Element);
 			s := xml.GetAttributeValue("file"); 
 			IF s # NIL THEN
-				img := GetImage(s^);
+				img := GetImage(s^, 0, 0);
 				IF img # NIL THEN
 					NEW(w);
 					COPY(s^, w.picname);
@@ -198,6 +332,15 @@ BEGIN
 					WMRestorable.AddByContext(w, par(WMRestorable.Context) ,{});
 					Rearrange
 				END
+			END;
+			s := xml.GetAttributeValue("changeable");
+			IF (s # NIL) & (w # NIL) THEN
+				IF s^ # "0" THEN 
+					Utilities.StrToInt(s^, w.interval);
+					IF w.interval > 500 THEN
+						w.SetChangeable(TRUE);
+					END;
+				END;
 			END	
 		END			
 	END;
@@ -207,16 +350,21 @@ END Restore;
 PROCEDURE Cleanup;
 VAR manager : WMWindowManager.WindowManager;
 	ptr : PTR;
+	w: Window;
 	i : LONGINT;
 BEGIN
 	manager := WMWindowManager.GetDefaultManager();
 	windowList.Lock;
 	FOR i := 0 TO windowList.GetCount() - 1 DO 
 		ptr := windowList.GetItem(i); 
+		w := ptr(Window);
+		w.Stop;
 		manager.Remove(ptr(WMWindowManager.Window))
 	END;
 	windowList.Unlock;
 END Cleanup;
+
+
 
 PROCEDURE RemoveAll*(par : PTR) : PTR;
 BEGIN
@@ -224,9 +372,47 @@ BEGIN
 	RETURN NIL
 END RemoveAll;
 
+PROCEDURE ChangeList;
+VAR
+	f: AosFS.File; 
+	r: AosFS.Reader; 
+	i, nr: LONGINT;
+
+	PROCEDURE NumberImg(): LONGINT;
+	VAR line: AosFS.FileName; r: AosFS.Reader; nr: LONGINT;
+	BEGIN
+		AosFS.OpenReader(r, f, 0);						
+		WHILE (r.res = AosIO.Ok) DO
+			r.Ln(line); 
+			INC(nr);			
+		END;
+		RETURN nr;											
+	END NumberImg;
+	
+	
 BEGIN
-	WMWindowManager.LoadCursor("traditional.arrow.png", 0, 0, followPointer);
+	f := AosFS.Old(ImagesFile);
+	IF (f # NIL) THEN
+		nr := NumberImg();
+		AosOut.String("nr= "); AosOut.Int(nr, 0); AosOut.Ln; 
+		NEW(imgList, nr);
+		AosFS.OpenReader(r, f, 0);								
+		i := 0;
+		WHILE (r.res = AosIO.Ok) DO			
+			r.Ln(imgList[i].filename);
+			AosOut.String(imgList[i].filename); AosOut.Ln; 
+			INC(i);
+		END
+	ELSE
+		AosOut.String("No image list found");AosOut.Ln; 			
+	END
+END ChangeList;
+
+
+BEGIN
+(*	WMWindowManager.LoadCursor("traditional.arrow.png", 0, 0, followPointer); *)
 	NEW(windowList);
+	ChangeList();
 	AosModules.InstallTermHandler(Cleanup)
 END WMBackdrop.
 
@@ -234,7 +420,7 @@ END WMBackdrop.
 S.Free WMBackdrop ~
 
 (* install backdrop at current view position and size *)
-WMBackdrop.AddBackdropImage BluebottlePic0.png ? ? ? ?
+WMBackdrop.AddBackdropImage "Desktop1_1024x768.png" ? ? ? ?
 WMBackdrop.AddBackdropImage AosBackdrop.png ? ? ? ?
 
 (* install backdrop at specified position with original size of the image *)

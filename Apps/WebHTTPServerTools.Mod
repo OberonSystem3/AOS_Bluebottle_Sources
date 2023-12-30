@@ -8,7 +8,7 @@ CONST
 	moduleName = "WebHTTPServerTools";
 	
 PROCEDURE Start*(par: PTR): PTR; (** ["\r:" default root directory] ["\l:" log file] *)
-VAR p: AosCommands.Parameters; r: AosIO.StringReader; c, opt: CHAR; str, root, log: ARRAY 1024 OF CHAR;
+VAR p: AosCommands.Parameters; r: AosIO.StringReader; c, opt: CHAR; str, root, log, tls: ARRAY 1024 OF CHAR; 
 BEGIN
 	p := par(AosCommands.Parameters);
 	NEW(r, LEN(p.str^)); r.Set(p.str^);
@@ -30,11 +30,15 @@ BEGIN
 		CASE opt OF
 		| "R": COPY(str, root)
 		| "L": COPY(str, log)
+		| "S": COPY(str, tls)
 		ELSE EXIT
 		END
 	END;
 
-	WebHTTPServer.Start(root, log);
+	IF tls = "on"  THEN
+		WebHTTPServer.StartHTTPS(root, log);
+	END;
+	WebHTTPServer.StartHTTP(root, log);
 	AosOut.String("HTTP server started. Default root directory = '"); AosOut.String(root); AosOut.String("'; logging ");
 	IF (log = "") THEN AosOut.String("disabled")
 	ELSE AosOut.String("to '"); AosOut.String(log); AosOut.Char("'")
@@ -46,8 +50,9 @@ END Start;
 PROCEDURE Stop*(par: PTR): PTR;
 VAR dummy: PTR;
 BEGIN
-	dummy := WebHTTPServer.Stop(par);
-	AosOut.String("HTTP server stopped."); AosOut.Ln;
+	dummy := WebHTTPServer.StopHTTP(par);
+	dummy := WebHTTPServer.StopHTTPS(par);
+	AosOut.String("Server stopped."); AosOut.Ln;
 	RETURN NIL
 END Stop;
 
@@ -123,7 +128,8 @@ END WebHTTPServerTools.
 
 System.Free WebHTTPServerTools~
 
-Aos.Call WebHTTPServerTools.Start \r:FAT:/httproot \l:FAT:/httproot/HTTP.Log~
+Aos.Call WebHTTPServerTools.Start \r:FAT:/httproot \l:FAT:/httproot/HTTP.Log \s:on~
+Aos.Call WebHTTPServerTools.Start \r:AOS: \l:web.log~
 Aos.Call WebHTTPServerTools.Stop
 
 Aos.Call WebHTTPServerTools.AddHost livepc \r:FAT:/httproot/test~

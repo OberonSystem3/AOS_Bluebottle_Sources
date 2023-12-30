@@ -1,33 +1,34 @@
 MODULE WMRestorable; (** AUTHOR "tf"; PURPOSE "Save and restore the desktop"; *)
 
 IMPORT
-	AosKernel, AosModules, AosCommands, AosIO, AosFS, Utilities, WMMessages, WMWindowManager, 
-	XML, XMLObjects, XMLScanner, XMLParser, 
-	AosOut;
+	AosCommands, AosIO, AosFS, AosKernel, AosModules, AosOut, Utilities, WMMessages,
+	XML, XMLObjects, XMLScanner, XMLParser,
+	WM := WMWindowManager;
 
 TYPE
+	String* = Utilities.String;
+	XmlElement* = XML.Element;
+	
 	Storage* = OBJECT
 	VAR data : XML.Element;
 
 		PROCEDURE &New;
-		VAR n : ARRAY 16 OF CHAR;
 		BEGIN
-			NEW(data); n := "Desktop"; data.SetName(n);
+			NEW(data); data.SetName("Desktop");
 		END New;
-		
-		PROCEDURE Add*(name, loader: ARRAY OF CHAR; w : WMWindowManager.Window; appData: XML.Element);
-		VAR a : XML.Attribute; n, s : ARRAY 16 OF CHAR;
-			bounds : XML.Element;
-			window: XML.Element;
-		BEGIN {EXCLUSIVE}
-			NEW(window); n := "Window"; window.SetName(n);
-			NEW(a); n := "name"; a.SetName(n); a.SetValue(name); window.AddAttribute(a);
-			NEW(a); n := "loader"; a.SetName(n); a.SetValue(loader); window.AddAttribute(a);
 
-			NEW(a); n := "l"; a.SetName(n); Utilities.IntToStr(w.bounds.l, s); a.SetValue(s); window.AddAttribute(a);
-			NEW(a); n := "t"; a.SetName(n); Utilities.IntToStr(w.bounds.t, s); a.SetValue(s); window.AddAttribute(a);
-			NEW(a); n := "r"; a.SetName(n); Utilities.IntToStr(w.bounds.r, s); a.SetValue(s); window.AddAttribute(a);
-			NEW(a); n := "b"; a.SetName(n); Utilities.IntToStr(w.bounds.b, s); a.SetValue(s); window.AddAttribute(a);
+		PROCEDURE Add*(name, loader : ARRAY OF CHAR; w : WM.Window; appData : XML.Element);
+		VAR window: XML.Element;
+		BEGIN {EXCLUSIVE}
+			NEW(window); window.SetName("Window");
+
+			StoreString(window, "name", name);
+			StoreString(window, "loader", loader);
+			
+			StoreLongint(window, "l", w.bounds.l);
+			StoreLongint(window, "t", w.bounds.t);
+			StoreLongint(window, "r", w.bounds.r);
+			StoreLongint(window, "b", w.bounds.b);
 
 			IF appData # NIL THEN window.AddContent(appData) END;
 			
@@ -43,96 +44,90 @@ TYPE
 			w.Update;
 			AosFS.Register(f)
 		END Write;
-		
+
 	END Storage;
-	
-TYPE Context* = OBJECT
+
+	Context* = OBJECT
 	VAR l*, t*, r*, b* : LONGINT;
 		appData* : XML.Element;
 	END Context;
 
-TYPE Loader = OBJECT
+	Loader = OBJECT
 	VAR c : AosModules.CommandParProc;
 		par : Context;
-	
+
 		PROCEDURE &New(c : AosModules.CommandParProc; par : Context);
 		BEGIN
-			SELF.c := c; SELF.par := par 
+			SELF.c := c; SELF.par := par
 		END New;
+
 	BEGIN {ACTIVE}
-		AosOut.String("loading"); AosOut.Ln; 
 		IF c(par) = NIL THEN END
 	END Loader;
 
-
 VAR hasErrors : BOOLEAN;
 
-PROCEDURE Store*(par : ANY) : ANY;
+PROCEDURE Store*(par : ANY) : ANY; (** filename ~ *)
 VAR context : Storage;
-	m : WMWindowManager.WindowManager;
+	m : WM.WindowManager;
 	msg : WMMessages.Message;
-	n : ARRAY 16 OF CHAR;
 	t : AosKernel.Timer;
-
-	sp : AosCommands.Parameters;
 	sr : AosIO.StringReader;
-	name : ARRAY 256 OF CHAR;	
-BEGIN 
-	sp := par(AosCommands.Parameters);
-	NEW(sr, LEN(sp.str^)); sr.Set(sp.str^);
-	sr.String(name);
-	
+	fn : ARRAY 256 OF CHAR;
+BEGIN
+	AosCommands.PosPar(par, sr);
+	AosCommands.GetTok(sr, fn);
 	NEW(context);
 	msg.ext := context; msg.msgType := WMMessages.MsgExt;
-	m := WMWindowManager.GetDefaultManager();
+	m := WM.GetDefaultManager();
 	m.Broadcast(msg);
+	AosOut.String("WMRestorable: Saving desktop to "); AosOut.String(fn); AosOut.String("..."); AosOut.Ln;
 	NEW(t); t.Sleep(100);
-	context.Write(name);
+	context.Write(fn);
 	NEW(t); t.Sleep(500);
-	context.Write(name);
+	context.Write(fn);
 	NEW(t); t.Sleep(1500);
-	context.Write(name);
-	AosOut.String("Stored"); AosOut.Ln; 
+	context.Write(fn);
+	AosOut.String("WMRestorable: Desktop saved."); AosOut.Ln; 
 	RETURN NIL
 END Store;
 
-PROCEDURE AddByContext*(w : WMWindowManager.Window; c : Context; flags : SET);
-VAR manager : WMWindowManager.WindowManager;
+PROCEDURE AddByContext*(w : WM.Window; c : Context; flags : SET);
+VAR manager : WM.WindowManager;
 BEGIN
-	manager := WMWindowManager.GetDefaultManager();
-	w.bounds.l := c.l; 
-	w.bounds.t := c.t; 
-	w.bounds.r := c.r; 
-	w.bounds.b := c.b; 
+	manager := WM.GetDefaultManager();
+	w.bounds.l := c.l;
+	w.bounds.t := c.t;
+	w.bounds.r := c.r;
+	w.bounds.b := c.b;
 	manager.Add(c.l, c.t, w, flags);
 END AddByContext;
 
-
 (* Report errors while parsing *)
-PROCEDURE Error(pos, line, row: LONGINT; msg: ARRAY OF CHAR);
+PROCEDURE Error(pos, line, row : LONGINT; msg : ARRAY OF CHAR);
 BEGIN
-	AosOut.String("Parse error at pos "); AosOut.Int(pos, 5); AosOut.String(" in line "); AosOut.Int(line, 5); 
+	AosOut.String("Parse error at pos "); AosOut.Int(pos, 5); AosOut.String(" in line "); AosOut.Int(line,5);
 	AosOut.String(" row "); AosOut.Int(row, 5); AosOut.String(" - "); AosOut.String(msg); AosOut.Ln;
 	hasErrors := TRUE
 END Error;
 
 PROCEDURE RestoreWindow(w : XML.Element);
-VAR s, l : Utilities.String;
+VAR l : Utilities.String;
 	c : AosModules.CommandParProc;
 	loader : Loader;
-	context : Context;	
+	context : Context;
 	en : XMLObjects.Enumerator;
 	p : ANY;
 BEGIN
 	l := w.GetAttributeValue("loader");
 	IF l # NIL THEN
 		NEW(context);
-		s := w.GetAttributeValue("l"); Utilities.StrToInt(s^, context.l); 
-		s := w.GetAttributeValue("t"); Utilities.StrToInt(s^, context.t); 
-		s := w.GetAttributeValue("r"); Utilities.StrToInt(s^, context.r); 
-		s := w.GetAttributeValue("b"); Utilities.StrToInt(s^, context.b);
-		en := w.GetContents(); 
-		IF  en.HasMoreElements() THEN 
+		LoadLongint(w, "l", context.l);
+		LoadLongint(w, "t", context.t);
+		LoadLongint(w, "r", context.r);
+		LoadLongint(w, "b", context.b);
+		en := w.GetContents();
+		IF en.HasMoreElements() THEN
 			p := en.GetNext();
 			IF (p # NIL) & (p IS XML.Element) THEN context.appData := p(XML.Element) END
 		END;
@@ -141,34 +136,33 @@ BEGIN
 	END
 END RestoreWindow;
 
-
-PROCEDURE Load*(par : ANY) : ANY;
+PROCEDURE Load*(par : ANY) : ANY; (** filename ~ *)
 VAR f : AosFS.File;
 	scanner : XMLScanner.Scanner;
 	parser : XMLParser.Parser;
+	reader : AosFS.Reader;
 	doc : XML.Document;
 	content : XML.Element;
 	en : XMLObjects.Enumerator;
 	s : Utilities.String;
 	p : ANY;
-	
-	sp : AosCommands.Parameters;
 	sr : AosIO.StringReader;
-	name : ARRAY 256 OF CHAR;	
+	fn : ARRAY 256 OF CHAR;
 BEGIN {EXCLUSIVE}
-	sp := par(AosCommands.Parameters);
-	NEW(sr, LEN(sp.str^)); sr.Set(sp.str^);
-	sr.String(name);
-	
+	AosCommands.PosPar(par, sr);
+	AosCommands.GetTok(sr, fn);
+	AosOut.String("WMRestorable: Loading desktop from "); AosOut.String(fn); AosOut.String("..."); AosOut.Ln;
+
 	hasErrors := FALSE;
-	f := AosFS.Old(name);
+	f := AosFS.Old(fn);
 	IF f # NIL THEN
-		NEW(scanner, f); scanner.reportError := Error;
+		NEW(reader, f, 0);
+		NEW(scanner, reader); scanner.reportError := Error;
 		NEW(parser, scanner); parser.reportError := Error;
 		doc := parser.Parse();
 		IF hasErrors THEN RETURN NIL END;
 		content := doc.GetRoot();
-		en := content.GetContents(); 
+		en := content.GetContents();
 		WHILE en.HasMoreElements() DO
 			p := en.GetNext();
 			IF p IS XML.Element THEN
@@ -178,14 +172,143 @@ BEGIN {EXCLUSIVE}
 				END
 			END
 		END
+	ELSE
+		AosOut.String("WMRestorable: File "); AosOut.String(fn); AosOut.String(" not found."); AosOut.Ln;
 	END;
 	RETURN NIL
 END Load;
 
+(** Returns a XML element contained in Context.appData by its path 
+	e.g. GetElement(c, "Configuration\DisplaySettings") *)
+PROCEDURE GetElement*(c : Context; path : ARRAY OF CHAR) : XmlElement;
+CONST 
+	PathDelimiter = "\";
+VAR 
+	strings : Utilities.StringArray;	
+	string : String;
+	elem : XML.Element; 
+	idx : LONGINT;
+BEGIN
+	IF (c # NIL) & (c.appData # NIL) THEN	
+		elem := c.appData (XML.Element);
+		strings := Utilities.Split(path, PathDelimiter);
+		string := elem.GetName();
+		IF (string # NIL) OR (string^ = strings[0]^) THEN			
+			idx := 1;
+			LOOP
+				IF (idx >= LEN(strings)) OR (elem = NIL) THEN EXIT; END;
+				elem := GetElementByName(elem, strings[idx]^);
+				INC(idx);
+			END;
+		END;
+	END;
+	IF elem = NIL THEN
+		AosOut.String("WMRestorable: Element "); AosOut.String(path); AosOut.String(" not found."); AosOut.Ln;
+	END;
+	RETURN elem;
+END GetElement;
+
+PROCEDURE LoadBoolean*(elem : XML.Element; name : ARRAY OF CHAR; VAR value : BOOLEAN);
+VAR string : String;
+BEGIN
+	string := elem.GetAttributeValue(name);
+	IF (string # NIL) THEN
+		IF (string^ = "true") THEN value := TRUE; ELSE value := FALSE; END;
+	ELSE
+		ShowLoadError("LoadBoolean", elem, name);
+	END;
+END LoadBoolean;
+
+PROCEDURE StoreBoolean*(elem : XML.Element; name : ARRAY OF CHAR; value : BOOLEAN);
+VAR a : XML.Attribute; string : ARRAY 8 OF CHAR;
+BEGIN
+	NEW(a); a.SetName(name); 
+	IF value THEN string := "true"; ELSE string := "false"; END; a.SetValue(string);
+	elem.AddAttribute(a);
+END StoreBoolean;
+
+PROCEDURE LoadLongint*(elem : XML.Element; name : ARRAY OF CHAR; VAR value : LONGINT);
+VAR string : String;
+BEGIN
+	string := elem.GetAttributeValue(name);
+	IF string # NIL THEN 
+		Utilities.StrToInt(string^, value); 
+	ELSE
+		ShowLoadError("LoadLongint", elem, name);
+	END;
+END LoadLongint;
+
+PROCEDURE StoreLongint*(elem : XML.Element; name : ARRAY OF CHAR; value : LONGINT);
+VAR a : XML.Attribute; string : ARRAY 32 OF CHAR;
+BEGIN
+	NEW(a); a.SetName(name); Utilities.IntToStr(value, string); a.SetValue(string);
+	elem.AddAttribute(a);
+END StoreLongint;
+
+PROCEDURE LoadString*(elem : XML.Element; name : ARRAY OF CHAR; VAR value : ARRAY OF CHAR);
+VAR string : String;
+BEGIN
+	value := ""; string := elem.GetAttributeValue(name);
+	IF string # NIL THEN
+		COPY(string^, value); 
+	ELSE
+		ShowLoadError("LoadString", elem, name);
+	END;
+END LoadString;
+
+PROCEDURE StoreString*(elem : XML.Element; name, value : ARRAY OF CHAR);
+VAR a : XML.Attribute;
+BEGIN
+	NEW(a); a.SetName(name); a.SetValue(value); elem.AddAttribute(a);
+END StoreString;
+
+PROCEDURE LoadStringPtr*(elem : XML.Element; name : ARRAY OF CHAR; VAR value : String);
+BEGIN
+	value := elem.GetAttributeValue(name);
+	IF value = NIL THEN
+		ShowLoadError("LoadStringPtr", elem, name);
+	END;
+END LoadStringPtr;
+
+PROCEDURE StoreStringPtr*(elem : XML.Element; name : ARRAY OF CHAR;  value : String);
+VAR a : XML.Attribute;
+BEGIN
+	NEW(a); a.SetName(name); a.SetValue(value^); elem.AddAttribute(a);
+END StoreStringPtr;
+
+PROCEDURE GetElementByName(parent : XML.Element; name : ARRAY OF CHAR) : XML.Element;
+VAR elem : XML.Element; enum : XMLObjects.Enumerator; ptr : PTR; string : String;
+BEGIN
+	IF parent # NIL THEN
+		enum := parent.GetContents(); enum.Reset();
+		WHILE enum.HasMoreElements() DO
+			ptr := enum.GetNext();
+			IF ptr IS XML.Element THEN
+				elem := ptr (XML.Element);
+				string := elem.GetName();
+				IF (string # NIL) & (string^ = name) THEN
+					RETURN elem;
+				END;
+			END;
+		END;						 		
+ 	END;
+ 	RETURN NIL;
+END GetElementByName;
+
+PROCEDURE ShowLoadError(procedureName : ARRAY OF CHAR; elem : XML.Element; name : ARRAY OF CHAR);
+VAR string : String;
+BEGIN
+	AosOut.String("WMRestorable: "); AosOut.String(procedureName); 
+	AosOut.String(": Attribute '"); AosOut.String(name); AosOut.String("' of element "); 
+	string := elem.GetName(); IF string # NIL THEN AosOut.String(string^); ELSE AosOut.String("<no name>"); END;
+	AosOut.String(" not found."); 
+	AosOut.Ln;
+END ShowLoadError;
 
 END WMRestorable.
 
-S.Free WMRestorable 
-WMRestorable.Store 
-WMRestorable.Load 
-PET.Open test.dsk 
+S.Free WMRestorable ~
+WMRestorable.Store ~
+WMRestorable.Load ~
+
+PET.Open Auto.dsk ~	(* used to verify the behaviour of WMRestorable *)

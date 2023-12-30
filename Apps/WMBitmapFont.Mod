@@ -125,6 +125,7 @@ TYPE
 		VAR f : AosFS.File;
 			scanner : Scanner.Scanner;
 			parser : Parser.Parser;
+			reader : AosFS.Reader;
 			doc : XML.Document;
 			p : PTR;
 			root : XML.Element;
@@ -231,8 +232,9 @@ TYPE
 			
 		BEGIN
 			f := AosFS.Old(filename);
-			IF f # NIL THEN 
-				NEW(scanner, f); NEW(parser, scanner); doc := parser.Parse()
+			IF f # NIL THEN
+				NEW(reader, f, 0);
+				NEW(scanner, reader); NEW(parser, scanner); doc := parser.Parse()
 			END;
 			
 			root := doc.GetRoot();

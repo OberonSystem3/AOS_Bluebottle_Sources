@@ -1,4 +1,4 @@
-MODULE XMLLoader;	(** Stefan Walthert    *)
+MODULE XMLLoader;	(** Stefan Walthert   *)
 (** AUTHOR "swalthert"; PURPOSE ""; *)
 
 IMPORT
@@ -25,20 +25,23 @@ END LoadCSS;
 
 PROCEDURE LoadXML*(xmlName: ARRAY OF CHAR): XML.Document;
 VAR xmlFile: AosFS.File; xmlScanner: XMLScanner.Scanner; xmlParser: XMLParser.Parser;
+	reader: AosFS.Reader;
 BEGIN
 	xmlFile := AosFS.Old(xmlName);
 	IF xmlFile = NIL THEN RETURN NIL
-	ELSE NEW(xmlScanner, xmlFile); NEW(xmlParser, xmlScanner); RETURN xmlParser.Parse()
+	ELSE NEW(reader, xmlFile, 0); NEW(xmlScanner, reader); NEW(xmlParser, xmlScanner); RETURN xmlParser.Parse()
 	END
 END LoadXML;
 
 PROCEDURE LoadComponents*(xmlName, generatorSchemaName: ARRAY OF CHAR): XML.Document;
 VAR xmlFile: AosFS.File; xmlScanner: XMLScanner.Scanner; xmlParser: XMLParser.Parser;
+	reader: AosFS.Reader;
 BEGIN
 	xmlFile := AosFS.Old(xmlName);
 	IF xmlFile = NIL THEN RETURN NIL
 	ELSE
-		NEW(xmlScanner, xmlFile); NEW(xmlParser, xmlScanner);
+		NEW(reader, xmlFile, 0);
+		NEW(xmlScanner, reader); NEW(xmlParser, xmlScanner);
 		xmlParser.elemReg := XMLGeneratorSchema.OpenGeneratorSchema(generatorSchemaName);
 		IF xmlParser.elemReg = NIL THEN xmlParser.elemReg := DefaultXMLElementRegistry END;
 		RETURN xmlParser.Parse()

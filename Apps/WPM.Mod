@@ -27,7 +27,7 @@ BEGIN
 	len := TextUtils.UCS32StrLength(xs);
 	REPEAT
 		pos := TextUtils.Pos(xs, 0, text);
-		IF pos >= 0 THEN text.Delete(pos, len); replace.CopyToText(sfrom, slen, text, pos) END	
+		IF pos >= 0 THEN text.Delete(pos, len); text.CopyFromText(replace, sfrom, slen, pos) END	
 	UNTIL pos < 0;
 	text.ReleaseWrite
 END ReplaceString;
@@ -45,7 +45,7 @@ BEGIN
 	template.AcquireRead; src.AcquireRead; dst.AcquireWrite;
 	
 	(* copy template to dst *)
-	template.CopyToText(0, template.GetLength(), dst, 0);
+	dst.CopyFromText(template, 0, template.GetLength(), 0);
 	
 	(* find title *)
 	UTFUCS(titleBegin, str); tb := TextUtils.Pos(str, 0, src); IF tb > 0 THEN INC(tb, TextUtils.UCS32StrLength(str)) END;
@@ -96,6 +96,6 @@ BEGIN
 END Replace;
 
 END WPM.
- 
+
 
 System.Free WPM AosTextUtilities AosTexts ~

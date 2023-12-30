@@ -2105,7 +2105,7 @@ BEGIN
 	m.Enter("TST", PCOARM.opTST, m.Condition, m.SFlag, NIL, m.R16, m.ShifterOperand, NIL, NIL, NIL);
 	m.Enter("TEQ", PCOARM.opTEQ, m.Condition, m.SFlag, NIL, m.R16, m.ShifterOperand, NIL, NIL, NIL);
 	m.Enter("CMP", PCOARM.opCMP, m.Condition, m.SFlag, NIL, m.R16, m.ShifterOperand, NIL, NIL, NIL);
-	m.Enter("CMN", PCOARM.opCMP, m.Condition, m.SFlag, NIL, m.R16, m.ShifterOperand, NIL, NIL, NIL);
+	m.Enter("CMN", PCOARM.opCMN, m.Condition, m.SFlag, NIL, m.R16, m.ShifterOperand, NIL, NIL, NIL); (* ejz, fof *)
 	m.Enter("ORR", PCOARM.opORR, m.Condition, m.SFlag, m.R12, m.R16, m.ShifterOperand, NIL, NIL, NIL);
 	m.Enter("MOV", PCOARM.opMOV, m.Condition, m.SFlag, m.R12, NIL, m.ShifterOperand, NIL, NIL, NIL);
 	m.Enter("BIC", PCOARM.opBIC, m.Condition, m.SFlag, m.R12, m.R16, m.ShifterOperand, NIL, NIL, NIL);

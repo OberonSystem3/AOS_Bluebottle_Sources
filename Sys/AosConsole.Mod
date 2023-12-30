@@ -127,7 +127,7 @@ BEGIN
 	IF ~GetString(k, s, gen) THEN Error(alias, s, k); RETURN END;
 		(* call volume generator *)
 	volReady := FALSE;
-	IF s = "NIL" THEN volReady := TRUE
+	IF gen = "NIL" THEN volReady := TRUE
 	ELSE
 		IF Call(gen, parvol) & (parvol.vol # NIL) THEN
 			INCL(parvol.vol.flags, AosFS.Boot); parfs.vol := parvol.vol;

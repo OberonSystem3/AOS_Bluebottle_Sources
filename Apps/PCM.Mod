@@ -35,23 +35,27 @@ IMPORT
 		TypeCheck*= 3;		(* t - perform type checks *)
 		PtrInit* = 5;				(* p - initialize pointers to NIL *)
 		AssertCheck* = 6;		(* a - evaluate asserts *)
+		Optimize* = 13;
 		FullStackInit* = 20;	(* z - clear all values on stack *)
-		
+
 		ExportDefinitions* = 30;
 		UseDefinitions* = 31;
 		
 		(** parser options *)
 		NewSF* = 16;				(* s - generation of new symbol file allowed *)
 		ExtSF* = 17;				(* e - generation of extended symbol file allowed *)
-		Breakpoint* = 18;		(* f - find position in code *)
-		CacheImports* = 19; 	(* c - Cache imported modules *)
+		Breakpoint* = 18;			(* f - find position in code *)
+		CacheImports* = 19; 		(* c - Cache imported modules *)
 		NoFiles* = 21;				(* n - don't generate files, parse only*)
 		NoOpOverloading* = 22;	(* o - do NOT allow operator overloading *)
 		BigEndian* = 23;			(* b - generate big endian code, makes only sense together with ARM backend *)
-		
+		Warnings* = 24;				(* W - display warnings *)
+		SkipOldSFImport* = 25;		(* S - skip old symbol file import in PCOM.Export, avoids compiler error when migrating to new object file *) (* ug *)
+
 		(** sysflags *)
 		Untraced* = 4;	(** global vars + fields - weak pointer *)
-		
+		CParam* = 13; (* ejz *)
+
 		(** compiler generated traps *)
 		WithTrap* = 1;
 		CaseTrap* = 2;
@@ -64,13 +68,9 @@ IMPORT
 		
 
 			(** file names and extentions *)
-		FileTag = 0BBX;	(*OM File Tag*)
-		NoZeroCompress = 0ADX;
-		OldFileVersion* = 0AFX;
-		NewFileVersion* = 0B0X;
-		
-			(** Configuration -- temp *)
-		OldFileFormat* = FALSE;
+		FileTag = 0BBX;				(* same constants are defined in AosLinker and AosLoader *)
+		NoZeroCompress = 0ADX;	(* do. *)
+		FileVersion* = 0B1X;			(* do. *)
 		
 		LocalUnicodeSupport* = TRUE;
 		ExportedUnicodeSupport* = FALSE;
@@ -259,11 +259,19 @@ IMPORT
 	BEGIN R.obj.RawLInt(i)
 	END ObjWLInt;
 	
+	PROCEDURE ObjWLIntAt*(VAR R: Rider; pos: LONGINT; i: LONGINT);
+		VAR w: AosFS.Writer;
+	BEGIN
+		R.obj.Update;
+		AosFS.OpenWriter(w, R.objF, pos);
+		w.RawLInt(i);
+		w.Update
+	END ObjWLIntAt;
+	
 	PROCEDURE ObjWName*(VAR R: Rider; str: ARRAY OF CHAR);
 	BEGIN R.obj.RawString(str)
 	END ObjWName;
-
-
+	
 	PROCEDURE RefW*(VAR R: Rider; ch: CHAR);
 	BEGIN R.ref.Char(ch)
 	END RefW;
@@ -308,12 +316,14 @@ IMPORT
 	BEGIN
 		R.symmod.Update;	(* flush buffers to file *)
 		R.sym.Update;
-		IF OldFileFormat THEN
-			R.obj.RawNum(R.obj, R.symmod.sent + R.sym.sent);
+(*		IF OldFileFormat THEN
+			R.obj.RawNum(R.symmod.sent + R.sym.sent);
 		ELSE
 			R.obj.RawNum(4 + R.symmod.sent + R.sym.sent);
 			R.obj.RawSet(codeOptions)
-		END;
+		END; *)
+		R.obj.RawNum(4 + R.symmod.sent + R.sym.sent);
+		R.obj.RawSet(codeOptions);		
 		AppendFile(R.symmodF, R.obj);
 		AppendFile(R.symF, R.obj)
 	END CloseSym;
@@ -405,7 +415,6 @@ IMPORT
 	PROCEDURE Error* (err, pos: LONGINT;  msg: ARRAY OF CHAR);
 		VAR p, q: Errors;
 	BEGIN {EXCLUSIVE}
-		(*IF err = 83 THEN HALT(MAX(INTEGER)) END;*)
 		error := error OR (err <= 400) OR (err >= 404);
 		IF err = 400 THEN breakpos := pos END;
 		p := errors; q := p.next;
@@ -427,6 +436,7 @@ IMPORT
 	PROCEDURE Warning* (err, pos: LONGINT;  msg: ARRAY OF CHAR);
 		VAR p, q: Errors;
 	BEGIN {EXCLUSIVE}
+		IF ~(Warnings IN parserOptions) THEN RETURN END;
 		p := errors; q := p.next;
 		WHILE (q # NIL) & (q.pos <= pos) DO p := q; q := q.next END;
 		NEW(q);
@@ -567,6 +577,7 @@ BEGIN
 END PCM.
 
 (*
+	15.11.06	ug	new compiler option /S added, FileVersion incremented
 	20.09.03	prk	"/Dcode" compiler option added
 	24.06.03	prk	Remove TDMask (no need to mask typedescriptors)
 	22.02.02	prk	unicode support

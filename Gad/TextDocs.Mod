@@ -19,6 +19,7 @@ MODULE TextDocs; (** portable *)	(** jm 1.2.95 / tk 1.6.95 *)
 	6.1.97 - SearchDiff now support objects in text
 	12.8.96 pjm - Invalid title check
 	17.4.97 - fixed bug in AdjustStyles
+	1.6.06 - fof added ReplaceColor 
 *)
 
 IMPORT
@@ -856,6 +857,42 @@ BEGIN
 		END
 	END
 END SearchColor;
+
+(** fof >> *)
+PROCEDURE ReplaceColor*;
+	VAR R: Texts.Reader;S: Attributes.Scanner;  text: Texts.Text;
+		beg, end,time: LONGINT; ch: CHAR; srccol,destcol: SHORTINT; 
+ par: Oberon.ParList; f: Display.Frame; F: TextGadgets.Frame; doc: Documents.Document;
+
+BEGIN
+par := Oberon.Par;
+	Attributes.OpenScanner(S, par.text, par.pos); 
+	Attributes.Scan(S); IF S.class # Texts.Int THEN RETURN ELSE destcol := SHORT(SHORT(S.i)) END;
+	text := NIL; Oberon.GetSelection(text, beg, end, time);
+	IF text # NIL THEN	(* set search pattern *)
+		Texts.OpenReader(R, text, beg); Texts.Read(R, ch); srccol := R.col;
+	END;
+	f := Oberon.MarkedFrame(); 
+	IF (f # NIL) & (f IS TextGadgets.Frame) THEN F := f(TextGadgets.Frame)
+	ELSE
+		doc := Documents.MarkedDoc();
+		IF (doc # NIL) & (doc.dsc IS TextGadgets.Frame) THEN F := doc.dsc(TextGadgets.Frame) END
+	END;
+	IF F=NIL THEN RETURN END; 
+	Texts.OpenReader(R,F.text, 0); Texts.Read(R, ch);
+	WHILE ~R.eot  DO 
+		IF R.col=srccol THEN beg := Texts.Pos(R)-1; end := beg+1; Texts.Read(R,ch); 
+		WHILE  (~R.eot)& (R.col=srccol) DO 
+			INC(end); Texts.Read(R,ch);
+		END;
+		Texts.ChangeLooks(F.text, beg, end, {1}, NIL, destcol, 0); 
+		ELSE
+			Texts.Read(R, ch); 
+		END; 
+	END;
+END ReplaceColor;
+(** << fof  *)
+
 
 (** Set all styles to paper width *)
 PROCEDURE AdjustStyles*;

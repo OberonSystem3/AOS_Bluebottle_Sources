@@ -2,7 +2,7 @@ MODULE WMDefaultWindows;	(** AUTHOR "TF"; PURPOSE "Decoration windows, backgroun
 
 IMPORT
 	Utilities, WM := WMWindowManager, WMRectangles, Raster, Graphics := WMGraphics, Math,
-	Messages := WMMessages, AosOut, WMGraphicUtilities;
+	Messages := WMMessages, AosInputs, AosOut, WMGraphicUtilities;
 
 CONST
 	DraggingSnapRangeBase = 40;
@@ -12,21 +12,22 @@ TYPE
 	Rectangle =  WMRectangles.Rectangle;
 	Message = Messages.Message;
 	String = Utilities.String;
-	DecorWindow* = OBJECT(Window)
+	DecorWindow* = OBJECT(Window);
 	VAR
 		lastX, lastY : LONGINT;
-		dragging : BOOLEAN;
+		useBitmaps*, dragging : BOOLEAN;
 		resized : BOOLEAN;
 		mode* : LONGINT;
 		hasFocus : BOOLEAN;
 		picAa*, picBa*, picCa*,
 		picAb*, picBb*, picCb* : Graphics.Image;
-		style*, distXY* : LONGINT; (* style : 0 simple 2 pictures *)
+		distXY* : LONGINT; 
 		inXYResizeHandle, vertical* : BOOLEAN;
 		focusthreshold*, threshold* : LONGINT;
 		draggingWidth, draggingHeight : LONGINT;
 		draggingSnapRange : LONGINT;
 		sac, sic, basw, bisw : LONGINT;
+		modKeys : SET;
 
 		PROCEDURE SetMasterFocus*(hasFocus : BOOLEAN);
 		BEGIN
@@ -77,7 +78,7 @@ TYPE
 		
 		PROCEDURE IsHit*(x, y : LONGINT) : BOOLEAN;	
 		BEGIN
-			IF style IN {0, 1} THEN RETURN TRUE
+			IF ~useBitmaps THEN RETURN TRUE
 			ELSE 
 				IF vertical THEN RETURN CheckVertical(x, y)
 				ELSE RETURN CheckHorizontal(x, y)
@@ -106,6 +107,9 @@ TYPE
 				IF (dx # 0) OR (dy # 0) THEN
 					IF mode = 0 THEN
 						manager.SetWindowPos(SELF, bounds.l + dx, bounds.t + dy);
+					ELSIF mode = 3 THEN
+						manager.SetWindowPos(SELF, bounds.l + dx, bounds.t);
+						draggingWidth := draggingWidth - dx;
 					ELSIF (mode = 1) & (master # NIL) THEN
 						draggingWidth := draggingWidth + dx;
 						IF inXYResizeHandle THEN draggingHeight := draggingHeight + dy END;
@@ -116,8 +120,7 @@ TYPE
 					IF mode # 0 THEN
 						nw := Utilities.Max(1, draggingWidth);
 						nh := Utilities.Max(1, draggingHeight);
-				(*		manager.SetWindowSize(master, nw, nh); (* this avoids nw, nh to be smaller thant the minimum size *) *)
-						SnapDraggingSize(nw, nh);
+						IF modKeys * AosInputs.Alt = {} THEN SnapDraggingSize(nw, nh) END;
 						manager.SetWindowSize(master, nw, nh);
 						resized := TRUE
 					END
@@ -179,7 +182,12 @@ TYPE
 				ELSIF m.msgSubType = Messages.MsgSubMasterFocusLost THEN hasFocus := FALSE
 				END;
 				Invalidate(WMRectangles.MakeRect(0, 0, GetWidth(), GetHeight()))
-			ELSE Handle^(m)	
+			ELSE
+				(* read the modifier keys from the view where the message originates *)
+				IF (m.originator # NIL) & (m.originator IS WM.ViewPort) THEN
+					m.originator(WM.ViewPort).GetKeyState(modKeys);
+				END;
+				 Handle^(m)	
 			END
 		END Handle;
 	
@@ -229,12 +237,11 @@ TYPE
 			ELSE 
 				tc := tic; color := sic; sw := bisw; tx := tix; ty := tiy
 			END;
-			IF style = 0 THEN 
-				(* content *)
-				canvas.Fill(WMRectangles.MakeRect(0, 0, w, h), color, Graphics.ModeSrcOverDst);
-			ELSIF style = 2 THEN 
+			IF useBitmaps THEN 
 				GetActivePics(a, b, c);
-				RepeatMiddleHorizontal(canvas, GetWidth(), GetHeight(), w, h, q, a, b, c);
+				RepeatMiddleHorizontal(canvas, GetWidth(), GetHeight(), w, h, q, a, b, c)
+			ELSE
+				canvas.Fill(WMRectangles.MakeRect(0, 0, w, h), color, Graphics.ModeSrcOverDst);
 			END;
 			IF hasFocus THEN img := closeActive ELSE img := closeInactive END;
 			IF img # NIL THEN 
@@ -265,7 +272,7 @@ TYPE
 					END
 				END	
 			END;
-			IF style = 0 THEN
+			IF ~useBitmaps THEN
 				WMGraphicUtilities.ExtRectGlassShade(canvas, WMRectangles.MakeRect(0, 0, w, h), {2}, sw, FALSE)
 			END
 		END Draw;
@@ -285,8 +292,9 @@ TYPE
 		VAR s : WM.WindowStyle; r : WMRectangles.Rectangle;
 		BEGIN
 			s := manager.GetStyle();
-			style := s.style; sac := s.baCol; sic := s.biCol; basw := s.basw; bisw := s.bisw;
-			
+			useBitmaps := s.useBitmaps; sac := s.baCol; sic := s.biCol; basw := s.basw; bisw := s.bisw;
+			focusthreshold := s.topFocusThreshold; threshold := s.topThreshold;
+
 			picAa := s.taa; picBa := s.tab; picCa := s.tac;
 			picAb := s.tia; picBb := s.tib; picCb := s.tic;
 			tac := s.atextColor; tic := s.itextColor;
@@ -309,21 +317,21 @@ TYPE
 		VAR color, sw : LONGINT; a, b, c : Graphics.Image;
 		BEGIN
 			IF hasFocus THEN color := sac; sw := basw ELSE color := sic; sw := bisw END;
-			IF style = 0 THEN
-				canvas.Fill(Graphics.MakeRectangle(0, 0, w, h), color, Graphics.ModeSrcOverDst);
-				WMGraphicUtilities.ExtRectGlassShade(canvas, WMRectangles.MakeRect(0, 0, w, h),
-					{0, 2, 3}, sw, FALSE);
-			ELSIF style = 2 THEN 
+			IF useBitmaps THEN
 				GetActivePics(a, b, c);
 				RepeatMiddleVertical(canvas, GetWidth(), GetHeight(), w, h, q, a, b, c)
-			END	
+			ELSE
+				canvas.Fill(Graphics.MakeRectangle(0, 0, w, h), color, Graphics.ModeSrcOverDst);
+				WMGraphicUtilities.ExtRectGlassShade(canvas, WMRectangles.MakeRect(0, 0, w, h), {0, 2, 3}, sw, FALSE);
+			END
 		END Draw;
 		
 		PROCEDURE StyleChanged;
 		VAR s : WM.WindowStyle; r : WMRectangles.Rectangle;
 		BEGIN
 			s := manager.GetStyle();
-			style := s.style; sac := s.baCol; sic := s.biCol; basw := s.basw; bisw := s.bisw;
+			useBitmaps := s.useBitmaps; sac := s.baCol; sic := s.biCol; basw := s.basw; bisw := s.bisw;
+			focusthreshold := s.leftFocusThreshold; threshold := s.leftThreshold;
 
 			picAa := s.laa; picBa := s.lab; picCa := s.lac;
 			picAb := s.lia; picBb := s.lib; picCb := s.lic;
@@ -341,13 +349,12 @@ TYPE
 		VAR color, sw : LONGINT; a, b, c : Graphics.Image;
 		BEGIN
 			IF hasFocus THEN color := sac; sw := basw ELSE color := sic; sw := bisw END;
-			IF style = 0 THEN
-				canvas.Fill(Graphics.MakeRectangle(0, 0, w, h), color, Graphics.ModeSrcOverDst);
-				WMGraphicUtilities.ExtRectGlassShade(canvas, WMRectangles.MakeRect(0, 0, w, h),
-					{0, 1, 2}, sw, FALSE);
-			ELSIF style = 2 THEN
+			IF useBitmaps THEN
 				GetActivePics(a, b, c);
 				RepeatMiddleVertical(canvas, GetWidth(), GetHeight(), w, h, q, a, b, c)
+			ELSE
+				canvas.Fill(Graphics.MakeRectangle(0, 0, w, h), color, Graphics.ModeSrcOverDst);
+				WMGraphicUtilities.ExtRectGlassShade(canvas, WMRectangles.MakeRect(0, 0, w, h), {0, 1, 2}, sw, FALSE);
 			END
 		END Draw;
 		
@@ -363,7 +370,8 @@ TYPE
 		VAR s : WM.WindowStyle; r : WMRectangles.Rectangle;
 		BEGIN
 			s := manager.GetStyle();
-			style := s.style; sac := s.baCol; sic := s.biCol; basw := s.basw; bisw := s.bisw;
+			useBitmaps := s.useBitmaps; sac := s.baCol; sic := s.biCol; basw := s.basw; bisw := s.bisw;
+			focusthreshold := s.rightFocusThreshold; threshold := s.rightThreshold;
 
 			picAa := s.raa; picBa := s.rab; picCa := s.rac;
 			picAb := s.ria; picBb := s.rib; picCb := s.ric;
@@ -381,14 +389,13 @@ TYPE
 		VAR color, sw : LONGINT; a, b, c : Graphics.Image;
 		BEGIN
 			IF hasFocus THEN color := sac; sw := basw ELSE color := sic; sw := bisw END;
-			IF style = 0 THEN 
-				canvas.Fill(WMRectangles.MakeRect(0, 0, w, h), color, Graphics.ModeSrcOverDst);
-				WMGraphicUtilities.ExtRectGlassShade(canvas, WMRectangles.MakeRect(0, 0, w, h),
-					{0}, sw, FALSE);
-			ELSIF style = 2 THEN 
+			IF useBitmaps THEN
 				GetActivePics(a, b, c);
 				RepeatMiddleHorizontal(canvas, GetWidth(), GetHeight(), w, h, q, a, b, c)
-			END	
+			ELSE
+				canvas.Fill(WMRectangles.MakeRect(0, 0, w, h), color, Graphics.ModeSrcOverDst);
+				WMGraphicUtilities.ExtRectGlassShade(canvas, WMRectangles.MakeRect(0, 0, w, h), {0}, sw, FALSE);
+			END
 		END Draw;
 		
 		PROCEDURE PointerMove(x, y : LONGINT; keys : SET);
@@ -403,12 +410,13 @@ TYPE
 		VAR s : WM.WindowStyle; r : WMRectangles.Rectangle;
 		BEGIN
 			s := manager.GetStyle();
-			style := s.style; sac := s.baCol; sic := s.biCol; basw := s.basw; bisw := s.bisw;
+			useBitmaps := s.useBitmaps; sac := s.baCol; sic := s.biCol; basw := s.basw; bisw := s.bisw;
+			focusthreshold := s.bottomFocusThreshold; threshold := s.bottomThreshold;
 
 			picAa := s.baa; picBa := s.bab; picCa := s.bac;
 			picAb := s.bia; picBb := s.bib; picCb := s.bic;
 			manager.lock.AcquireWrite;
-			r :=bounds;
+			r := bounds;
 			bounds := Graphics.MakeRectangle(master.bounds.l - s.lw, master.bounds.b, master.bounds.r + s.rw, master.bounds.b + s.bh); 
 			WMRectangles.ExtendRect(r, bounds);
 			manager.lock.ReleaseWrite;

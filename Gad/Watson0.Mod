@@ -3,7 +3,7 @@ Refer to the "General ETH Oberon System Source License" contract available at: h
 
 MODULE Watson0;	(** portable *)	(** PS	/	 	/	OP2-Version *)
 
-	IMPORT Modules, OPT, OPS, OPM, Files, Objects, Texts, Oberon, Gadgets, Out;
+	IMPORT Modules, OPT, OPS, OPM, OPV, Files, Objects, Texts, Oberon, Gadgets, Out;
 
 	CONST
 	(* CONST used to read symbol file *)
@@ -34,7 +34,7 @@ MODULE Watson0;	(** portable *)	(** PS	/	 	/	OP2-Version *)
 		HeaderSize = 34;
 
 		(* obj-file version *)
-		Version	=	0AFX;
+		Version	=	OPM.OFnative;
 
 
 	(* other CONST *)
@@ -194,7 +194,7 @@ MODULE Watson0;	(** portable *)	(** PS	/	 	/	OP2-Version *)
 	
 	PROCEDURE WriteFields (VAR obj: OPT.Object; i: INTEGER; recField: BOOLEAN);
 	(* writes field list of a proc. or record: all variables of same type *)
-		VAR typ: OPT.Struct; mode: INTEGER;
+		VAR typ: OPT.Struct; mode: LONGINT;
 	BEGIN
 		(* obj.vis # internal *)
 		typ := obj.typ; mode := obj.mode;
@@ -302,7 +302,7 @@ MODULE Watson0;	(** portable *)	(** PS	/	 	/	OP2-Version *)
 	END WriteForm;
 
 	PROCEDURE WriteType(typ: OPT.Struct; i: INTEGER);	(* writes a type declaration *)
-		VAR cmd, par: ARRAY 32 OF CHAR; makeLink: BOOLEAN; ch: CHAR;
+		VAR cmd, par: ARRAY 64 OF CHAR; makeLink: BOOLEAN; ch: CHAR;
 	BEGIN
 		IF (typ.strobj # NIL) & (typ.strobj.name # "") THEN
 			makeLink:= FALSE;
@@ -338,7 +338,7 @@ MODULE Watson0;	(** portable *)	(** PS	/	 	/	OP2-Version *)
 		END
 	END WriteType;
 	
-	PROCEDURE WriteObject(obj: OPT.Object; mode: INTEGER);	(* writes any object as given mode *)
+	PROCEDURE WriteObject(obj: OPT.Object; mode: LONGINT);	(* writes any object as given mode *)
 		VAR h: OPT.Object; name: ARRAY 64 OF CHAR;
 	BEGIN
 		curObj:= obj;	(* set cur. object in process *)
@@ -417,20 +417,18 @@ MODULE Watson0;	(** portable *)	(** PS	/	 	/	OP2-Version *)
 		IF ~first THEN Ln END
 	END WriteScope;
 
-	PROCEDURE WriteModule;	(* writes a module definition *)
-		VAR anchor: OPT.Object;
+	PROCEDURE WriteModule(mod: ARRAY OF CHAR; root: OPT.Object);	(* writes a module definition *)
 	BEGIN sysImported:= FALSE;
-		anchor:= OPT.topScope.right;
-		Str("DEFINITION "); Str(anchor.name);
-		IF showAdr THEN Str(" ["); Texts.WriteHex(W, OPT.modules[0].adr); Ch("]") END;
+		Str("DEFINITION "); Str(mod);
+		IF showAdr THEN Str(" ["); Texts.WriteHex(W, root.adr); Ch("]") END;
 		Ch(";"); Ln; Ln;
 		syspos := W.buf.len;
 		WriteImports;
-		WriteScope(anchor.scope, Con);
-		WriteScope(anchor.scope, Typ);
-		WriteScope(anchor.scope, Var);
-		WriteScope(anchor.scope, XProc);
-		Str("END "); Str(anchor.name); Ch("."); Ln
+		WriteScope(root, Con);
+		WriteScope(root, Typ);
+		WriteScope(root, Var);
+		WriteScope(root, XProc);
+		Str("END "); Str(mod); Ch("."); Ln
 	END WriteModule;
 
 	PROCEDURE MakeText(T: Texts.Text);	(* appends writer W and inserts import list *)
@@ -444,8 +442,8 @@ MODULE Watson0;	(** portable *)	(** PS	/	 	/	OP2-Version *)
 
 	(* ------------------------ read & prepare symbols ------------------- *)
 
-	PROCEDURE Find (name: ARRAY OF CHAR; VAR obj: OPT.Object);	(* looks for object name in the OPT top scope *)
-	BEGIN obj := OPT.topScope.right.scope;
+	PROCEDURE Find (root: OPT.Object; name: ARRAY OF CHAR; VAR obj: OPT.Object);	(* looks for object name in the OPT top scope *)
+	BEGIN obj := root;
 		LOOP
 			IF obj = NIL THEN RETURN
 			ELSIF name < obj.name THEN obj := obj.left
@@ -455,7 +453,7 @@ MODULE Watson0;	(** portable *)	(** PS	/	 	/	OP2-Version *)
 		END
 	END Find;
 
-	PROCEDURE FindPointer(name: ARRAY OF CHAR; VAR obj: OPT.Object);	(* find pointer to record name *)
+	PROCEDURE FindPointer(root: OPT.Object; name: ARRAY OF CHAR; VAR obj: OPT.Object);	(* find pointer to record name *)
 	
 		PROCEDURE FindP(name: ARRAY OF CHAR; root: OPT.Object; VAR obj: OPT.Object);
 			VAR typ: OPT.Struct;
@@ -471,19 +469,19 @@ MODULE Watson0;	(** portable *)	(** PS	/	 	/	OP2-Version *)
 			END
 		END FindP;
 
-	BEGIN FindP(name, OPT.topScope.right.scope, obj)
+	BEGIN FindP(name, root, obj)
 	END FindPointer;
 	
-	PROCEDURE GroupTypes (obj: OPT.Object);
+	PROCEDURE GroupTypes (root, obj: OPT.Object);
 	(* groups pointer and its corresponding record, so they can be writter together *)
 		VAR typ: OPT.Struct; h: OPT.Object;
 	BEGIN
 		IF obj # NIL THEN
-			GroupTypes(obj.left);
+			GroupTypes(root, obj.left);
 			IF (obj.mode = Typ) THEN typ:= obj.typ;
 				IF typ.form = Pointer THEN
 					IF typ.BaseTyp.strobj # NIL THEN (* named base type *)
-						Find(typ.BaseTyp.strobj.name, h);
+						Find(root, typ.BaseTyp.strobj.name, h);
 						IF (h # NIL) & (h.typ.mno = 1) THEN
 							obj.link:= h;
 							h.vis := -h.vis	(* prevent normal output of this type *)
@@ -491,35 +489,38 @@ MODULE Watson0;	(** portable *)	(** PS	/	 	/	OP2-Version *)
 					END;
 				END
 			END;
-			GroupTypes(obj.right)
+			GroupTypes(root, obj.right)
 		END
 	END GroupTypes;
 
-	PROCEDURE ReadSym (VAR mod, fileName: ARRAY OF CHAR): BOOLEAN;	(* read the symbol file by calling OPT.Import *)
+	PROCEDURE ReadSym (VAR mod, fileName: ARRAY OF CHAR): OPT.Object;	(* read the symbol file by calling OPT.Import *)
 		VAR T: Texts.Text; RR: Texts.Reader; f: Files.File; R: Files.Rider;
-			selfname, file: OPS.Name; ch: CHAR;
+			selfname, file: OPS.Name; ch: CHAR; root: OPT.Object;
 	BEGIN
 		f:= Files.Old(fileName);
 		IF (f # NIL) OR (mod = "SYSTEM") THEN
-			IF mod = "SYSTEM" THEN Out.String("definition of SYSTEM not available"); Ln; RETURN FALSE
+			IF mod = "SYSTEM" THEN Out.String("definition of SYSTEM not available"); Ln; RETURN NIL
 			ELSE Files.Set(R, f, 0); Files.Read(R, ch)
 			END;
 			IF ch = symFileId THEN
-				NEW(T); Texts.Open(T, ""); Texts.OpenReader(RR, T, 0); OPM.Init({}, {}, RR, Oberon.Log);
-				COPY(mod, selfname); COPY(fileName, file); OPM.outputPath := "";
-				OPS.Init; OPT.Init(selfname); OPT.OpenScope(0, NIL);
-				OPT.Import(selfname, selfname, file);
+				NEW(T); Texts.Open(T, ""); Texts.OpenReader(RR, T, 0);
+				COPY(mod, selfname); file := "$$"; OPM.outputPath := "";
+				OPM.Init({}, {}, RR, Oberon.Log); OPS.Init; OPT.Init(file);
+				OPT.OpenScope(0, NIL);
+				OPT.Import(selfname, selfname, file); OPT.CloseScope;
+				root := OPT.modules[1].publics;
+				OPV.AssignEntries(OPT.modules[1].publics, TRUE);
+				root := OPT.modules[1].right;
 				OPM.outputPath := "!";
-				GroupTypes(OPT.topScope.right.scope);
-				RETURN TRUE
+				GroupTypes(root, root.scope);
+				RETURN root
 			ELSE
 				Out.String("-- not a symbol file"); Out.Ln;
-				RETURN FALSE
 			END
 		ELSE
 			Out.String("--  symbol file not found"); Out.Ln;
-			RETURN FALSE
-		END
+		END;
+		RETURN NIL
 	END ReadSym;
 
 
@@ -528,7 +529,7 @@ MODULE Watson0;	(** portable *)	(** PS	/	 	/	OP2-Version *)
 	(* ---------------------- write object info ----------------------- *)
 	
 	PROCEDURE Commands(F: Files.File; VAR modName: ARRAY OF CHAR);	(* writes all commands of this module  *)
-	VAR R: Files.Rider; name: ARRAY 32 OF CHAR; ve, key, ref, symSize: LONGINT;
+	VAR R: Files.Rider; name: ARRAY 64 OF CHAR; ve, key, ref, symSize: LONGINT;
 			i, c, e, nofentry, nofcmds: INTEGER; ch: CHAR;
 	BEGIN Files.Set(R, F, 0);
 		(* check if it is an object file *)
@@ -585,29 +586,31 @@ MODULE Watson0;	(** portable *)	(** PS	/	 	/	OP2-Version *)
 
 	(** converts a symbol file *)
 	PROCEDURE ShowDef*(VAR mod: ARRAY OF CHAR; T: Texts.Text);
-		VAR file: ARRAY 64 OF CHAR;
+		VAR file: ARRAY 64 OF CHAR; root: OPT.Object;
 	BEGIN
 		COPY(Modules.extension, OPM.extension);
 		SetOptions; COPY(mod, file); Append(file, Modules.extension);
 		Out.String("reading "); Out.String(file); Out.Ln;
-		IF ReadSym(mod, file) THEN COPY(mod, file);
+		root := ReadSym(mod, file);
+		IF root # NIL THEN COPY(mod, file);
 			showObj := FALSE;
-			WriteModule; MakeText(T)
+			WriteModule(mod, root); MakeText(T)
 		END
 	END ShowDef;
 
 	(** converts a symbol file, only shows the desired object *)
 	PROCEDURE ShowObj*(VAR mod, objName: ARRAY OF CHAR; T: Texts.Text);
-		VAR obj, pObj: OPT.Object; file: ARRAY 64 OF CHAR;
+		VAR root, obj, pObj: OPT.Object; file: ARRAY 64 OF CHAR;
 	BEGIN
 		COPY(Modules.extension, OPM.extension);
 		SetOptions; COPY(mod, file); Append(file, Modules.extension);
 		Out.String("reading "); Out.String(file); Out.Ln;
-		IF ReadSym(mod, file) THEN
-			Find(objName, obj);
+		root := ReadSym(mod, file);
+		IF root # NIL THEN
+			Find(root, objName, obj);
 			IF obj # NIL THEN COPY(mod, file);
 				IF obj.vis < 0 THEN (* is a pair of types *)
-					FindPointer(obj.name, pObj);	(* look for a corresponding pointer *)
+					FindPointer(root, obj.name, pObj);	(* look for a corresponding pointer *)
 					IF pObj # NIL THEN obj:= pObj; COPY(obj.name, objName) END
 				END;
 				showObj := TRUE; first := TRUE;

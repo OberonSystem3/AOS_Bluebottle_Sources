@@ -29,7 +29,7 @@ MODULE OPP;	(** non-portable *)
 		exit = OPS.exit; return = OPS.return; array = OPS.array; object = OPS.object; 
 		record = OPS.record; pointer = OPS.pointer; begin = OPS.begin; code = OPS.code; 
 		const = OPS.const; type = OPS.type; var = OPS.var; procedure = OPS.procedure; 
-		import = OPS.import; module = OPS.module; eof = OPS.eof; 
+		import = OPS.import; module = OPS.module; eof = OPS.eof; finally = OPS.finally;
 
 		(* object modes *)
 		Var = 1; VarPar = 2; Con = 3; Fld = 4; Typ = 5; LProc = 6; XProc = 7;
@@ -56,6 +56,7 @@ MODULE OPP;	(** non-portable *)
 		Nifelse = 20; Ncase = 21; Nwhile = 22; Nrepeat = 23; Nloop = 24; Nexit = 25;
 		Nreturn = 26; Nwith = 27; Ntrap = 28;
 		Nassembler = 29; Ncode = 30; (* Ncode isn't a duplicate of Nret, it's used only with Nassembler *)
+		Nfinally = 40;
 
 		(* node subclasses *)
 		super = 1;
@@ -110,6 +111,7 @@ MODULE OPP;	(** non-portable *)
 		UndefFlag, FixPhase: BOOLEAN;
 		UndefObj: OPT.Object;
 		scopeLock: BOOLEAN;	(*current or any parent statement block locked *)
+		retcount: LONGINT; fincount: LONGINT;
 		
 		FixList, FixLast: FixPtr;
 		ExtObj: OPT.Object;		(*for searching in the module scope*)
@@ -380,7 +382,7 @@ MODULE OPP;	(** non-portable *)
 	END CheckObj;
 	
 	PROCEDURE qualident(VAR id: OPT.Object);
-		VAR obj, self: OPT.Object; lev: SHORTINT; m: BOOLEAN;
+		VAR obj, self: OPT.Object; lev: LONGINT; m: BOOLEAN;
 	BEGIN (*sym = ident*)
 		OPT.Find(obj);  OPS.Get(sym);
 		IF (sym = period) & (obj # NIL) & (obj^.mode = Mod) THEN
@@ -793,7 +795,7 @@ MODULE OPP;	(** non-portable *)
 	END FormalParameters;
 
 	PROCEDURE CheckAndFix(typ: OPT.Struct);
-		VAR lev: SHORTINT;
+		VAR lev: LONGINT;
 	BEGIN
 		WHILE typ.comp = SDynArr DO
 			lev := typ.link.mnolev;
@@ -1761,7 +1763,7 @@ OPM.LogWStr("  failed");*)
 		OPT.topScope := topscope
 	END DoFixes;
 
-	PROCEDURE StatSeq(VAR stat: OPT.Node);
+	PROCEDURE StatSeq(VAR stat: OPT.Node; local: BOOLEAN);
 		VAR fpar, id, t, obj, owner, op: OPT.Object; typ, idtyp: OPT.Struct; sysflag, e: BOOLEAN;
 				x1, x2, s, x, y, z, apar, last, lastif: OPT.Node; pos: LONGINT;
 				ts: OPS.TokenStream;
@@ -1778,7 +1780,7 @@ OPM.LogWStr("  failed");*)
 			LOOP
 				IF sym < bar THEN
 					FixPhase := TRUE; CaseLabelList(lab, x^.typ^.form, n, tab); FixPhase := FALSE;
-					CheckSym(colon); StatSeq(y);
+					CheckSym(colon); StatSeq(y, local);
 					OPB.Construct(Ncasedo, lab, y); OPB.Link(cases, lastcase, lab)
 				END ;
 				IF sym = bar THEN OPS.Get(sym) ELSE EXIT END
@@ -1788,7 +1790,7 @@ OPM.LogWStr("  failed");*)
 			ELSE low := 1; high := 0; err (213)
 			END ;
 			e := sym = else;
-			IF e THEN OPS.Get(sym); StatSeq(y) ELSE y := NIL END ;
+			IF e THEN OPS.Get(sym); StatSeq(y, local) ELSE y := NIL END ;
 			OPB.Construct(Ncaselse, cases, y); OPB.Construct(Ncase, x, cases);
 			cases^.conval := OPT.NewConst();
 			cases^.conval^.intval := low; cases^.conval^.intval2 := high;
@@ -1801,7 +1803,8 @@ OPM.LogWStr("  failed");*)
 		END SetPos;
 
 	BEGIN stat := NIL; last := NIL; UndefFlag := FALSE;
-		LOOP x := NIL;
+		LOOP 
+			x := NIL;
 			IF sym < ident THEN err(14);
 				REPEAT OPS.Get(sym) UNTIL sym >= ident
 			END ;
@@ -1861,7 +1864,7 @@ OPM.LogWStr("  failed");*)
 				IF UndefFlag THEN InsertFix (FCond, ts, x); s := x; x.class := 0; UndefFlag := FALSE
 				ELSE CheckBool(x); s := NIL
 				END;
-				CheckSym(then); StatSeq(y);
+				CheckSym(then); StatSeq(y, local);
 				OPB.Construct(Nif, x, y); SetPos(x); lastif := x;
 				WHILE sym = elsif DO
 					OPS.Get(sym);
@@ -1869,10 +1872,10 @@ OPM.LogWStr("  failed");*)
 					IF UndefFlag THEN InsertFix (FCond, ts, y); s := x; x.class := 0; UndefFlag := FALSE
 					ELSE CheckBool(y)
 					END;
-					CheckSym(then); StatSeq(z);
+					CheckSym(then); StatSeq(z, local);
 					OPB.Construct(Nif, y, z); SetPos(y); OPB.Link(x, lastif, y);
 				END ;
-				IF sym = else THEN OPS.Get(sym); StatSeq(y)
+				IF sym = else THEN OPS.Get(sym); StatSeq(y, local)
 				ELSE y := NIL
 				END ;
 				OPB.Construct(Nifelse, x, y); CheckSym(end);
@@ -1886,14 +1889,14 @@ OPM.LogWStr("  failed");*)
 				IF UndefFlag THEN InsertFix (FCond, ts, x); UndefFlag := FALSE
 				ELSE CheckBool(x)
 				END;
-				CheckSym(do); StatSeq(y); CheckSym(end);
+				CheckSym(do); StatSeq(y, local); CheckSym(end);
 				IF (x.class = Nconst) & (x.conval.intval = 0) THEN
 					x := NIL		(* WHILE FALSE -> dead code removal *)
 				ELSE
 					OPB.Construct(Nwhile, x, y)
 				END
 			ELSIF sym = repeat THEN
-				OPS.Get(sym); StatSeq(x);
+				OPS.Get(sym); StatSeq(x, local);
 				IF sym = until THEN OPS.Get(sym);
 					pos := OPM.errpos;
 					OPS.StartRecording (sym); Expression(y); OPS.StopRecording (ts);
@@ -1956,7 +1959,7 @@ OPM.LogWStr("  failed");*)
 					ELSIF z^.conval^.intval < 0 THEN OPB.Op(geq, x, y)
 					ELSE err(63); OPB.Op(geq, x, y)
 					END ;
-					CheckSym(do); StatSeq(s);
+					CheckSym(do); StatSeq(s, local);
 					y := x2;				(* use the copy of x *)
 					OPB.StPar1(y, z, incfn); SetPos(y);
 					IF s = NIL THEN s := y
@@ -1968,7 +1971,7 @@ OPM.LogWStr("  failed");*)
 				ELSE err(ident)
 				END
 			ELSIF sym = loop THEN
-				OPS.Get(sym); INC(LoopLevel); StatSeq(x); DEC(LoopLevel);
+				OPS.Get(sym); INC(LoopLevel); StatSeq(x, local); DEC(LoopLevel);
 				OPB.Construct(Nloop, x, NIL); CheckSym(end); pos := OPM.errpos
 			ELSIF sym = with THEN
 				OPS.Get(sym); idtyp := NIL; x := NIL;
@@ -1997,7 +2000,7 @@ OPM.LogWStr("  failed");*)
 						END
 					ELSE err(ident)
 					END ;
-					pos := OPM.errpos; CheckSym(do); StatSeq(s); OPB.Construct(Nif, y, s); SetPos(y);
+					pos := OPM.errpos; CheckSym(do); StatSeq(s, local); OPB.Construct(Nif, y, s); SetPos(y);
 					IF id = NIL THEN
 						EXIT
 					ELSIF id.mnolev < 0 THEN
@@ -2009,7 +2012,7 @@ OPM.LogWStr("  failed");*)
 					IF (sym = bar) & (OPM.oberon2 IN OPM.parserOptions) THEN OPS.Get(sym) ELSE EXIT END
 				END;
 				e := sym = else;
-				IF e & (OPM.oberon2 IN OPM.parserOptions) THEN OPS.Get(sym); StatSeq(s) ELSE s := NIL END ;
+				IF e & (OPM.oberon2 IN OPM.parserOptions) THEN OPS.Get(sym); StatSeq(s, local) ELSE s := NIL END ;
 				OPB.Construct(Nwith, x, s); CheckSym(end); 
 				IF e THEN x^.subcl := 1 END
 			ELSIF sym = exit THEN
@@ -2025,15 +2028,38 @@ OPM.LogWStr("  failed");*)
 					ELSE (* not standard Oberon *) OPB.Return(x, NIL)
 					END
 				END;
+				INC(retcount);
 				pos := OPM.errpos
 			ELSIF sym = begin THEN OPS.Get(sym);
 				StatBlock(x, TRUE)
+			ELSIF sym = finally THEN								
+				IF local THEN
+					err(160)
+				ELSE
+					IF retcount > 0 THEN
+						err(161);
+					ELSIF fincount > 0 THEN
+						err(162);																		
+					END;					
+
+					IF (retcount = 0) & (fincount = 0) THEN																		OPT.MarkType(OPT.linttyp);												
+						OPB.Construct(Nfinally, x, NIL);
+						x.obj := (* Procedure object*) OPT.topScope.link;
+						pos := OPM.errpos
+					END;
+					INC(fincount)										
+				END;
+				OPS.Get(sym);		
+
 			END ;
 			IF UndefFlag THEN	err (1000); UndefFlag := FALSE	END;
 			IF x # NIL THEN SetPos(x); OPB.Link(stat, last, x) END ;
-			IF sym = semicolon THEN OPS.Get(sym)
-			ELSIF (sym <= ident) OR (if <= sym) & (sym <= return) THEN err(semicolon)
-			ELSE EXIT
+			IF (x=NIL) OR ((x#NIL) & (x.class # Nfinally)) THEN
+				IF sym = semicolon THEN OPS.Get(sym)						
+				ELSIF sym = finally THEN
+				ELSIF (sym <= ident) OR (if <= sym) & (sym <= return) THEN err(semicolon)			
+				ELSE EXIT
+				END
 			END
 		END
 	END StatSeq;
@@ -2042,11 +2068,15 @@ OPM.LogWStr("  failed");*)
 	VAR  lock, oldScopeLock: BOOLEAN; pos: LONGINT; owner: OPT.Object;
 	BEGIN
 		(* BEGIN already parsed *)
+		IF ~ local THEN
+			retcount := 0; 
+			fincount := 0;
+		END;
 		owner := OPT.topScope.link; pos := OPM.errpos;
 		BlockMode(owner.conval.setval, local, lock);
 		IF scopeLock & lock THEN  err(246)  END;
 		oldScopeLock := scopeLock; scopeLock := scopeLock OR lock;
-		StatSeq(statseq); CheckSym(end);
+		StatSeq(statseq, local); CheckSym(end);
 		scopeLock := oldScopeLock;
 		IF lock THEN
 			OPB.Lock(statseq, GetSelf(), TRUE);

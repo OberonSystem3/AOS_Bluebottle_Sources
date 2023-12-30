@@ -344,7 +344,7 @@ END SetGadgets.
 
 (**
 Set
-	Create with:	Gadgets.Link SetGadgets.NewSet
+	Create with:	Gadgets.Link SetGadgets.NewSet
 	Alias:	-
 	Function:	Stores a 32 bit set.
 	Attributes:
@@ -353,7 +353,7 @@ Set
 	Links:	-
 
 Frame
-	Create with:	Gadgets.Insert SetGadgets.NewFrame
+	Create with:	Gadgets.Insert SetGadgets.NewFrame
 	Alias:	-
 	Function:	This frame visualises a 32 bit set. One bit can be included or excluded by clicking
 			on its placeholder (bit 0 start at the left hand side of the gadget). A bit is said

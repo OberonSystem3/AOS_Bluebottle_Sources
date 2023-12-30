@@ -383,12 +383,11 @@ BEGIN
 	RA.bimboTrace := codeName = "MapMemory";
 	*)
 	info := instr.info(Info); info.pos := PCO.GetCodePos();
-	(*
-	IF (PCM.optimize IN PCM.options) THEN flags := {RA.Constants, RA.MemoryStack} (* MemoryAbsolute does not work !!! *)
-	ELSE flags := {}
+	IF PCM.Optimize IN PCM.codeOptions THEN
+		flags := {RA.Constants, RA.MemoryStack} (* MemoryAbsolute does not work !!! *)
+	ELSE
+		flags := {}
 	END;
-	*)
-	flags := {RA.Constants, RA.MemoryStack};
 	NEW(regs, 12, flags);
 	IF (instr.adr # NIL)  & (instr.adr IS PCBT.Procedure) THEN
 		adr := instr.adr(PCBT.Procedure); 
@@ -1092,7 +1091,18 @@ BEGIN
 			PCM.breakpc := MAX(LONGINT)
 		END;
 		lastLabelPos := instr.val
-	END
+	END;
+	
+	IF (instr.op = PCLIR.finallylabel) THEN		
+		IF (instr.adr # NIL) THEN						
+			IF (instr.adr IS PCBT.Procedure) THEN				
+				instr.adr(PCBT.Procedure).finallyOff := info.pos DIV 4;
+			ELSIF (instr.adr IS PCBT.Module) THEN
+				instr.adr(PCBT.Module).finallyOff := info.pos DIV 4;
+			END;
+		END;
+	END;
+	
 END Label;
 
 PROCEDURE JCC(code: PCLIR.Code; VAR instr: PCLIR.Instruction; pc: LONGINT);
@@ -2933,9 +2943,13 @@ BEGIN
 	PCLIR.CG.Done := Done;
 	PCLIR.CG.GetCode := PCO.GetCode;
 	PCLIR.CG.Optimize := Optimize;
+	PCLIR.CG.ParamAlign := 4;
 (*  Debug
 	PCLIR.CG.DumpCode := DumpCode;
 *)	
+	PCLIR.Address := PCLIR.Int32;
+	PCLIR.Set := PCLIR.Int32;
+	PCLIR.SizeType := PCLIR.Int32;
 	PCBT.SetNumberOfSyscalls(PCBT.DefaultNofSysCalls+2+2+2*20);
 	NEW(PCLIR.CG.SysCallMap, PCBT.NofSysCalls);
 	PCLIR.InitDefaultSyscalls;
@@ -3073,4 +3087,3 @@ BEGIN
 	bimboTrace := FALSE;
 	InitHexTab
 END PCGARM.
- 

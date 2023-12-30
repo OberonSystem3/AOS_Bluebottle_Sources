@@ -1,30 +1,30 @@
 MODULE WMBunny;	(** AUTHOR "TF"; PURPOSE "Visual active objects"; *)
 
-IMPORT WM := WMWindowManager, Messages := WMMessages, Graphics := WMGraphics, AosCommands,  AosActive, AosModules,
-				Raster, AosRandom, AosKernel, AosOut, AosIO, Rectangles := WMRectangles;
+IMPORT
+	AosCommands, AosIO, WMMessages, WMGraphics, AosModules,
+	Raster, AosRandom, AosKernel, AosOut, Rectangles := WMRectangles,
+	WM := WMWindowManager;
 
 CONST
 	Width = 1024; Height = 768;	(* temp hack *)
 
 TYPE
-	BunnyKillerMsg = OBJECT
-	END BunnyKillerMsg; 
+	KillerMsg = OBJECT
+	END KillerMsg; 
 	
 	Bunny = OBJECT (WM.Window)
 	VAR
-		posX, posY:LONGINT;
-		alive:BOOLEAN;
-		timer:AosKernel.Timer;
-		random:AosRandom.Generator;
-		nofFrames, frame, step:LONGINT;
-		movie:Raster.Image;
-		mode:Raster.Mode;
-		keyPressed:SET;
-		nextb:Bunny;
-			
+		posX, posY : LONGINT;
+		alive : BOOLEAN;
+		timer : AosKernel.Timer;
+		random : AosRandom.Generator;
+		nofFrames, frame, step : LONGINT;
+		movie : Raster.Image;
+		keyPressed : SET;
+
 			PROCEDURE &New(movie : Raster.Image; frames, step : LONGINT);
 			BEGIN
-				bounds := Graphics.MakeRectangle(0, 0, movie.width DIV frames, movie.height);
+				bounds :=WMGraphics.MakeRectangle(0, 0, movie.width DIV frames, movie.height);
 				useAlpha := TRUE;
 				NEW(random);
 				nofFrames := frames; frame := 0; SELF.movie := movie; SELF.step := step;
@@ -33,7 +33,6 @@ TYPE
 				posY := random.Dice((Height - movie.height) DIV 2);
 				manager := WM.GetDefaultManager();
 				manager.Add(posX, posY, SELF, {});
-				Raster.InitMode(mode, Raster.srcCopy)
 			END New;
 
 			PROCEDURE Move;
@@ -60,99 +59,108 @@ TYPE
 						IF keyPressed={0} THEN manager.ToFront(SELF) 
 						ELSIF keyPressed={0, 2} THEN Close END
 					END;
-					keyPressed:={}
+					keyPressed := {}
 				END		
 			END PointerUp;
 			
-			PROCEDURE Draw*(canvas : Graphics.Canvas; w, h, q : LONGINT);
+			PROCEDURE Draw*(canvas : WMGraphics.Canvas; w, h, q : LONGINT);
 			BEGIN
 				IF movie # NIL THEN
 					IF (w = GetWidth()) & (h = GetHeight()) THEN
 						canvas.ScaleImage(movie, Rectangles.MakeRect(frame * GetWidth(), 0, (frame + 1) * GetWidth(), GetHeight()),  
-							Rectangles.MakeRect(0, 0, w, h), Graphics.ModeSrcOverDst, 0);
+							Rectangles.MakeRect(0, 0, w, h), WMGraphics.ModeSrcOverDst, 0);
 					ELSE
 						canvas.ScaleImage(movie, Rectangles.MakeRect(frame * GetWidth(), 0, (frame + 1) * GetWidth(), GetHeight()),  
-							Rectangles.MakeRect(0, 0, w, h), Graphics.ModeSrcOverDst, q)
+							Rectangles.MakeRect(0, 0, w, h), WMGraphics.ModeSrcOverDst, q)
 					END	
 				END
 			END Draw;
 			
 			PROCEDURE IsHit(x, y  : LONGINT) : BOOLEAN;
 			BEGIN
-				RETURN Graphics.IsBitmapHit(frame * GetWidth() + x, y, 128, movie)
+				RETURN WMGraphics.IsBitmapHit(frame * GetWidth() + x, y, 128, movie)
 			END IsHit;
 			
 			PROCEDURE Close;
 			BEGIN alive := FALSE
 			END Close;
 			
-			PROCEDURE Handle(VAR x: Messages.Message);
+			PROCEDURE Handle(VAR x : WMMessages.Message);
 			BEGIN
-				IF (x.msgType = Messages.MsgExt) & (x.ext # NIL) & (x.ext IS BunnyKillerMsg) THEN Close
+				IF (x.msgType = WMMessages.MsgExt) & (x.ext # NIL) & (x.ext IS KillerMsg) THEN Close
 				ELSE Handle^(x)
 				END
 			END Handle;
 			
 		BEGIN {ACTIVE}
-			alive:=TRUE;		
-			WHILE alive DO timer.Sleep(100); Move END;				
-			manager.Remove(SELF);
-			DecBunnyCount;
+			alive := TRUE;		
+			WHILE alive DO timer.Sleep(100); Move END;
+		FINALLY			
+			manager.Remove(SELF);				
+			DecCount;
 		END Bunny;
 
-VAR nofBunnies : LONGINT;
+VAR
+	nofWindows : LONGINT;
 				
-PROCEDURE IncBunnyCount;
+PROCEDURE IncCount;
 BEGIN {EXCLUSIVE}
-	INC(nofBunnies);
-END IncBunnyCount;		
+	INC(nofWindows)
+END IncCount;		
 
-PROCEDURE DecBunnyCount;
+PROCEDURE DecCount;
 BEGIN {EXCLUSIVE}
-	DEC(nofBunnies);
-END DecBunnyCount;		
+	DEC(nofWindows)
+END DecCount;		
 		
-PROCEDURE Free*(par: PTR): PTR;
-VAR die : BunnyKillerMsg;
-	 msg : Messages.Message;
+PROCEDURE Free*(par : PTR) : PTR;
+VAR die : KillerMsg;
+	 msg : WMMessages.Message;
 	 m : WM.WindowManager;
 BEGIN {EXCLUSIVE}
-	NEW(die); msg.ext := die; msg.msgType := Messages.MsgExt;
+	NEW(die);
+	msg.ext := die;
+	msg.msgType := WMMessages.MsgExt;
 	m := WM.GetDefaultManager();
 	m.Broadcast(msg);
-	AWAIT(nofBunnies = 0);
+	AWAIT(nofWindows = 0);
 	RETURN NIL
 END Free;
 
-PROCEDURE InternalInsert(name : ARRAY OF CHAR; frames, step:LONGINT);
-VAR b:Bunny;
-		img:Raster.Image;
-		done:BOOLEAN;
+PROCEDURE InternalInsert(fname : ARRAY OF CHAR; frames, step : LONGINT);
+VAR b : Bunny;
+	img : Raster.Image;
 BEGIN {EXCLUSIVE}	
 	(* AosActive.SetPriority(AosActive.Low); *)
-	img := Graphics.LoadImage(name, TRUE); 
+	img := WMGraphics.LoadImage(fname, TRUE); 
 	IF img # NIL THEN
 		NEW(b, img, frames, step)
 	ELSE
-		AosOut.Enter; AosOut.String(name);AosOut.String(" not found."); AosOut.Exit
+		AosOut.Enter; AosOut.String(fname); AosOut.String(" not found."); AosOut.Exit
 	END
 END InternalInsert;
 
-PROCEDURE Insert*(par: PTR): PTR;
-VAR s: AosCommands.Parameters;
-		name:ARRAY 100 OF CHAR;
-		i, step, deltaX:LONGINT;
-		sr : AosIO.StringReader;
+PROCEDURE Insert*(par : PTR) : PTR;
+VAR fn : ARRAY 65 OF CHAR;	(* a filename equivalent to AosFS.FileName - do not import AosFS *)
+	sr : AosIO.StringReader;
+
+	(* Assign an integer value to a variable: extracted from the command parameter if present or
+		else a default one *)
+	PROCEDURE SetVal(def : LONGINT) : LONGINT;
+	VAR int : LONGINT;
+	BEGIN
+		int := def;
+		IF (sr.Peek() >= '0') & (sr.Peek() <= '9') OR (sr.Peek() = '-') THEN
+			AosCommands.GetInt(sr, int, FALSE);
+		END;
+		RETURN int;
+	END SetVal;
+
 BEGIN
-	s := par(AosCommands.Parameters);
-	NEW(sr, LEN(s.str^)); sr.Set(s.str^);
-	sr.Token(name); sr.SkipWhitespace();
-	
-	step := 8; IF (sr.Peek() >= '0') & (sr.Peek() <= '9') OR (sr.Peek() = '-') THEN sr.Int(step, TRUE) END; sr.SkipWhitespace();
-	deltaX := 32; IF (sr.Peek() >= '0') & (sr.Peek() <= '9')OR (sr.Peek() = '-') THEN sr.Int(deltaX, TRUE) END;
-	
-	IncBunnyCount;
-	InternalInsert(name, step, deltaX);
+	AosCommands.PosPar(par, sr);
+	AosCommands.GetTok(sr, fn);
+	IncCount;
+	InternalInsert(fn, SetVal(8), SetVal(32));
 	RETURN NIL
 END Insert;
 
@@ -165,11 +173,11 @@ BEGIN
 	AosModules.InstallTermHandler(Cleanup)
 END WMBunny.		
 
-WMBunny.Insert BunnyLinear.gif 8 32~
-WMBunny.Insert bones.gif 25 10~
-WMBunny.Insert phantom.png 25 10~
-WMBunny.Insert SisiphusLinear.gif 5 8~
-WMBunny.Insert frog.gif 17 -4~
+WMBunny.Insert BunnyLinear.gif 8 40 ~
+WMBunny.Insert bones.gif 25 10 ~
+WMBunny.Insert phantom.png 25 10 ~
+WMBunny.Insert SisiphusLinear.gif 5 8 ~
+WMBunny.Insert frog.gif 17 -4 ~
 
 WMBunny.Free~
 S.Free WMBunny 

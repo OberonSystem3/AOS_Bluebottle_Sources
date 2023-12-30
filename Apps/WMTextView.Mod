@@ -1,27 +1,47 @@
 MODULE WMTextView;	(** AUTHOR "TF"; PURPOSE "Generic unicode text viewer"; *)
-
+(**
+ * History:
+ *
+ *	21.03.2006	Added TextView.Finalize (staubesv)
+ *	15.08.2006	Don't re-use piemenu instance, since its form is finalized when the menu window is closed, cleanup (staubesv)
+ *	26.09.2006	Bugfix: TextView.TextChange: Don't update lastTimeStamp if info.timestamp is older than lastTimeStamp (staubesv)
+ *	27.09.2006	TextView.StartCommand: Use AosCommands.Activate directly (staubesv)
+ *)
+ 
 IMPORT
 	AosModules, AosInputs, AosOut, AosTexts, AosTextUtilities, 
 	WMGraphics, WMGraphicUtilities, WMMessages, WMComponents, 
 	WMStandardComponents, Utilities, WMDropTarget, Raster,
-	WMRectangles, WMWindowManager, WMProperties, AosKernel, AosCommands;
+	WMRectangles, WMWindowManager, WMProperties,
+	AosCommands, AosConfig, AosIO, AosFS, WMPopups, FP1616,
+	WMPieMenu, WMEvents;
 
 CONST
 	TraceRenderOptimize = 0;
 	TraceLayout = 1;
 	TraceBaseLine = 2;
 	TraceInvalidate = 3;
-	Trace = { };
-	
+	TraceCopy = 4;
+	TraceCommands = 5;
+	Trace = {};
+
+	CallURLPointer = 0;	(* mousebutton which will invoke the URL *)
 	Wrap* = 0; WrapWord* = 1;
-	AlignLeft = 0; AlignRight = 1; AlignCenter = 2;
+	AlignLeft = 0; AlignCenter = 1; AlignRight = 2;
 	
 	DragDist = 5;
 	MaxCallParameterBuf = 1 * 1024 * 1024;
+
+	(* If TRUE, a mouse middle click will open a pie menu *)
+	UsePieMenu = TRUE;
 	
 TYPE
 	Char32 = AosTexts.Char32;
 	String = Utilities.String;
+	
+	ClickInfo = OBJECT
+	VAR cmd*, cmdPar* : Utilities.String;
+	END ClickInfo;
 
 	TabStops* = OBJECT
 	VAR tabDist : LONGINT;
@@ -31,12 +51,41 @@ TYPE
 			RETURN ((x DIV tabDist) + 1) * tabDist
 		END GetNextTabStop;
 	END TabStops;
+	
+	TabPositions* = POINTER TO ARRAY OF LONGINT;
+	
+	CustomTabStops* = OBJECT (TabStops)
+	VAR
+		positions : TabPositions;
+		
+		PROCEDURE GetNextTabStop*(x : LONGINT) : LONGINT;
+		VAR
+			idx : LONGINT;
+		BEGIN
+			idx := 0;
+			ASSERT(positions # NIL);
+			IF x >= positions[LEN(positions) - 1] THEN RETURN GetNextTabStop^(x) END; (* return default tab stop *)
+			WHILE x >= positions[idx] DO INC(idx) END;
+			RETURN positions[idx]
+		END GetNextTabStop;
+		
+		PROCEDURE &New (tp : TabPositions);
+		VAR
+			idx : LONGINT;
+		BEGIN
+			idx := 0; tabDist := 150;
+			WHILE idx < LEN(tp)-1 DO ASSERT(tp[idx] <= tp[idx+1]); INC(idx) END;
+			positions := tp
+		END New;
+	END CustomTabStops;
+		
 
 	LineInfo = RECORD
+		leftIndent, rightIndent, firstIndent, spaceBefore, spaceAfter : LONGINT;
+		firstInParagraph, lastInParagraph : BOOLEAN;
 		height, width, ascent : LONGINT;
 		pos : LONGINT; (* the position in the text, where this line starts *)
 		align : LONGINT;
-		flags : SET;
 		tabStops : TabStops;
 	END;
 	
@@ -74,7 +123,7 @@ TYPE
 		
 		(** find the linenumber by the position *)
 		PROCEDURE FindLineNrByPos(pos : LONGINT) : LONGINT;
-		VAR a, b, m, i : LONGINT;
+		VAR a, b, m : LONGINT;
 		BEGIN
 			a := 0; b := nofLines - 1;
 			WHILE (a < b) DO m := (a + b) DIV 2; 
@@ -84,10 +133,6 @@ TYPE
 			END;
 			(* last line hack *)
 			IF lines[a].pos <= pos THEN INC(a) END; 
-(*			i := 0; WHILE (i < nofLines) & (lines[i].pos <= pos) DO INC(i) END;
-			IF a - 1 # i - 1 THEN
-				AosOut.String("OffByOne"); AosOut.String("a - 1 = "); AosOut.Int(a - 1, 0); AosOut.String(" i - 1 = "); AosOut.Int(i - 1, 0); AosOut.Ln; 
-			END; *)
 			RETURN a - 1
 		END FindLineNrByPos;
 		
@@ -134,20 +179,19 @@ TYPE
 				textWidth := Utilities.Max(textWidth, lines[nofLines].width);
 				ASSERT(pos > oldpos);
 				IF TraceLayout IN Trace THEN AosOut.String("Line from : "); AosOut.Int(lines[nofLines].pos, 5); AosOut.Ln END;
-				lines[nofLines].align := AlignLeft;
 				INC(nofLines); IF nofLines >= LEN(lines) THEN GrowLines END
 			END;
 			IF TraceLayout IN Trace THEN AosOut.String("FullLayout found "); AosOut.Int(nofLines, 4); AosOut.String(" lines"); AosOut.Ln END;
 			text.ReleaseRead
 		END FullLayout;
 		
-		(** Fix the layouting of the text starting at pos where delta characters have been inserted (delta negativ if deleted) *)
+			(** Fix the layouting of the text starting at pos where delta characters have been inserted (delta negativ if deleted) *)
 		PROCEDURE FixLayoutFrom(pos, delta : LONGINT; VAR first, last : LONGINT; VAR linesChanged : BOOLEAN);
 		VAR l, dl, oldh : LONGINT;
 		BEGIN
 			ASSERT(text#NIL);
 			text.AcquireRead;
-			 linesChanged := FALSE;
+			linesChanged := FALSE;
 			l := FindLineNrByPos(pos);
 			IF (l < 0) THEN FullLayout; first := 0; last := nofLines; text.ReleaseRead; RETURN END;
 			pos := lines[l].pos;
@@ -169,7 +213,8 @@ TYPE
 						INC(textHeight, lines[nofLines].height);
 						INC(dl);
 						IF TraceLayout IN Trace THEN AosOut.String("Line from : "); AosOut.Int(lines[nofLines].pos, 5); AosOut.Ln END;	
-						INC(l)
+						INC(l);
+						IF l >= LEN(lines) THEN GrowLines END
 					END;
 					nofLines := l ;
 					last := nofLines - 1
@@ -197,6 +242,26 @@ TYPE
 			END;
 			text.ReleaseRead
 		END FixLayoutFrom; 
+	
+		PROCEDURE Show;
+		VAR i : LONGINT;
+		BEGIN
+			FOR i := 0 TO LEN(lines)-1 DO
+				AosOut.Int(i, 3); AosOut.String(": ");
+				AosOut.String("pos: "); AosOut.Int(lines[i].pos, 0);
+				AosOut.String(", w: "); AosOut.Int(lines[i].width, 0);
+				AosOut.String(", h: "); AosOut.Int(lines[i].height, 0);
+				AosOut.String(", ascent: "); AosOut.Int(lines[i].ascent, 0);		
+				AosOut.String(" (");
+				AosOut.String("li: "); AosOut.Int(lines[i].leftIndent, 0); 
+				AosOut.String(", ri: "); AosOut.Int(lines[i].rightIndent, 0);
+				AosOut.String(", fi: "); AosOut.Int(lines[i].firstIndent, 0);
+				AosOut.String(", sb: "); AosOut.Int(lines[i].spaceBefore, 0);
+				AosOut.String(", sa: "); AosOut.Int(lines[i].spaceAfter, 0);
+				AosOut.String(")");
+				AosOut.Ln;
+			END;	
+		END Show;
 		
 	END Layout;
 
@@ -260,7 +325,6 @@ TYPE
 		END SetTo;
 		
 		PROCEDURE SetFromTo*(from, to : LONGINT);
-		VAR t : LONGINT;
 		BEGIN
 			IF text = NIL THEN RETURN END; (* if no text is set, the position within is undef *)
 			text.AcquireRead;
@@ -304,12 +368,10 @@ TYPE
 		pos : AosTexts.TextPosition;
 		
 		img : WMGraphics.Image;
-		str : String;
 		color : WMGraphics.Color;
 		
 		hotX, hotY : LONGINT;
 		currentArea : WMRectangles.Rectangle;
-		ascent : LONGINT; 
 		text : AosTexts.UnicodeText;
 		onChanged : WMMessages.CompCommand;
 		visible : BOOLEAN;
@@ -328,7 +390,7 @@ TYPE
 				canvas.Fill(currentArea, 0FF0000CCH, WMGraphics.ModeSrcOverDst)
 			END
 		END Draw;
-		
+	
 		PROCEDURE GetArea(x, y, ascent : LONGINT) : WMRectangles.Rectangle;
 		BEGIN
 			IF img # NIL THEN RETURN WMRectangles.MakeRect(x - hotX, y - hotY, x - hotX + img.width, y - hotY + img.height)
@@ -339,10 +401,10 @@ TYPE
 		PROCEDURE Load*(filename : ARRAY OF CHAR);
 		BEGIN
 			img := WMGraphics.LoadImage(filename, TRUE);
-			IF img # NIL THEN hotX := img.width DIV 2; hotY := img.height END;
+			IF img # NIL THEN hotX := img.width DIV 2; hotY := img.height DIV 2 END;
 			onChanged(SELF, NIL)
 		END Load;
-		
+
 		PROCEDURE SetVisible*(visible : BOOLEAN);
 		BEGIN
 			IF SELF.visible # visible THEN 
@@ -383,7 +445,7 @@ TYPE
 	
 	PositionMarkerArray = POINTER TO ARRAY OF PositionMarker;
 	
-TYPE TextDropTarget* = OBJECT(WMDropTarget.DropTarget)
+TYPE TextDropTarget* = OBJECT(WMDropTarget.DropTarget);
 	VAR text : AosTexts.Text;
 		pos : AosTexts.TextPosition;
 		
@@ -404,10 +466,16 @@ TYPE TextDropTarget* = OBJECT(WMDropTarget.DropTarget)
 		
 	END TextDropTarget;
 
+TYPE
+	LinkWrapper* = POINTER TO RECORD
+		link* : AosTexts.Link;
+	END;
 
 TYPE
 	TextView* = OBJECT(WMComponents.VisualComponent)
-	VAR 
+	VAR
+		piemenu : WMPieMenu.Menu;
+		
 		text : AosTexts.Text;
 		firstLine* : WMProperties.Int32Property;
 		firstLineI : LONGINT;
@@ -429,7 +497,7 @@ TYPE
 		
 		passwordChar* : WMProperties.Int32Property; (* not cached *)
 		defaultTextColor*, defaultTextBgColor* : WMProperties.ColorProperty; (* cached in defaultAttr *) 
-		defaultAttr : AosTexts.Attributes; 
+		defaultAttr : AosTexts.Attributes;
 		
 		(* wrapping *)
 		wrap : SET;
@@ -461,7 +529,7 @@ TYPE
 		dragSelA, dragSelB : AosTexts.TextPosition;
 		dragCopy : BOOLEAN;
 		
-		canStart : BOOLEAN; (* set for command selection mode *)
+		canStart, openFile : BOOLEAN; (* set for command selection mode *)
 		commandMarker : Highlight;
 		
 		downX, downY : LONGINT;
@@ -469,13 +537,24 @@ TYPE
 		wordSelOrdered : BOOLEAN;
 		lineEnter : LONGINT;
 		modifierFlags : SET;
+		oldFlags : SET;	(* old pointer flags *)
+		
+		lastTimeStamp : LONGINT;
+		showLabels* : WMProperties.BooleanProperty;
+		
+		oldObject, focusObject : ANY;
+		oldPos, focusPos : LONGINT;
+		objHasFocus : BOOLEAN;
+		
+		onCursorChanged* : PROCEDURE {DELEGATE};
+		onLinkClicked* : WMEvents.EventSource;
 		
 		PROCEDURE &Init;
 		BEGIN
 			Init^;
 			NEW(layout);
 			layout.layoutLineProc := LayoutLine;
-			NEW(defaultAttr); 
+			NEW(defaultAttr);
 			NEW(defaultTabStops); defaultTabStops.tabDist := 20;
 			NEW(highlights, 4); nofHighlights := 0;
 			NEW(positionMarkers, 4); nofPositionMarkers := 0;
@@ -495,15 +574,19 @@ TYPE
 			NEW(defaultTextBgColor, PTVdefaultTextBgColor, NIL, NIL); properties.Add(defaultTextBgColor);
 			NEW(alwaysShowCursor, PTValwaysShowCursor, NIL, NIL); properties.Add(alwaysShowCursor);
 			NEW(borders, PTVborders, NIL, NIL); properties.Add(borders);
+			NEW(showLabels, PTVShowLabels, NIL, NIL); properties.Add(showLabels);
 			takesFocus.Set(TRUE); needsTab.Set(TRUE);
 			SetPointerInfo(manager.pointerText);
+			NEW(onLinkClicked, SELF, PTVonLinkClick, PTVonLinkClickInfo, SELF.StringToCompCommand); events.Add(onLinkClicked);
+			onLinkClicked.Add(LinkClicked);
 			RecacheProperties
 		END Init;
 		
-		PROCEDURE Invalidate;
+		PROCEDURE Finalize;
 		BEGIN
-			Invalidate^;
-		END Invalidate; 
+			Finalize^;
+			IF text # NIL THEN text.onTextChanged.Remove(TextChanged); END;
+		END Finalize;
 		
 		PROCEDURE FocusReceived*;
 		BEGIN
@@ -557,8 +640,8 @@ TYPE
 			IF hScrollbar # NIL THEN hScrollbar.onPositionChanged.Remove(ScrollbarsChanged) END;	
 			IF vScrollbar # NIL THEN vScrollbar.onPositionChanged.Remove(ScrollbarsChanged) END;	
 			SELF.hScrollbar := hScrollbar; SELF.vScrollbar := vScrollbar;
-			hScrollbar.onPositionChanged.Add(ScrollbarsChanged);
-			vScrollbar.onPositionChanged.Add(ScrollbarsChanged);
+			IF hScrollbar # NIL THEN hScrollbar.onPositionChanged.Add(ScrollbarsChanged) END;
+			IF vScrollbar # NIL THEN vScrollbar.onPositionChanged.Add(ScrollbarsChanged) END;
 			UpdateScrollbars;
 			Release
 		END SetScrollbars;
@@ -578,7 +661,6 @@ TYPE
 		BEGIN
 			IF vScrollbar # NIL THEN
 				vScrollbar.max.Set(layout.GetNofLines());
-				
 				vScrollbar.pos.Set(firstLineI);
 			END;
 			IF hScrollbar # NIL THEN 
@@ -590,9 +672,11 @@ TYPE
 		END UpdateScrollbars;
 		
 		PROCEDURE BordersChanged;
+		VAR vScroll : LONGINT;
 		BEGIN
+			IF (vScrollbar # NIL) & (vScrollbar.visible.Get()) THEN vScroll := vScrollbar.bounds.GetWidth() ELSE vScroll := 0 END;
 			borderClip := WMRectangles.MakeRect(bordersI.l, bordersI.t, bounds.GetWidth() - bordersI.r, bounds.GetHeight() - bordersI.b);
-			layout.paperWidth := bounds.GetWidth() - (bordersI.l + bordersI.r);
+			layout.paperWidth := bounds.GetWidth() - (bordersI.l + bordersI.r) - vScroll;
 			layout.FullLayout; CheckNumberOfLines;
 		END BordersChanged;
 		
@@ -643,6 +727,16 @@ TYPE
 			Invalidate;
 			Release
 		END SetText;
+		
+		PROCEDURE SetTabStops*(ts : TabStops);
+		BEGIN
+			Acquire;
+			defaultTabStops := ts;
+			Release;
+			layout.FullLayout;
+			CheckNumberOfLines
+		END SetTabStops;
+		
 
 (* BEGIN highlighting *)
 		PROCEDURE AddHighlight(highlight : Highlight);
@@ -655,7 +749,7 @@ TYPE
 				highlights := newHighlights;
 			END;
 			highlights[nofHighlights - 1] := highlight;
-			HighlightChanged(NIL, NIL);
+			HighlightChanged(highlight, NIL);
 		END AddHighlight;
 		
 		PROCEDURE CreateHighlight*() : Highlight;
@@ -761,7 +855,7 @@ TYPE
 		END CreatePositionMarker;
 		
 		PROCEDURE RemovePositionMarker*(x : PositionMarker);
-		VAR i, xp, yp, l : LONGINT; newRect : WMRectangles.Rectangle; 
+		VAR i, xp, yp, l, ascent : LONGINT; newRect : WMRectangles.Rectangle; 
 		BEGIN 
 			Acquire;
 			i := 0; WHILE (i < nofPositionMarkers) & (positionMarkers[i] # x) DO INC(i) END;
@@ -773,7 +867,11 @@ TYPE
 			IF FindScreenPos(x.pos.GetPosition(), xp, yp) THEN
 				l := layout.FindLineNrByPos(x.pos.GetPosition());
 				IF (l < LEN(layout.lines^)) & (l >= 0) THEN
-					newRect := x.GetArea(xp, yp, (layout.lines[l].ascent));
+					ascent := layout.lines[l].ascent;
+(*					IF ascent = 0 THEN ascent := layout.lines[l].height END;
+					IF ascent = 0 THEN ascent := 10 END; *)
+
+					newRect := x.GetArea(xp, yp, ascent);
 					InvalidateRect(newRect)
 				END
 			END;
@@ -781,7 +879,7 @@ TYPE
 		END RemovePositionMarker;
 		
 		PROCEDURE PositionMarkerChanged(sender, data : PTR);
-		VAR newRect, combinedRect : WMRectangles.Rectangle; x, y, l : LONGINT;
+		VAR newRect, combinedRect : WMRectangles.Rectangle; x, y, l, ascent : LONGINT;
 		BEGIN
 			IF ~IsCallFromSequencer() THEN sequencer.ScheduleEvent(SELF.PositionMarkerChanged, sender, data)
 			ELSE
@@ -792,7 +890,10 @@ TYPE
 					IF FindScreenPos(data(PositionMarker).pos.GetPosition(), x, y) THEN
 						l := layout.FindLineNrByPos(data(PositionMarker).pos.GetPosition());
 						IF (l < LEN(layout.lines^)) & (l >= 0) THEN
-							newRect := data(PositionMarker).GetArea(x, y, (layout.lines[l].ascent))
+							ascent := layout.lines[l].ascent;
+(*							IF ascent = 0 THEN ascent := layout.lines[l].height END;
+							IF ascent = 0 THEN ascent := 10 END;*)
+							newRect := data(PositionMarker).GetArea(x, y, ascent)
 						END
 					END;
 					
@@ -810,7 +911,8 @@ TYPE
 					END;
 					text.ReleaseRead;
 				ELSE
-					Invalidate; AosOut.String("Editor: XXX")
+					Invalidate; 
+					AosOut.String("Editor: XXX"); AosOut.Ln;
 				END;
 			END
 		END PositionMarkerChanged;
@@ -823,7 +925,7 @@ TYPE
 		END CheckNumberOfLines;
 		
 		PROCEDURE CheckCursor;
-		VAR cp, l, i : LONGINT; ty : REAL;
+		VAR cp, l, i : LONGINT; ty : LONGINT;
 		BEGIN
 			(* Scroll up, down to make cursor visible *)
 			text.AcquireRead;
@@ -838,7 +940,12 @@ TYPE
 				firstLine.Set(l);
 			ELSIF (l < layout.GetNofLines()) THEN
 				ty := bordersI.t; i := firstLineI;
-				WHILE i < l DO ty := ty + layout.lines[i].height; INC(i) END;
+				WHILE i < l DO
+					ty := ty + layout.lines[i].height;
+					CheckParagraphBegin(i, ty);
+					CheckParagraphEnd(i, ty);							
+					INC(i);
+				END;
 				ty := ty + layout.lines[i].height;
 				IF ty >= bounds.GetHeight() - bordersI.b THEN 
 					l := Utilities.Max(0, l - 3);
@@ -850,9 +957,18 @@ TYPE
 			(* $$$ TODO *)			
 		END CheckCursor;
 		
+		PROCEDURE CheckParagraphBegin(lineNr : LONGINT; VAR height: LONGINT);
+		BEGIN
+			IF layout.lines[lineNr].firstInParagraph THEN height := height + layout.lines[lineNr].spaceBefore END
+		END CheckParagraphBegin;
 
+		PROCEDURE CheckParagraphEnd(lineNr : LONGINT; VAR height: LONGINT);
+		BEGIN
+			IF layout.lines[lineNr].lastInParagraph THEN height := height + layout.lines[lineNr].spaceAfter; END;
+		END CheckParagraphEnd;		
+		
 		PROCEDURE TextChanged(sender, data : PTR);
-		VAR f, l, t, b, i, h: LONGINT; linesChanged : BOOLEAN;
+		VAR f, l, t, b, i, p, pa, pb, h: LONGINT; linesChanged : BOOLEAN;
 			info : AosTexts.TextChangeInfo;
 		BEGIN
 			IF ~initialized THEN RETURN END;
@@ -864,14 +980,37 @@ TYPE
 					info := data(AosTexts.TextChangeInfo);
 					IF text.GetTimestamp() = info.timestamp THEN
 						info := data(AosTexts.TextChangeInfo);
-						IF info.op = AosTexts.OpInsert THEN layout.FixLayoutFrom(info.pos, info.len, f, l, linesChanged) 
-						ELSE layout.FixLayoutFrom(info.pos, -info.len, f, l, linesChanged) 
+						IF info.op = AosTexts.OpInsert THEN layout.FixLayoutFrom(info.pos, info.len, f, l, linesChanged)
+						ELSE layout.FixLayoutFrom(info.pos, -info.len, f, l, linesChanged)
 						END;
-						t := bordersI.t; FOR i := firstLineI TO f - 1 DO t := t + (layout.lines[i].height) END;
-				
+						t := bordersI.t; 
+						FOR i := firstLineI TO f - 1 DO
+							t := t + (layout.lines[i].height);
+							CheckParagraphBegin(i, t);
+							CheckParagraphEnd(i, t);								
+						END;
+
 						h := bounds.GetHeight();
 						IF linesChanged THEN b := h ELSE
-							b := t; i := f; WHILE (i <= l) & (b < h) DO b := b + (layout.lines[i].height); INC(i) END
+							b := t; i := f; 
+							WHILE (i <= l) & (b < h) DO
+								b := b + (layout.lines[i].height);
+								CheckParagraphBegin(i, b);
+								CheckParagraphEnd(i, b);
+								INC(i);
+							END
+						END;
+						
+						pa := layout.lines[f].pos;
+						IF l + 1 < layout.nofLines THEN pb := layout.lines[l + 1].pos ELSE pb := text.GetLength() END;	
+						FOR i := 0 TO nofPositionMarkers - 1 DO
+							p := positionMarkers[i].pos.GetPosition();
+							IF (p >= pa) & (p < pb) THEN 
+								(* very conservative *)
+								h := positionMarkers[i].currentArea.b - positionMarkers[i].currentArea.t;
+								t := t - h;
+								b := b + h
+							END
 						END;
 						CheckCursor; UpdateScrollbars;
 						Release;
@@ -879,30 +1018,43 @@ TYPE
 					ELSE
 						IF TraceRenderOptimize IN Trace THEN AosOut.String("Timestamp not equal ==> Complete re_layout"); AosOut.Ln
 						END;
-						layout.FullLayout;
-						CheckCursor;
-						InvalidateRect(GetClientRect())
+						
+						IF (lastTimeStamp -  info.timestamp) > 0 THEN
+							(* Don't update lastTimeStamp since we didn't update the layout *)
+							Release
+						ELSE
+							layout.FullLayout;
+							lastTimeStamp := text.GetTimestamp();
+							CheckCursor;
+							Release;
+							InvalidateRect(GetClientRect())
+						END; 
 					END;
 					text.ReleaseRead
-				ELSE	
+				ELSE
+					text.AcquireRead;
 					layout.FullLayout;
+					lastTimeStamp := text.GetTimestamp();
+					text.ReleaseRead;
 					CheckCursor;
 					InvalidateRect(GetClientRect())
 				END;
 				CheckNumberOfLines;
-			END
+			END;
 		END TextChanged;
 		
 (* BEGIN view dependant layout functions *)
 		(** Return the left indent of a line - depending on alignment *)
 		(* returns left border, in case of errors *)
 		PROCEDURE GetLineLeftIndent(linenr : LONGINT): LONGINT;
+		VAR indent : LONGINT;
 		BEGIN
 			IF (linenr < 0) OR (linenr >= layout.nofLines) THEN RETURN 0 END;
+			IF layout.lines[linenr].firstInParagraph THEN indent := layout.lines[linenr].firstIndent ELSE indent := layout.lines[linenr].leftIndent END;
 			CASE layout.lines[linenr].align OF
-				AlignLeft : RETURN 0;
-				|AlignRight : RETURN (bounds.GetWidth() - layout.lines[linenr].width);
-				|AlignCenter : RETURN (bounds.GetWidth() - (layout.lines[linenr].width)) DIV 2;
+				AlignLeft : RETURN indent;
+				|AlignCenter : RETURN ((layout.paperWidth - (layout.lines[linenr].width)) DIV 2 - indent DIV 2);
+				|AlignRight : RETURN (layout.paperWidth - layout.lines[linenr].width - layout.lines[linenr].rightIndent);			
 			ELSE
 				 RETURN 0;
 			END;
@@ -910,16 +1062,21 @@ TYPE
 		
 		(** Find the line number that currently contains the y value (y relative to 0 in component)*)
 		PROCEDURE FindLineByY*(firstLine, y : LONGINT) : LONGINT;
-		VAR i : LONGINT; ypos : REAL;
+		VAR i : LONGINT; ypos : LONGINT;
 		BEGIN
 			ypos := bordersI.t; i := firstLine;
 			IF y < 0 THEN RETURN 0 END;
-			WHILE (i < layout.nofLines) & (ypos <= y) DO ypos := ypos + layout.lines[i].height; INC(i) END;
+			WHILE (i < layout.nofLines) & (ypos <= y) DO
+				ypos := ypos + layout.lines[i].height; 
+				CheckParagraphBegin(i, ypos);
+				CheckParagraphEnd(i, ypos);		
+				INC(i);
+			END;
 			RETURN Utilities.Max(i -1, 0)
 		END FindLineByY;
 
 		PROCEDURE ViewToTextPos*(x, y: LONGINT; VAR pos : LONGINT);
-		VAR l : LONGINT; dummy : LineInfo;
+		VAR l : LONGINT; dummy : LineInfo; indent : LONGINT;
 		BEGIN
 			text.AcquireRead;
 			pos := -1;
@@ -931,9 +1088,164 @@ TYPE
 			x := x - bordersI.l + leftShiftI;
 			IF x < 0 THEN x := 0 END;
 			dummy := layout.lines[l];
-			IF l >= 0 THEN pos := layout.GetLineStartPos(l); LayoutLine(pos, dummy, layout.paperWidth, -1, x) END;
+			IF l >= 0 THEN
+				pos := layout.GetLineStartPos(l);
+				IF dummy.firstInParagraph THEN indent := dummy.firstIndent
+				ELSE indent := dummy.leftIndent END;		
+
+				IF dummy.align = 0 THEN (* Left *)
+					LayoutLine(pos, dummy, layout.paperWidth, -1, x-indent)
+				ELSIF dummy.align = 1 THEN (* Center *)
+					LayoutLine(pos, dummy, layout.paperWidth, -1, x-((layout.paperWidth - dummy.width - indent) DIV 2))
+				ELSIF dummy.align = 2 THEN (* Right *)
+					LayoutLine(pos, dummy, layout.paperWidth, -1, x-(layout.paperWidth - dummy.width - dummy.rightIndent))
+				END;				
+				
+			END;
 			text.ReleaseRead
 		END ViewToTextPos;
+		
+		(* Returns the height for the given width *)
+		PROCEDURE GetHeight*(width: LONGINT): LONGINT;
+		VAR oldWidth, height : LONGINT;
+		BEGIN
+			oldWidth := layout.paperWidth;
+			layout.paperWidth := width;
+			layout.FullLayout;
+			height := layout.textHeight;
+						
+			(* reset old state *)
+			layout.paperWidth := oldWidth;
+			layout.FullLayout;
+			RETURN height
+		END GetHeight;
+		
+		(* Returns the size of the largest word and line in pixels *)
+		PROCEDURE GetMinMaxWidth*(VAR word, line : LONGINT);
+		VAR dx, pos : LONGINT;
+			cws, cls : LONGINT;
+			f : WMGraphics.Font;
+			ch : Char32;
+			tabstring : ARRAY 256 OF CHAR; tabs : CustomTabStops; tp : TabPositions;
+			sr : AosIO.StringReader; tabCounter, tabPos : LONGINT; token : ARRAY 16 OF CHAR;
+			pStyle : AosTexts.ParagraphStyle;
+			cStyle : AosTexts.CharacterStyle;
+			
+			PROCEDURE GetWidth(ch : Char32; VAR dx : LONGINT);
+			VAR gs : WMGraphics.GlyphSpacings; vc : WMComponents.VisualComponent;
+			BEGIN
+				IF ch = AosTexts.ObjectChar THEN
+					IF (utilreader.object # NIL) & (utilreader.object IS WMGraphics.Image) THEN
+						dx :=  utilreader.object(WMGraphics.Image).width 
+					ELSIF (utilreader.object # NIL) & (utilreader.object IS WMComponents.VisualComponent) THEN
+						vc := utilreader.object(WMComponents.VisualComponent);						
+						dx := vc.bounds.GetWidth();
+					END
+				ELSIF ch = AosTexts.TabChar THEN
+					IF tabs # NIL THEN dx := tabs.GetNextTabStop(cls) - cls 
+					ELSE dx := defaultTabStops.GetNextTabStop(cls) - cls
+					END;
+				ELSE
+					IF isPasswordI THEN ch := passwordChar.Get() END;
+					IF f.HasChar(ch) THEN
+						f.GetGlyphSpacings(ch, gs);
+					ELSE
+						WMGraphics.FBGetGlyphSpacings(ch, gs);
+					END;
+					dx := gs.bearing.l + gs.width + gs.bearing.r
+				END
+			END GetWidth;
+			 			
+		BEGIN
+			f := GetFont(); (* set the default component font *)
+			pos := 0; cws := 0; cls := 0; word := 0; line := 0;
+			
+			text.AcquireRead;
+			utilreader.SetDirection(1); utilreader.SetPosition(pos);
+				
+			REPEAT
+				utilreader.ReadCh(ch);
+				
+				(* Get the Paragraph Style *)
+				IF utilreader.pstyle # NIL THEN
+					pStyle := utilreader.pstyle;
+					(* parse tabstops *)
+					COPY(pStyle.tabStops, tabstring);
+					IF (tabstring # "default") & (tabstring # "0") & (tabstring # "") THEN
+						NEW(sr, LEN(tabstring)); sr.Set(tabstring); tabCounter := 0;
+						WHILE (sr.res = AosIO.Ok) DO
+							sr.SkipWhitespace; sr.String(token);
+							INC(tabCounter);		
+						END;
+						NEW(tp, tabCounter);
+						sr.Reset; tabCounter := 0;
+						WHILE (sr.res = AosIO.Ok) DO
+							sr.SkipWhitespace; sr.String(token);
+							Utilities.StrToInt(token, tabPos);
+							tp[tabCounter] := tabPos;
+							INC(tabCounter);		
+						END;						
+						NEW(tabs, tp)
+					END
+				END;							
+				(* Get the Character Styles / Attributes *)
+				IF utilreader.cstyle # NIL THEN
+					cStyle := utilreader.cstyle;
+					IF (cStyle.fontcache #NIL) & (cStyle.fontcache IS WMGraphics.Font) THEN
+						f := cStyle.fontcache(WMGraphics.Font);
+					ELSE	
+						 f := WMGraphics.GetFont(cStyle.family, ENTIER(FP1616.FixpToFloat(cStyle.size)), cStyle.style);
+						utilreader.cstyle.fontcache := f
+					END;					
+				ELSIF utilreader.pstyle # NIL THEN
+					IF pStyle.charStyle # NIL THEN
+						cStyle := pStyle.charStyle;
+						IF (cStyle.fontcache #NIL) &
+							(cStyle.fontcache IS WMGraphics.Font) THEN
+							f := cStyle.fontcache(WMGraphics.Font);
+						ELSE	
+							 f := WMGraphics.GetFont(cStyle.family, ENTIER(FP1616.FixpToFloat(cStyle.size)), cStyle.style);
+							utilreader.pstyle.charStyle.fontcache := f
+						END
+					END;
+				ELSIF utilreader.attributes # NIL THEN 
+					IF utilreader.attributes.fontInfo # NIL THEN
+						IF (utilreader.attributes.fontInfo.fontcache # NIL) 
+							& (utilreader.attributes.fontInfo.fontcache IS WMGraphics.Font) THEN 
+							f := utilreader.attributes.fontInfo.fontcache(WMGraphics.Font);
+						ELSE
+							f := GetFontFromAttr(utilreader.attributes.fontInfo);
+							utilreader.attributes.fontInfo.fontcache := f
+						END
+					ELSE f := GetFont()
+					END					 
+				ELSE f := GetFont();
+				END;
+				
+				INC(pos);
+				GetWidth(ch, dx);
+				
+				IF (ch = AosTexts.ObjectChar) THEN
+					word := Utilities.Max(word, dx);
+					cls := cls + dx;
+					cws := 0
+				ELSIF (ch = AosTexts.NewLineChar) THEN
+					line := Utilities.Max(line, cls);
+					cls := 0
+				ELSIF (ch = 32) THEN
+					word := Utilities.Max(word, cws);
+					cws := 0
+				ELSE
+					cws := cws + dx;
+					cls := cls + dx;
+				END;
+				 
+			UNTIL utilreader.eot;
+			line := Utilities.Max(line, cls);
+			word := Utilities.Max(word, cws);
+			text.ReleaseRead;
+		
+		END GetMinMaxWidth;
 
 (* END view dependant layout functions *)
 
@@ -946,7 +1258,13 @@ TYPE
 		VAR i, wrapPos : LONGINT; ch : Char32;
 			f : WMGraphics.Font;
 			eol, first : BOOLEAN; 
-			voff, ascent, descent, a, d, dx, x : LONGINT;
+			voff, ascent, descent, leading, ld, a, d, dx, x : LONGINT;
+			align, firstIndent, leftIndent, rightIndent, spaceBefore, spaceAfter : LONGINT;
+			tabstring : ARRAY 256 OF CHAR; tabs : CustomTabStops; tp : TabPositions;
+			sr : AosIO.StringReader; tabCounter, tabPos : LONGINT; token : ARRAY 16 OF CHAR;
+			pStyle : AosTexts.ParagraphStyle;
+			cStyle : AosTexts.CharacterStyle;
+			start, stop : BOOLEAN;
 			
 			PROCEDURE GetExtents(ch : Char32; VAR dx, ascent, descent: LONGINT);
 			VAR gs : WMGraphics.GlyphSpacings; vc : WMComponents.VisualComponent;
@@ -957,10 +1275,15 @@ TYPE
 						descent := voff;
 						dx :=  utilreader.object(WMGraphics.Image).width 
 					ELSIF (utilreader.object # NIL) & (utilreader.object IS WMComponents.VisualComponent) THEN
-						vc := utilreader.object(WMComponents.VisualComponent);
+						vc := utilreader.object(WMComponents.VisualComponent);						
 						dx := vc.bounds.GetWidth();
 						ascent := vc.bounds.GetHeight() - voff;
 						descent := voff;
+						(* Add a Sequencer to the object if none exists *)
+						IF (vc.sequencer = NIL) OR (vc.sequencer # sequencer) THEN
+							vc.SetSequencer(sequencer);
+							vc.Reset(NIL, NIL);
+						END;
 					END
 				ELSIF ch = AosTexts.TabChar THEN
 					IF l.tabStops # NIL THEN dx := l.tabStops.GetNextTabStop(x) - x 
@@ -968,6 +1291,15 @@ TYPE
 					END;
 					ascent := f.GetAscent() - voff;
 					descent := f.GetDescent() + voff
+				ELSIF ch = AosTexts.LabelChar THEN
+					IF showLabels.Get() THEN
+						f := GetFont();
+						f.GetStringSize(utilreader.object(AosTexts.LabelPiece).label^, dx, ascent);
+						INC(dx, 4);
+					ELSE 
+						ascent := 0; descent := 0;
+						dx := 0;
+					END;
 				ELSE
 					IF isPasswordI THEN ch := passwordChar.Get() END;
 					IF f.HasChar(ch) THEN
@@ -988,12 +1320,82 @@ TYPE
 		BEGIN 
 			f := GetFont(); (* set the default component font *)
 			x := 0; l.pos := pos; l.height := f.GetHeight(); eol := FALSE; 
-			utilreader.SetDirection(1); utilreader.SetPosition(pos); first := TRUE;
-			i := 0; ascent := f.GetAscent(); descent := f.GetDescent(); 
+			utilreader.SetDirection(1); utilreader.SetPosition(pos); first := TRUE; 
+			
+			start := FALSE; stop := FALSE;
+			IF (pos = 0) THEN start := TRUE;
+			ELSE 
+				utilreader.SetPosition(pos-1);
+				utilreader.ReadCh(ch);
+				IF (ch = AosTexts.NewLineChar) THEN start := TRUE;
+				ELSE start := FALSE;
+				END;
+			END;
+			
+			i := 0;  ascent := f.GetAscent(); descent := f.GetDescent(); 
+			align := AlignLeft; l.tabStops := NIL; COPY("", tabstring);
+			firstIndent := 0; leftIndent := 0; rightIndent := 0; spaceBefore := 0; spaceAfter := 0;
+			
 			REPEAT
 				utilreader.ReadCh(ch);
-				IF utilreader.attributes # NIL THEN 
+				
+				(* Get the Paragraph Style *)
+				IF utilreader.pstyle # NIL THEN
+					pStyle := utilreader.pstyle;
+					(* pStyle := AosTexts.GetParagraphStyleByName(pStyle.name); *)
+					spaceBefore := ENTIER(FP1616.FixpToFloat(pStyle.spaceBefore));
+					spaceAfter := ENTIER(FP1616.FixpToFloat(pStyle.spaceAfter));
+					firstIndent := ENTIER(FP1616.FixpToFloat(pStyle.firstIndent));
+					leftIndent := ENTIER(FP1616.FixpToFloat(pStyle.leftIndent));
+					rightIndent := ENTIER(FP1616.FixpToFloat(pStyle.rightIndent));
+					align := pStyle.alignment;
+					(* parse tabstops *)
+					COPY(pStyle.tabStops, tabstring);
+					IF (tabstring # "default") & (tabstring # "0") & (tabstring # "") THEN
+						NEW(sr, LEN(tabstring)); sr.Set(tabstring); tabCounter := 0;
+						WHILE (sr.res = AosIO.Ok) DO
+							sr.SkipWhitespace; sr.String(token);
+							INC(tabCounter);		
+						END;
+						NEW(tp, tabCounter);
+						sr.Reset; tabCounter := 0;
+						WHILE (sr.res = AosIO.Ok) DO
+							sr.SkipWhitespace; sr.String(token);
+							Utilities.StrToInt(token, tabPos);
+							tp[tabCounter] := tabPos;
+							INC(tabCounter);		
+						END;						
+						NEW(tabs, tp);
+						IF l.tabStops = NIL THEN l.tabStops := tabs END
+					END;
+				END;								
+				(* Get the Character Styles / Attributes *)
+				IF utilreader.cstyle # NIL THEN
+					cStyle := utilreader.cstyle;
+					voff := ENTIER(FP1616.FixpToFloat(cStyle.baselineShift));
+					ld := ENTIER(FP1616.FixpToFloat(cStyle.leading));
+					IF (cStyle.fontcache #NIL) & (cStyle.fontcache IS WMGraphics.Font) THEN
+						f := cStyle.fontcache(WMGraphics.Font);
+					ELSE	
+						 f := WMGraphics.GetFont(cStyle.family, ENTIER(FP1616.FixpToFloat(cStyle.size)), cStyle.style);
+						utilreader.cstyle.fontcache := f
+					END;					
+				ELSIF utilreader.pstyle # NIL THEN
+					IF pStyle.charStyle # NIL THEN
+						cStyle := pStyle.charStyle;
+						voff := ENTIER(FP1616.FixpToFloat(cStyle.baselineShift));
+						ld := ENTIER(FP1616.FixpToFloat(cStyle.leading));
+						IF (cStyle.fontcache #NIL) &
+							(cStyle.fontcache IS WMGraphics.Font) THEN
+							f := cStyle.fontcache(WMGraphics.Font);
+						ELSE	
+							 f := WMGraphics.GetFont(cStyle.family, ENTIER(FP1616.FixpToFloat(cStyle.size)), cStyle.style);
+							utilreader.pstyle.charStyle.fontcache := f
+						END
+					END;
+				ELSIF utilreader.attributes # NIL THEN 
 					voff := utilreader.attributes.voff;
+					ld := 0;
 					IF utilreader.attributes.fontInfo # NIL THEN
 						IF (utilreader.attributes.fontInfo.fontcache # NIL) 
 							& (utilreader.attributes.fontInfo.fontcache IS WMGraphics.Font) THEN 
@@ -1004,32 +1406,56 @@ TYPE
 						END
 					ELSE f := GetFont()
 					END					 
-				ELSE voff := 0; f := GetFont(); 
+				ELSE voff := 0; f := GetFont(); ld := 0; 
 				END;
-				IF first THEN ascent := f.GetAscent(); descent := f.GetDescent(); first := FALSE END;
+				
+				IF first THEN
+					IF ch = AosTexts.NewLineChar THEN
+						ascent := f.GetAscent(); descent := 0; 
+					ELSE	
+						descent := 0; ascent := 0;
+					END;
+					IF start THEN wrapwidth := wrapwidth - firstIndent - rightIndent;
+					ELSE wrapwidth := wrapwidth - leftIndent - rightIndent;
+					END;
+					first := FALSE;
+				END;
 				INC(pos);
 				IF (stopPos < 0) OR (pos <= stopPos) THEN
 					IF ch # AosTexts.NewLineChar THEN
 						GetExtents(ch, dx, a, d); ascent := Utilities.Max(ascent, a); descent := Utilities.Max(descent, d);
+						IF ld = 0 THEN ld := ascent + descent; ELSE ld := Utilities.Max(ld, ascent + descent); END; leading := Utilities.Max(leading, ld);
 						IF isMultiLineI & (wrap # {}) & (i > 0) & (x + dx > wrapwidth) THEN
 							eol := TRUE; DEC(pos); wrapPos := pos;
 							(* Go left for last space *)
 							IF wrap * { WrapWord } # {} THEN 
 								pos := AosTextUtilities.FindPosWordLeft(utilreader, pos);
-								IF pos <= l.pos THEN pos := wrapPos END; (* no word break found. wrap at latest possible pos *)
+								IF pos <= l.pos THEN pos := wrapPos (* no word break found. wrap at latest possible pos *)
+								ELSE (* decrease width to actual size.. *)
+(*									utilreader.SetPosition(pos);
+									WHILE pos < wrapPos DO
+										utilreader.ReadCh(ch); GetExtents(ch, dx, a, d); x := x - dx; INC(pos)
+									END
+*)								END
 							END
 						ELSE
 							IF (stopXPos >= 0) & (x + dx DIV 2 > stopXPos) THEN DEC(pos); RETURN END;
 							INC(x, dx)
 						END;
-					ELSE eol := TRUE; IF (stopXPos >= 0) THEN DEC(pos) END;
+					ELSE eol := TRUE; stop := TRUE; IF (stopXPos >= 0) THEN DEC(pos) END;
 					END;
 				ELSE eol := TRUE
 				END;
 				INC(i)
 			UNTIL eol OR utilreader.eot;
 			l.width := x;
-			l.ascent := ascent; l.height := ascent + descent; IF l.height = 0 THEN l.height := f.GetHeight() END
+			l.ascent := ascent; l.height := leading; (* ascent + descent; *)
+			l.align := align; l.leftIndent := leftIndent; l.rightIndent := rightIndent;
+			IF l.height = 0 THEN l.height := f.GetHeight() END;
+			IF start THEN l.firstInParagraph := TRUE; l.firstIndent := firstIndent;	l.spaceBefore := spaceBefore;
+			ELSE l.firstInParagraph := FALSE;	END;
+			IF stop THEN l.lastInParagraph := TRUE; l.spaceAfter := spaceAfter; 
+			ELSE l.lastInParagraph := FALSE END;
 		END LayoutLine;
 		
 		PROCEDURE LineYPos(lineNr : LONGINT; VAR y0, y1 : LONGINT);
@@ -1037,8 +1463,14 @@ TYPE
 		BEGIN
 			IF (lineNr >= firstLineI) & (lineNr < layout.GetNofLines()) THEN
 				y0 := bordersI.t; i := firstLineI;
-				WHILE i < lineNr DO y0 := y0 + layout.lines[i].height; INC(i) END;
-				y1 := y0 + layout.lines[i].height
+				WHILE i < lineNr DO
+					y0 := y0 + layout.lines[i].height; 
+					CheckParagraphBegin(i, y0);
+					CheckParagraphEnd(i, y0);	
+					INC(i);			
+				END;
+				y1 := y0 + layout.lines[i].height;
+				CheckParagraphBegin(i, y1);
 			ELSE y0 := 0; y1 := 0
 			END	
 		END LineYPos;
@@ -1046,7 +1478,6 @@ TYPE
 		PROCEDURE FindScreenPos*(pos : LONGINT; VAR x, y : LONGINT) : BOOLEAN;
 		VAR l, i, startPos: LONGINT; ty : LONGINT; li : LineInfo; ch : Char32; lastLine : BOOLEAN;
 			f : WMGraphics.Font;
-
 		BEGIN 
 			text.AcquireRead;
 			lastLine := FALSE;
@@ -1057,18 +1488,30 @@ TYPE
 			END;
 			IF lastLine THEN
 				ty := bordersI.t; i := firstLineI;
-				WHILE i < layout.nofLines DO ty := ty + layout.lines[i].height; INC(i) END;
-				IF i > 0 THEN y := (ty + layout.lines[i - 1 ].ascent) ELSE y := (ty + 10) END;
+				WHILE i < layout.nofLines DO
+					ty := ty + layout.lines[i].height; 
+					CheckParagraphBegin(i, ty);
+					CheckParagraphEnd(i, ty);	
+					INC(i);
+				END;
+				IF i > 0 THEN y := (ty + layout.lines[i - 1].ascent) ELSE y := (ty + 10) END;
 				x := bordersI.l - leftShiftI;
 				text.ReleaseRead; RETURN TRUE
 			ELSIF (pos = 0) & (firstLineI = 0) THEN x := bordersI.l - leftShiftI; f := GetFont();  y := f.GetAscent();
+				CheckParagraphBegin(i, y);
 				text.ReleaseRead; RETURN TRUE
 			ELSE
 				l := layout.FindLineNrByPos(pos);
 				IF (l >= firstLineI) & (l < layout.GetNofLines()) THEN
 					ty := bordersI.t; i := firstLineI;
-					WHILE i < l DO ty := ty + layout.lines[i].height; INC(i) END;
+					WHILE i < l DO
+						ty := ty + layout.lines[i].height; 
+						CheckParagraphBegin(i, ty);
+						CheckParagraphEnd(i, ty);							
+						INC(i);
+					END;
 					y := (ty + layout.lines[i].ascent);
+					CheckParagraphBegin(i, y);	
 					startPos := layout.GetLineStartPos(i);
 					LayoutLine(startPos, li, layout.paperWidth, pos, -1);
 					x := (li.width + GetLineLeftIndent(l) + bordersI.l - leftShiftI);
@@ -1081,8 +1524,9 @@ TYPE
 		
 		(* llen = -1 to render until the end of line > 0 to render llen elements in the line *)
 		PROCEDURE RenderLine*(canvas : WMGraphics.Canvas; VAR l : LineInfo; linenr, top, llen : LONGINT);
-		VAR sx, dx, x, sp, i, j, k, linelength, w, voff, bgcolor, p : LONGINT; char : Char32; gs: WMGraphics.GlyphSpacings;
-	 		curAttr : AosTexts.Attributes; font : WMGraphics.Font; vc : WMComponents.VisualComponent;
+		VAR sx, dx, dy, x, sp, i, j, k, t, tx, linelength, w, voff, bgcolor, p : LONGINT; char : Char32; gs: WMGraphics.GlyphSpacings;
+	 		curAttr : AosTexts.Attributes; curCStyle : AosTexts.CharacterStyle;
+	 		font : WMGraphics.Font; vc : WMComponents.VisualComponent;
 	 		hc : BOOLEAN;
 		BEGIN
 			font := GetFont();
@@ -1111,34 +1555,59 @@ TYPE
 			w := bounds.GetWidth() - bordersI.r;
 			REPEAT
 				utilreader.ReadCh(char);
-				IF curAttr # utilreader.attributes THEN
-					IF utilreader.attributes # NIL THEN 
-						(* Black is the default color *)
-						IF utilreader.attributes.color # 0FFH THEN canvas.SetColor(utilreader.attributes.color);
-						ELSE canvas.SetColor(defaultAttr.color)
-						END;
-						IF utilreader.attributes.fontInfo # NIL THEN
-							IF (utilreader.attributes.fontInfo.fontcache # NIL) 
-								& (utilreader.attributes.fontInfo.fontcache IS WMGraphics.Font) THEN 
-								font := utilreader.attributes.fontInfo.fontcache(WMGraphics.Font);
-							ELSE
-								font := GetFontFromAttr(utilreader.attributes.fontInfo);
-								utilreader.attributes.fontInfo.fontcache := font
+				
+				IF utilreader.cstyle = NIL THEN
+					IF curAttr # utilreader.attributes THEN
+						IF utilreader.attributes # NIL THEN 
+							(* Black is the default color *)
+							IF utilreader.attributes.color # 0FFH THEN canvas.SetColor(utilreader.attributes.color);
+							ELSE canvas.SetColor(defaultAttr.color)
+							END;
+							IF utilreader.attributes.fontInfo # NIL THEN
+								IF (utilreader.attributes.fontInfo.fontcache # NIL) 
+									& (utilreader.attributes.fontInfo.fontcache IS WMGraphics.Font) THEN 
+									font := utilreader.attributes.fontInfo.fontcache(WMGraphics.Font);
+								ELSE
+									font := GetFontFromAttr(utilreader.attributes.fontInfo);
+									utilreader.attributes.fontInfo.fontcache := font
+								END
+							ELSE font := GetFont()
+							END;			 
+							bgcolor := utilreader.attributes.bgcolor;
+							voff := utilreader.attributes.voff;
+							curAttr := utilreader.attributes
+						ELSE
+							IF curAttr # defaultAttr THEN
+								canvas.SetColor(defaultAttr.color);
+								bgcolor := defaultAttr.bgcolor;
+								voff := defaultAttr.voff;
+								curAttr := defaultAttr;
+								font := GetFont()
 							END
-						ELSE font := GetFont()
-						END;			 
-						bgcolor := utilreader.attributes.bgcolor;
-						voff := utilreader.attributes.voff;
-						curAttr := utilreader.attributes
-					ELSE
-						IF curAttr # defaultAttr THEN
-							canvas.SetColor(defaultAttr.color);
-							bgcolor := defaultAttr.bgcolor;
-							voff := defaultAttr.voff;
-							curAttr := defaultAttr;
-							font := GetFont()
-						END
+						END;
+					ELSIF curAttr = NIL THEN;	
+						canvas.SetColor(defaultAttr.color);
+						bgcolor := defaultAttr.bgcolor;
+						voff := defaultAttr.voff;
+						curAttr := defaultAttr;
+						font := GetFont();
 					END;
+					curCStyle := NIL;
+				ELSE
+					IF curCStyle # utilreader.cstyle THEN
+						curCStyle := utilreader.cstyle;
+						canvas.SetColor(curCStyle.color);
+						bgcolor := curCStyle.bgColor;
+						voff := curCStyle.baselineShift;
+						(* get style from cache if possible *)
+						IF (curCStyle.fontcache #NIL) & (curCStyle.fontcache IS WMGraphics.Font) THEN
+							font := curCStyle.fontcache(WMGraphics.Font);
+						ELSE	
+							 font := WMGraphics.GetFont(curCStyle.family, ENTIER(FP1616.FixpToFloat(curCStyle.size)), curCStyle.style);
+							curCStyle.fontcache := font
+						END;							
+					END;
+					curAttr := NIL;
 				END;
 				
 				IF char = AosTexts.ObjectChar THEN
@@ -1149,21 +1618,34 @@ TYPE
 					ELSIF (utilreader.object # NIL) & (utilreader.object IS WMComponents.VisualComponent) THEN
 						vc := utilreader.object(WMComponents.VisualComponent);
 						dx := vc.bounds.GetWidth();
+						dy := vc.bounds.GetHeight();
 						canvas.SaveState(clipState); (* save the current clip-state *)
-						canvas.SetClipRect(WMRectangles.MakeRect(x + sx, top, x + dx + sx, top + (l.height)));
-						canvas.ClipRectAsNewLimits(x + sx, top);
+						canvas.SetClipRect(WMRectangles.MakeRect(x + sx, top + (l.ascent - dy), x + dx + sx, top + (l.height)));
+						canvas.ClipRectAsNewLimits(x + sx, top + (l.ascent - dy));
 						(* assuming the component will not delay --> otherwise a buffer is needed *)
 						vc.Acquire; vc.Draw(canvas); vc.Release;
 						canvas.RestoreState(clipState)
 					END
 				ELSIF char = 0 THEN (* EOT *)
 				ELSIF char = AosTexts.TabChar THEN
-					IF l.tabStops # NIL THEN dx := l.tabStops.GetNextTabStop(x) - x 
-					ELSE dx := defaultTabStops.GetNextTabStop(x) - x
+					tx := x;
+					IF l.firstInParagraph THEN tx := tx - l.firstIndent
+					ELSE tx := tx - l.leftIndent END;
+					IF l.tabStops # NIL THEN dx := l.tabStops.GetNextTabStop(tx) - tx 
+					ELSE dx := defaultTabStops.GetNextTabStop(tx) - tx
 					END;
 					IF bgcolor # 0 THEN 
 						canvas.Fill(WMRectangles.MakeRect(x + sx, top, x + dx + sx, top + (l.height)), bgcolor, WMGraphics.ModeCopy)
 					END
+				ELSIF char = AosTexts.LabelChar THEN
+					IF showLabels.Get() THEN
+						font := GetFont();
+						font.GetStringSize(utilreader.object(AosTexts.LabelPiece).label^, dx, dy);
+						font.RenderString(canvas, x + sx+2, top + (l.ascent), utilreader.object(AosTexts.LabelPiece).label^);
+						INC(dx, 4);						
+						canvas.Fill(WMRectangles.MakeRect(x + sx, top, x + dx + sx, top + (l.height)), 0FF880050H, WMGraphics.ModeSrcOverDst);
+						WMGraphicUtilities.RectGlassShade(canvas, WMRectangles.MakeRect(x + sx, top, x + dx + sx, top + (l.height)), 1, FALSE)
+					ELSE dx := 0; END;
 				ELSE
 					IF char = AosTexts.NewLineChar THEN RETURN END;
 					IF isPasswordI THEN char := passwordChar.Get() END;
@@ -1180,6 +1662,11 @@ TYPE
 					END
 				END;
 				
+				(* link *)
+				IF utilreader.link # NIL THEN
+					canvas.Line(x + sx, top + (l.ascent)+1, x + dx + sx, top + (l.ascent)+1, canvas.color, WMGraphics.ModeSrcOverDst);
+				END;
+				
 				(* highlight *)
 				p := utilreader.GetPosition();
 				FOR j := 0 TO nofHighlights - 1 DO 
@@ -1187,9 +1674,11 @@ TYPE
 						CASE highlights[j].kind OF
 							|HLOver: canvas.Fill(WMGraphics.MakeRectangle(x + sx, top, x + dx + sx, top + (l.height)), highlights[j].color, WMGraphics.ModeSrcOverDst)
 							|HLUnder: canvas.Line(x + sx, top + (l.ascent), x + dx + sx, top + (l.ascent), highlights[j].color, WMGraphics.ModeSrcOverDst);
-							|HLWave: FOR k := 0 TO dx - 1 DO 
-								canvas.SetPixel(x + k + sx, top + (l.ascent) + (1 - ABS((x + k) MOD 4 - 2)), highlights[j].color, WMGraphics.ModeSrcOverDst);
-							END;
+							|HLWave: 
+								FOR k := 0 TO dx - 1 DO 
+									t := 1 - ABS((x + k) MOD 4 - 2); (* because of compiler bug on intel *)
+									canvas.SetPixel(x + k + sx, top + l.ascent + t, highlights[j].color, WMGraphics.ModeSrcOverDst);
+								END;
 						ELSE
 						END
 					END
@@ -1210,7 +1699,11 @@ TYPE
 				pos := positionMarkers[i].pos.GetPosition();
 				l := layout.FindLineNrByPos(pos);
 				IF FindScreenPos(pos, x, y) THEN
-					IF (l >= 0) & (l < layout.GetNofLines()) THEN ascent := (layout.lines[l].ascent) ELSE ascent := 10 END;	
+					IF (l >= 0) & (l < layout.GetNofLines()) THEN 
+						ascent := layout.lines[l].ascent;
+					(*	IF ascent = 0 THEN ascent := layout.lines[l].height END;
+						IF ascent = 0 THEN ascent := 10 END; *)
+					ELSE ascent := 10 END;	
 					positionMarkers[i].Draw(canvas, x, y, ascent)
 				END
 			END;
@@ -1226,7 +1719,7 @@ TYPE
 			IF WMRectangles.RectEmpty(cliprect) THEN RETURN END; 
 			
 			IF showBorderI THEN 
-				WMGraphicUtilities.DrawBevel(canvas, WMRectangles.ResizeRect(GetClientRect(), -1), 
+				WMGraphicUtilities.DrawBevel(canvas, GetClientRect(), 
 					1, TRUE, 0808080FFH, WMGraphics.ModeCopy)
 			END;
 			
@@ -1245,12 +1738,19 @@ TYPE
 				IF highlights[i].a > highlights[i].b THEN t := highlights[i].a; highlights[i].a := highlights[i].b; highlights[i].b := t END
 			END;
 			
-			top := bordersI.t; FOR i := firstLineI TO la - 1 DO top := top + (layout.lines[i].height) END;
+			top := bordersI.t; 
+			FOR i := firstLineI TO la - 1 DO
+				top := top + (layout.lines[i].height);
+				CheckParagraphBegin(i, top);
+				CheckParagraphEnd(i, top);					
+			END;
 			IF la >= 0 THEN 
 				(* draw the lines that intersect the clipping rectangle *)
 				FOR i := la TO lb DO 
+					CheckParagraphBegin(i, top);
 					RenderLine(canvas, layout.lines[i], i, top, -1); 
-					top := top + (layout.lines[i].height) 
+					top := top + (layout.lines[i].height);
+					CheckParagraphEnd(i, top);	
 				END 
 			END;
 			RenderAboveTextMarkers(canvas);
@@ -1270,7 +1770,7 @@ TYPE
 	(* navigation *)
 		PROCEDURE WheelMove*(dz: LONGINT); (** PROTECTED *)
 		BEGIN
-			firstLine.Set(firstLine.Get() + dz) 
+			firstLine.Set(firstLine.Get() + dz)
 		END WheelMove;
 		
 		(* abort a possible start of a command. Clear the command start indicator, if it was set *)
@@ -1284,10 +1784,10 @@ TYPE
 		END AbortStart;
 		
 		PROCEDURE PointerDown*(x, y : LONGINT; keys : SET);
-		VAR pos, i, j, a, b : LONGINT;
+		VAR pos, a, b : LONGINT;
 		BEGIN
 			IF keys * {0, 1, 2} = {1} THEN 
-				canStart := TRUE;
+				canStart := TRUE; openFile := FALSE;
 				IF commandMarker = NIL THEN
 					commandMarker := CreateHighlight();
 					commandMarker.SetKind(HLUnder);
@@ -1296,15 +1796,23 @@ TYPE
 					ViewToTextPos(x, y, pos);
 					FindCommand(pos, a, b);
 					commandMarker.SetFromTo(a, b);
+					cursor.SetPosition(pos);
 					text.ReleaseRead
 				END;
-			 END;
-			IF 2 IN keys THEN AbortStart END;
+			END;
+			IF canStart & (2 IN keys) THEN openFile := TRUE END;
+			IF keys * {0, 1, 2} = {0, 1, 2} THEN AbortStart END;
+			IF keys * {0, 1, 2} = {2} THEN 
+				text.AcquireRead;
+				ViewToTextPos(x, y, pos);
+				cursor.SetPosition(pos);
+				text.ReleaseRead;
+				ShowContextMenu(x, y) END;
 			IF 0 IN keys THEN
 				AbortStart;
 				text.AcquireRead;
-				dragPossible := FALSE; selectWords := FALSE;
 				ViewToTextPos(x, y, pos);
+				dragPossible := FALSE; selectWords := FALSE;
 				IF pos >= 0 THEN
 					selection.Sort;
 					IF (pos >= selection.a) & (pos < selection.b) THEN
@@ -1322,7 +1830,8 @@ TYPE
 					END
 				END;
 				cursor.SetPosition(pos);
-				text.ReleaseRead
+				text.ReleaseRead;
+				CursorChanged
 			END;
 		END PointerDown;
 	
@@ -1368,8 +1877,9 @@ TYPE
 							commandMarker.SetFromTo(a, b)
 						END
 					END;
-					text.ReleaseRead 
-				END;
+					text.ReleaseRead; 
+					CursorChanged
+				END
 			END
 		END PointerMove;
 		
@@ -1377,13 +1887,134 @@ TYPE
 		BEGIN
 			IF canStart & (commandMarker # NIL) THEN
 				commandMarker.Sort;
-				StartCommand((commandMarker.a + commandMarker.b) DIV 2);
+				StartCommand((commandMarker.a + commandMarker.b) DIV 2, openFile);
 				AbortStart
 			END;
 			selecting := FALSE; 
 			IF dragPossible THEN selection.SetFromTo(0, 0); AosTexts.ClearLastSelection (* reset selection *) END;
 			dragPossible := FALSE
 		END PointerUp;
+		
+		(* Transforms the TextView Coordinates into TextObject obj Coordinates *)
+		PROCEDURE TransformCoordinates(VAR x, y : LONGINT; obj : WMComponents.VisualComponent);
+		VAR line, pos, x0, y0, y1 : LONGINT;
+		BEGIN
+			ViewToTextPos(x, y, pos);
+			IF FindScreenPos(pos, x0, y0) THEN
+				IF x0 > x THEN pos := pos - 1;
+					IF FindScreenPos(pos, x0, y0) THEN END;
+				END;
+				line := layout.FindLineNrByPos(pos);
+				LineYPos(line, y0, y1);
+				x := x - x0;
+				y := y - y0;
+				IF line >= 0 THEN y := y - (layout.lines[line].ascent - obj.bounds.GetHeight()); END								
+			END
+		END TransformCoordinates;
+		
+		(* Change the pointer according to the underlaying component *)
+		PROCEDURE ChangePointer(pointerInfo : WMWindowManager.PointerInfo);
+		BEGIN
+			IF GetPointerInfo() # pointerInfo THEN
+				SetPointerInfo(pointerInfo)
+			END			
+		END ChangePointer;		
+		
+		(* Returns TRUE if an Object is Hit, FALSE otherwise *)
+		PROCEDURE HitObject(x, y : LONGINT; (* keys : SET;*)  VAR pos : LONGINT; VAR obj : ANY): BOOLEAN;
+		VAR ch, tx, ty : LONGINT;
+		BEGIN
+			text.AcquireRead;
+			ViewToTextPos(x, y, pos);
+			IF FindScreenPos(pos, tx, ty) THEN
+				IF tx > x THEN pos := pos - 1 END
+			END;
+			utilreader.SetPosition(pos);
+			utilreader.ReadCh(ch);
+			text.ReleaseRead;
+			IF ch = AosTexts.ObjectChar THEN obj := utilreader.object;
+				RETURN TRUE
+			ELSE
+				RETURN FALSE
+			END
+		END HitObject;
+		
+		(* Returns TRUE if a Link is Hit, FALSE otherwise *)
+		PROCEDURE HitLink(x, y : LONGINT;  VAR pos : LONGINT; VAR link : AosTexts.Link): BOOLEAN;
+		VAR ch, tx, ty : LONGINT;
+		BEGIN
+			text.AcquireRead;
+			ViewToTextPos(x, y, pos);
+			IF FindScreenPos(pos, tx, ty) THEN
+				IF tx > x THEN pos := pos - 1 END
+			END;
+			utilreader.SetPosition(pos);
+			utilreader.ReadCh(ch);
+			text.ReleaseRead;
+			IF utilreader.link # NIL THEN
+				link := utilreader.link;
+				RETURN TRUE
+			ELSE
+				RETURN FALSE
+			END
+		END HitLink;
+		
+		PROCEDURE LinkClick(link : AosTexts.Link);
+		VAR w : LinkWrapper;
+		BEGIN
+			NEW(w); w.link := link;
+			onLinkClicked.Call(w)
+		END LinkClick;
+		
+		(* builtin behaviour *)
+		PROCEDURE LinkClicked*(sender, data : ANY);
+		VAR tempLink : ARRAY 2048 OF CHAR;
+			tempLabel : ARRAY 256 OF CHAR;
+			pos, i : LONGINT;
+		BEGIN
+			IF data IS LinkWrapper THEN
+				COPY(data(LinkWrapper).link^, tempLink);
+				IF tempLink[0] = "#" THEN	(* internal link *)
+					i := 0;
+					WHILE tempLink[i] # 0X DO
+						tempLabel[i] := tempLink[i+1];
+						INC(i);
+					END;
+					tempLink[i] := 0X;
+					(* find label in tv *)
+					IF FindLabel(tempLabel, pos) THEN
+						i := layout.nofLines-1;
+						WHILE (i >= 0) DO
+							IF layout.GetLineStartPos(i) < pos THEN firstLine.Set(i); RETURN END;
+							DEC(i);
+						END;
+					END;
+				ELSE	(* other links *)
+				
+				END
+			END
+		END LinkClicked;
+		
+		(* Returns the position of the label in text *)
+		PROCEDURE FindLabel*(label : ARRAY OF CHAR; VAR pos : LONGINT): BOOLEAN;
+		VAR ch : LONGINT;
+			found : BOOLEAN;
+		BEGIN
+			found := FALSE; pos := 0;
+			text.AcquireRead;
+			utilreader.SetDirection(1); utilreader.SetPosition(pos);
+			REPEAT
+				utilreader.ReadCh(ch);
+				IF ch = AosTexts.LabelChar THEN
+					IF utilreader.object(AosTexts.LabelPiece).label^ = label THEN
+						found := TRUE;
+					END;
+				END;
+				INC(pos);
+			UNTIL utilreader.eot OR found;
+			text.ReleaseRead;
+			RETURN found;
+		END FindLabel;			
 	
 		(* Drag away operations *)		
 		PROCEDURE AutoStartDrag*;
@@ -1440,7 +2071,6 @@ TYPE
 		VAR di : WMWindowManager.DragInfo;
 			dt : WMDropTarget.DropTarget;
 			itf : WMDropTarget.DropInterface;
-			i, res : LONGINT;
 			targetText, temp : AosTexts.Text;
 			pos, a, b : LONGINT;
 		BEGIN
@@ -1461,23 +2091,25 @@ TYPE
 				IF targetText # NIL THEN
 					targetText.AcquireWrite;
 					IF ~dragCopy THEN
-						AosOut.String("not copy"); AosOut.Ln; 
+						IF TraceCopy IN Trace THEN AosOut.String("WMTextView: Not copy"); AosOut.Ln; END;
 						text.AcquireWrite;
 						a := dragSelA.GetPosition(); b := dragSelB.GetPosition();
 						pos := itf(WMDropTarget.DropText).pos.GetPosition();
 						IF (targetText # text) OR (pos < a) OR (pos > b) THEN
-							NEW(temp); temp.AcquireWrite; text.CopyToText(a, b- a, temp, 0); temp.ReleaseWrite;
+							NEW(temp); temp.AcquireWrite; temp.CopyFromText(text, a, b-a, 0);	temp.ReleaseWrite;
 							text.Delete(a, b- a);
 							pos := itf(WMDropTarget.DropText).pos.GetPosition();
-							temp.AcquireRead;	temp.CopyToText(0, temp.GetLength(), targetText, pos); temp.ReleaseRead;
+							temp.AcquireRead;	
+								targetText.CopyFromText(temp, 0, temp.GetLength(), pos);
+							temp.ReleaseRead;
 						END;
 						text.ReleaseWrite
 					ELSE
-						AosOut.String("copy"); AosOut.Ln; 
+						IF TraceCopy IN Trace THEN AosOut.String("WMTextView: Copy"); AosOut.Ln; END;
 						text.AcquireRead;
 						pos := itf(WMDropTarget.DropText).pos.GetPosition();
 						a := dragSelA.GetPosition(); b := dragSelB.GetPosition();
-						text.CopyToText(a, b- a, targetText, pos);										
+						targetText.CopyFromText(text, a, b-a, 0);
 						text.ReleaseRead
 					END;
 					targetText.ReleaseWrite
@@ -1522,12 +2154,31 @@ TYPE
 			IF selection.b - selection.a > 0 THEN 
 				(* clear the clipboard *)
 				IF AosTexts.clipboard.GetLength() > 0 THEN AosTexts.clipboard.Delete(0, AosTexts.clipboard.GetLength()) END;
-	
-				text.CopyToText(selection.a, selection.b - selection.a, AosTexts.clipboard, 0);
+				AosTexts.clipboard.CopyFromText(text, selection.a, selection.b - selection.a, 0);
 			END;
 			AosTexts.clipboard.ReleaseWrite;
 			text.ReleaseRead
 		END CopySelection;
+		
+		PROCEDURE DeleteSelection*;
+		BEGIN
+			text.AcquireWrite;
+			selection.Sort;
+			text.Delete(selection.a, selection.b - selection.a);
+			text.ReleaseWrite
+		END DeleteSelection;	
+
+		PROCEDURE Paste*;
+		BEGIN
+			text.AcquireWrite;
+			AosTexts.clipboard.AcquireRead;
+			IF AosTexts.clipboard.GetLength() > 0 THEN
+				IF selection.b - selection.a # 0 THEN DeleteSelection() END;
+				text.CopyFromText(AosTexts.clipboard, 0, AosTexts.clipboard.GetLength(), cursor.GetPosition())
+			END;
+			AosTexts.clipboard.ReleaseRead;
+			text.ReleaseWrite		
+		END Paste;	
 		
 		PROCEDURE SelectAll*;
 		BEGIN
@@ -1550,6 +2201,11 @@ TYPE
 			AosTexts.SetLastSelection(text, selection.from, selection.to)
 		END KeyUpdateSelection;
 		
+		PROCEDURE CursorChanged;
+		BEGIN
+			IF (onCursorChanged # NIL) THEN onCursorChanged END
+		END CursorChanged;
+
 		PROCEDURE CursorUp*(select : BOOLEAN);
 		VAR pos, cl : LONGINT;
 		BEGIN
@@ -1565,9 +2221,10 @@ TYPE
 				IF cl < firstLineI THEN firstLine.Set(cl) END
 			END;	
 			IF select THEN KeyUpdateSelection(cursor.GetPosition()) END;
-			text.ReleaseRead
+			text.ReleaseRead;
+			CursorChanged
 		END CursorUp;
-		
+						
 		PROCEDURE CursorDown*(select : BOOLEAN);
 		VAR pos, cl : LONGINT;
 		BEGIN
@@ -1583,7 +2240,8 @@ TYPE
 				IF cl > FindLineByY(firstLineI, bounds.GetHeight() - bordersI.b) THEN firstLine.Set(firstLineI + 1 ) END
 			END;	
 			IF select THEN KeyUpdateSelection(cursor.GetPosition()) END;
-			text.ReleaseRead
+			text.ReleaseRead;
+			CursorChanged
 		END CursorDown;
 		
 		(* Move the cursor one character/word to the left *)
@@ -1598,7 +2256,8 @@ TYPE
 			END;
 			IF select THEN KeyUpdateSelection(cursor.GetPosition()) END;
 			StoreLineEnter;
-			text.ReleaseRead
+			text.ReleaseRead;
+			CursorChanged
 		END CursorLeft;
 		
 		(* Move the cursor one character/word to the right *)
@@ -1613,7 +2272,8 @@ TYPE
 			END;
 			IF select THEN KeyUpdateSelection(cursor.GetPosition()) END;
 			StoreLineEnter;
-			text.ReleaseRead
+			text.ReleaseRead;
+			CursorChanged
 		END CursorRight;
 		
 		PROCEDURE PageDown*(select : BOOLEAN);
@@ -1637,7 +2297,8 @@ TYPE
 				ViewToTextPos(cx, cy, pos); IF pos >= 0 THEN cursor.SetPosition(pos) END;
 			END;
 			IF select THEN KeyUpdateSelection(cursor.GetPosition()) END;
-			text.ReleaseRead
+			text.ReleaseRead;
+			CursorChanged
 		END PageDown;
 
 		PROCEDURE PageUp*(select : BOOLEAN);
@@ -1663,7 +2324,8 @@ TYPE
 				ViewToTextPos(cx, cy, pos); IF pos >= 0 THEN cursor.SetPosition(pos) END
 			END;	
 			IF select THEN KeyUpdateSelection(cursor.GetPosition()) END;
-			text.ReleaseRead
+			text.ReleaseRead;
+			CursorChanged
 		END PageUp;
 		
 		PROCEDURE Home*(ctrl, select : BOOLEAN);
@@ -1679,7 +2341,8 @@ TYPE
 			END;
 			StoreLineEnter;
 			IF select THEN KeyUpdateSelection(cursor.GetPosition()) END;
-			text.ReleaseRead
+			text.ReleaseRead;
+			CursorChanged
 		END Home;
 		
 		PROCEDURE End*(ctrl, select : BOOLEAN);
@@ -1695,12 +2358,14 @@ TYPE
 			END;
 			StoreLineEnter;
 			IF select THEN KeyUpdateSelection(cursor.GetPosition()) END;
-			text.ReleaseRead
+			text.ReleaseRead;
+			CursorChanged
 		END End;
 		
 		PROCEDURE KeyEvent*(ucs :LONGINT; flags : SET; VAR keysym : LONGINT);
 		BEGIN
 			modifierFlags := flags;
+			IF AosInputs.Release IN flags THEN RETURN END;
 			dragCopy := modifierFlags * AosInputs.Ctrl # {};
 			IF keysym = 01H THEN (* Ctrl-A *)
 				SelectAll
@@ -1727,7 +2392,7 @@ TYPE
 				Home(flags * AosInputs.Ctrl # {}, flags * AosInputs.Shift # {})
 			ELSIF keysym = 0FF57H THEN (* Cursor End *)
 				End(flags * AosInputs.Ctrl # {}, flags * AosInputs.Shift # {})
-			END
+			END		
 		END KeyEvent;
 		
 		(* called by users that override the KeyEvents to allow copy drag drop *)
@@ -1737,10 +2402,11 @@ TYPE
 			dragCopy := modifierFlags * AosInputs.Ctrl # {};			
 		END SetFlags;
 		
-		PROCEDURE FindCommandRange(pos: LONGINT; VAR start, end : LONGINT);
+		PROCEDURE FindCommandRange*(pos: LONGINT; VAR start, end : LONGINT);
 		VAR ch : LONGINT;
 		BEGIN
 		(*	start := AosTextUtilities.FindPosWordLeft(utilreader, pos); *)
+			text.AcquireRead;
 			utilreader.SetDirection(-1); utilreader.SetPosition(pos);
 			REPEAT	utilreader.ReadCh(ch) UNTIL AosTextUtilities.IsWhiteSpace(ch) OR utilreader.eot;
 			start := utilreader.GetPosition() + 2;
@@ -1748,13 +2414,15 @@ TYPE
 			(* search ~ *)
 			utilreader.SetDirection(1); utilreader.SetPosition(start);
 			REPEAT	utilreader.ReadCh(ch) UNTIL (ch = ORD("~")) OR (utilreader.eot);
-			end:= utilreader.GetPosition() - 1;
-			IF utilreader.eot THEN INC(end) END
+			end := utilreader.GetPosition() - 1;
+			IF utilreader.eot THEN INC(end) END;
+			text.ReleaseRead
 		END FindCommandRange;
 		
-		PROCEDURE FindCommand(pos: LONGINT; VAR start, end : LONGINT);
+		PROCEDURE FindCommand*(pos: LONGINT; VAR start, end : LONGINT);
 		VAR ch : LONGINT;
 		BEGIN
+			text.AcquireRead;
 			utilreader.SetDirection(-1); utilreader.SetPosition(pos);
 			REPEAT	utilreader.ReadCh(ch) UNTIL AosTextUtilities.IsWhiteSpace(ch) OR utilreader.eot;
 			start := utilreader.GetPosition() + 2;
@@ -1762,36 +2430,253 @@ TYPE
 			
 			utilreader.SetDirection(1); utilreader.SetPosition(pos);
 			REPEAT	utilreader.ReadCh(ch) UNTIL AosTextUtilities.IsWhiteSpace(ch) OR utilreader.eot;
-			end := utilreader.GetPosition() - 1
+			end := utilreader.GetPosition() - 1;
+			IF utilreader.eot THEN INC(end) END;
+			text.ReleaseRead;
 		END FindCommand;
-				
 		
 		(* start the AosCommand in the text, starting on pos (or wordboundary before),
 		caller should hold lock on text  to make the pos stable *)
-		PROCEDURE StartCommand*(pos : LONGINT);
-		VAR start, end, bufSize : LONGINT;
+		PROCEDURE StartCommand*(pos : LONGINT; openFile : BOOLEAN);
+		VAR 
+			start, end, bufSize : LONGINT;
+			parameters : AosCommands.Parameters;
+			command : Utilities.String;
 			s : Utilities.String;
-			res : LONGINT;
 			msg : ARRAY 128 OF CHAR;
+			i, j, res : LONGINT;
 		BEGIN
 			text.AcquireRead;
-			FindCommandRange(pos, start, end);
+			IF openFile THEN FindCommand(pos, start, end)
+			ELSE FindCommandRange(pos, start, end)
+			END;
 			bufSize := Utilities.Max(Utilities.Min((end - start) * 5 + 1 (* for UTF *), MaxCallParameterBuf), 1); 
 			NEW(s, bufSize);
 			AosTextUtilities.SubTextToStr(text, start, end - start, s^);
 			text.ReleaseRead;
-			(* call the command *)
-			AosCommands.Call(s^, {}, res, msg);
-			IF res # 0 THEN AosOut.String(msg); AosOut.Ln END;
+			IF openFile THEN 
+				OpenFile(s) 
+			ELSE
+				NEW(command, LEN(s)); 
+				i := 0;
+				WHILE (s[i] # 0X) & (s[i] # ";") & (s[i] # " ") & (s[i] # 09X) & (s[i] # 0DX) & (s[i] # 0AX) DO command[i] := s[i]; INC(i); END;
+				IF i < LEN(command) THEN command[i] := 0X; END;
+				
+				IF (i < LEN(s)) THEN (* copy parameter string *)
+					NEW(parameters); NEW(parameters.str, LEN(s));
+					INC(i); WHILE i < LEN(s) DO parameters.str[j] := s[i]; INC(i); INC(j);  END;
+					IF j < LEN(parameters.str) THEN parameters.str[j] := 0X; END;
+				ELSE 
+					parameters := NIL;
+				END;
+				
+				IF TraceCommands IN Trace THEN
+					AosOut.String("WMTextView: Executing command: '"); AosOut.String(command^); AosOut.String("'");
+					AosOut.String(", parameters: ");
+					IF parameters = NIL THEN AosOut.String("None"); ELSE AosOut.String("'"); AosOut.String(parameters.str^); AosOut.String("'"); END;
+					AosOut.Ln;
+				END;
+				AosCommands.Activate(command^, parameters, {}, res, msg);
+				IF res # AosCommands.Ok THEN
+					AosOut.String("WMTextView: Command execution error, res: "); AosOut.Int(res, 0); 
+					AosOut.String(" ("); AosOut.String(msg); AosOut.String(")"); AosOut.Ln;
+				END;
+			END;	
 		END StartCommand;
+		
+		PROCEDURE Start(sender, data: ANY);
+		VAR caller : CommandCaller;
+		BEGIN
+			IF (data # NIL) & (data IS ClickInfo) THEN
+				IF data(ClickInfo).cmdPar # NIL THEN
+					NEW(caller, data(ClickInfo).cmdPar^);
+				END
+			END
+		END Start;
+		
+		PROCEDURE Open(sender, data: ANY);
+		BEGIN
+			IF (data # NIL) & (data IS ClickInfo) THEN
+				IF data(ClickInfo).cmd # NIL THEN
+					OpenFile(data(ClickInfo).cmd)
+				END	
+			END
+		END Open;
+		
+		PROCEDURE PieMenuStart(sender, data: ANY);
+		BEGIN
+			Start(piemenu, piemenu.userData)
+		END PieMenuStart;	
+		
+		PROCEDURE PieMenuOpen(sender, data: ANY);
+		BEGIN
+			Open(piemenu, piemenu.userData)
+		END PieMenuOpen;
+		
+		PROCEDURE PieMenuCopy(sender, data: ANY);
+		BEGIN
+			CopySelection;
+		END PieMenuCopy;
+		
+		PROCEDURE PieMenuPaste(sender, data: ANY);
+		BEGIN
+			Paste;
+		END PieMenuPaste;			
+		
+		PROCEDURE ShowContextMenu(x, y: LONGINT);
+		VAR 
+			popup : WMPopups.Popup;
+			start, end, bufSize : LONGINT;
+			command, s : Utilities.String;
+			clickInfo : ClickInfo;
+			str : ARRAY 256 OF CHAR;
+			window : WMWindowManager.Window;
+		BEGIN
+			text.AcquireRead;
+			FindCommand(cursor.GetPosition(), start, end);
+			bufSize := Utilities.Max(Utilities.Min((end - start) * 5 + 1 (* for UTF *), 4096), 1); 
+			NEW(command, bufSize);
+			AosTextUtilities.SubTextToStr(text, start, end - start, command^);
 
+			FindCommandRange(cursor.GetPosition(), start, end);
+			bufSize := Utilities.Max(Utilities.Min((end - start) * 5 + 1 (* for UTF *), MaxCallParameterBuf), 1); 
+			NEW(s, bufSize);
+			AosTextUtilities.SubTextToStr(text, start, end - start, s^);
+			text.ReleaseRead;
+			
+			NEW(clickInfo);
+			clickInfo.cmd := command;
+			clickInfo.cmdPar := s;
+								
+			IF UsePieMenu THEN				
+				NEW(piemenu); piemenu.SetEnabled({0, 1, 2, 3});
+				piemenu.SetText(1, Utilities.NewString("Open")); 
+				piemenu.SetText(3, Utilities.NewString("Start"));
+				piemenu.SetText(2, Utilities.NewString("Copy"));
+				piemenu.SetText(0, Utilities.NewString("Paste"));
+					
+				piemenu.userData := clickInfo;
+					
+				piemenu.on1.Add(PieMenuOpen);
+				piemenu.on2.Add(PieMenuCopy);
+				piemenu.on3.Add(PieMenuStart);
+				piemenu.on0.Add(PieMenuPaste);
+					
+				manager := WMWindowManager.GetDefaultManager();
+				window := manager.GetPositionOwner(x, y);
+				IF window = NIL THEN RETURN END;
+				
+				Acquire; ToWMCoordinates(x, y, x, y); Release;
+				piemenu.Show(window, x, y, FALSE);		
+				(* TODO: Can't set  := NIL, since its used by the button handlers *)		
+			ELSE
+				NEW(popup);
+				str := "Start "; Utilities.Append(str, command^); popup.AddParButton(str, Start, clickInfo);
+				str := "Open "; Utilities.Append(str, command^); popup.AddParButton(str, Open, clickInfo);
+				Acquire; ToWMCoordinates(x, y, x, y); Release;
+				popup.Popup(x, y);
+			END
+		END ShowContextMenu;
+		
+		PROCEDURE Handle(VAR x: WMMessages.Message);
+		VAR pos, mx, my : LONGINT; obj : ANY; link : AosTexts.Link;
+		BEGIN
+			IF (x.msgType = WMMessages.MsgKey) & objHasFocus THEN					(* forward KeyMsg *)
+				(* AosOut.String("Forwarding KeyMsg to FocusObject "); AosOut.Int(focusPos, 0); AosOut.Ln; *)
+				WITH focusObject : WMComponents.VisualComponent DO
+					focusObject.Handle(x);
+					InvalidateRange(focusPos, focusPos+1)
+				END
+			ELSIF (x.msgType # WMMessages.MsgKey) & HitObject(x.x, x.y, pos, obj) THEN	(* forward Msg *)
+				SetFocus; cursor.SetVisible(FALSE);
+				(* AosOut.String("Forwarding Msg "); AosOut.Int(x.msgType, 0); AosOut.String(" to Object: "); AosOut.Int(pos, 0);AosOut.Ln; *)
+				IF obj IS WMComponents.VisualComponent THEN
+					WITH obj : WMComponents.VisualComponent DO
+						(* remove oldObject first *)
+						IF (oldObject # NIL) & (oldObject # obj) THEN
+							(* AosOut.String("Killing old Object "); AosOut.Int(oldPos, 0); AosOut.Ln; *)
+						(*	mx := x.x; my := x.y;
+							TransformCoordinates(x.x, x.y, oldObject(WMComponents.VisualComponent));
+						*)	oldObject(WMComponents.VisualComponent).Handle(x);
+							InvalidateRange(oldPos, oldPos+1);
+						(*	x.x := mx; x.y := my;		*)			
+						END;
+											
+						TransformCoordinates(x.x, x.y, obj);									(* transform to obj coords *)
+						obj.Handle(x);														(* call obj Handle *)
+						ChangePointer(obj.GetPointerInfo());									(* change the pointer Image *)
+						InvalidateRange(pos, pos+1);										(* redraw obj *)						
+						oldObject := obj; oldPos := pos;										(* store last object *)
+						(* transfer focus to Object *)
+						IF (x.msgType = WMMessages.MsgPointer) & (x.flags * {0, 1, 2} = {0}) THEN
+							(* AosOut.String("-> focus change"); AosOut.Ln; *)
+							(* remove old focus first *)
+							IF (focusObject # NIL) & (focusObject # obj) THEN
+								focusObject(WMComponents.VisualComponent).FocusLost;
+								InvalidateRange(focusPos, focusPos+1)
+							END; 
+			
+							objHasFocus := TRUE;
+							focusObject := obj; focusPos := pos;
+(*							FocusLost *)
+						END
+					END
+				END
+			ELSIF (x.msgType = WMMessages.MsgPointer) & HitLink(x.x, x.y, pos, link) THEN (* Link *)
+				ChangePointer(manager.pointerLink);
+				IF (x.msgSubType = 2) &(oldFlags / x.flags =  {CallURLPointer}) THEN LinkClick(link); END;
+				oldFlags := x.flags;
+			ELSE
+				ChangePointer(manager.pointerText);									(* change Pointer back *)
+				(* AosOut.String("TV message"); *)
+				(* transfer focus back to TextView *)
+				IF (focusObject # NIL) & (x.msgType = WMMessages.MsgPointer) & (x.flags * {0, 1, 2} = {0}) THEN
+					focusObject(WMComponents.VisualComponent).FocusLost;
+					objHasFocus := FALSE;
+					InvalidateRange(focusPos, focusPos+1);
+					FocusReceived;
+					focusObject := NIL
+				END;
+				(* update last Object *)
+				IF (oldObject # NIL) & (x.msgType = WMMessages.MsgPointer) THEN
+					(* AosOut.String(" - Killing old Object "); AosOut.Int(oldPos, 0); *)
+					oldObject(WMComponents.VisualComponent).Handle(x);
+					InvalidateRange(oldPos, oldPos+1);
+					oldObject := NIL
+				END;
+				(* AosOut.Ln; *)
+				
+				IF (x.msgType = WMMessages.MsgExt) & (x.ext # NIL) & (x.ext IS AosTexts.StyleChangedMsg) THEN
+					layout.FullLayout; Invalidate; CheckNumberOfLines;
+				ELSE
+					Handle^(x);
+				END;
+			END
+		END Handle;
+		
 	END TextView;
+	
+	CommandCaller = OBJECT
+	VAR msg : ARRAY 512 OF CHAR;
+		s : Utilities.String;
+		res : LONGINT;
+		
+		PROCEDURE &Init(command : ARRAY OF CHAR);
+		BEGIN
+			s := Utilities.NewString(command)
+		END Init;
+
+	BEGIN {ACTIVE}
+		AosCommands.Call(s^, {}, res, msg);
+		IF res # 0 THEN AosOut.String("WMTextView.CommandCaller: "); AosOut.String(msg); AosOut.Ln END;
+	END CommandCaller;
 		
 VAR manager : WMWindowManager.WindowManager;
-	PTVIsMultiLine, PTVIsPassword, PTVShowBorder, PTValwaysShowCursor : WMProperties.BooleanProperty;
+	PTVIsMultiLine, PTVIsPassword, PTVShowBorder, PTValwaysShowCursor, PTVShowLabels : WMProperties.BooleanProperty;
 	PTVfirstLine, PTVleftShift, PTVPasswordChar : WMProperties.Int32Property;
 	PTVdefaultTextColor, PTVdefaultTextBgColor : WMProperties.ColorProperty;
 	PTVborders : WMProperties.RectangleProperty;
+	PTVonLinkClick, PTVonLinkClickInfo : Utilities.String;
 	
 PROCEDURE Limit(x, min, max : LONGINT) : LONGINT;
 BEGIN
@@ -1800,6 +2685,33 @@ BEGIN
 	RETURN x
 END Limit;
 
+(** Opens the file path; corresponding file handlers are specified in AosConfig.XML *)
+PROCEDURE OpenFile* (path : Utilities.String);
+VAR config, filehandler, name, ext : ARRAY 512 OF CHAR;
+	i : LONGINT;
+	fileOpener : CommandCaller;
+BEGIN
+	i := 0; WHILE path[i] # 0X DO IF path[i] <= 20X THEN path[i] := 0X ELSE INC(i) END END;
+	AosFS.SplitExtension(path^, name, ext);
+	Utilities.LowerCase(ext);
+	config := "Filehandlers.";
+	(* get the right handler *)
+	Utilities.Append(config, ext);
+	AosConfig.Get(config, filehandler);
+	
+	IF filehandler = "" THEN
+		AosOut.String("WMTextView: Opening '"); AosOut.String(ext); AosOut.String("' files not specified in AosConfig.XML."); AosOut.Ln; 
+		RETURN 
+	END;
+	
+	(* construct the command *)
+	Utilities.Append(filehandler, ' "');
+	Utilities.Append(filehandler, path^);
+	Utilities.Append(filehandler, '"');
+	
+	(* call the command in another process *)
+	NEW(fileOpener, filehandler);
+END OpenFile;
 		
 PROCEDURE TextViewDefaults;
 BEGIN
@@ -1812,7 +2724,10 @@ BEGIN
 	PTVPasswordChar.Set(43); 
 	NEW(PTValwaysShowCursor, NIL, NewString("alwaysShowCursor"), 
 		NewString("set to true, if the cursor should not be hidden when focus is lost"));
-	PTValwaysShowCursor.Set(FALSE); 
+	PTValwaysShowCursor.Set(FALSE);
+	NEW(PTVShowLabels, NIL, NewString("ShowLabels"), 
+		NewString("set to true, if the labels should be shown in the text"));
+	PTVShowLabels.Set(FALSE); 	
 	NEW(PTVfirstLine, NIL, NewString("firstLine"), 
 		NewString("the first visible line of text in the view"));
 	PTVfirstLine.Set(0);
@@ -1828,7 +2743,6 @@ BEGIN
 	NEW(PTVborders, NIL, NewString("borders"), 
 		NewString("spaces from bounds of the component to the text"));
 	PTVborders.Set(WMRectangles.MakeRect(5, 5, 5, 5));
-
 END TextViewDefaults;
 
 PROCEDURE NewString*(x : ARRAY OF CHAR) : String;
@@ -1861,6 +2775,8 @@ BEGIN
 	TextViewDefaults;
 	manager := WMWindowManager.GetDefaultManager();
 	Register;
+	PTVonLinkClick := Utilities.NewString("Link Click Event");
+	PTVonLinkClickInfo := Utilities.NewString("fired when a link is pressed");
 	AosModules.InstallTermHandler(Finalize)
 END WMTextView.
 

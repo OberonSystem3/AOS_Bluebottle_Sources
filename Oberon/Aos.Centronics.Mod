@@ -115,7 +115,8 @@ END SendPoll;
 
 PROCEDURE Available*(port: INTEGER): LONGINT;
 BEGIN
-	Halt("Not implemented")
+	Halt("Not implemented");
+	RETURN 0
 END Available;
 
 (** Receive - Read a byte from the parallel port (implementation optional). *)

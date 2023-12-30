@@ -45,15 +45,13 @@ BEGIN
 	END
 END GetSelection;
 
-PROCEDURE Mount*;	(** prefix [hashSize] [cachesize] alias ([volpar] ["|" fspar] ~ | ^ ) *)
+PROCEDURE Mount*;	(** prefix alias ([volpar] ["|" fspar] ~ | ^ ) *)
 VAR
-	parvol, parfs: AosFS.Parameters; s: Texts.Scanner; hashSize, cacheSize, i, k, res: LONGINT;
+	parvol, parfs: AosFS.Parameters; s: Texts.Scanner; i, k, res: LONGINT;
 	par, alias, genvol, genfs, msg: ARRAY 64 OF CHAR; prefix: AosFS.Prefix;
 BEGIN
 	Texts.OpenScanner(s, Oberon.Par.text, Oberon.Par.pos); Texts.Scan(s);
 	IF s.class = Texts.Name THEN COPY(s.s, prefix); Texts.Scan(s) ELSE s.class := Texts.Inval END;
-	IF s.class = Texts.Int THEN hashSize := s.i; Texts.Scan(s) ELSE hashSize := 0 END;
-	IF s.class = Texts.Int THEN cacheSize := s.i; Texts.Scan(s) ELSE cacheSize := hashSize END;
 	IF s.class = Texts.Name THEN COPY(s.s, alias) ELSE s.class := Texts.Inval END;
 	IF s.class # Texts.Inval THEN
 		i := -1;

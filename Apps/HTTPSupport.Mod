@@ -40,7 +40,7 @@ TYPE
 			(* look for variables in body *)
 			IF (requestHeader.method = WebHTTP.PostM) THEN
 				IF (WebHTTP.GetAdditionalFieldValue(requestHeader.additionalFields, "Content-Type", contentType)) THEN
-					IF (contentType = "application/x-www-form-urlencoded") THEN
+					IF (contentType = "application/x-www-form-urlencoded") & (bodyReader # NIL)THEN
 						(* look for variables in body *)
 						ParseVariables(bodyReader, FALSE)
 					END
@@ -89,7 +89,7 @@ TYPE
 				WHILE ((HasMoreData()) & (enc OR (ch # "=")) & (i < LEN(var.name)-1)) DO
 					var.name[i] := ch; INC(i); Next
 				END;
-				IF (i >= LEN(var.name)) THEN
+				IF (i >= LEN(var.name)-1) THEN
 					AosOut.String("Variable name too long in HTTP request."); AosOut.Ln;
 					WHILE ((HasMoreData()) & (enc OR (ch # "="))) DO Next END
 				ELSIF (ch # "=") THEN 
@@ -101,7 +101,7 @@ TYPE
 				WHILE ((HasMoreData()) & (enc OR (ch # "&")) & (i < LEN(var.value)-1)) DO
 					var.value[i] := ch; INC(i); Next
 				END; 
-				IF (i >= LEN(var.value)) THEN
+				IF (i >= LEN(var.value)-1) THEN
 					AosOut.String("Variable value too long in HTTP request."); AosOut.Ln;
 					WHILE ((HasMoreData()) & (enc OR (ch # "&"))) DO Next END
 				ELSIF (ch # "&") THEN

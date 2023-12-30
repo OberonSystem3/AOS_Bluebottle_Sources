@@ -110,7 +110,7 @@ TYPE
 
   VAR TextBlockId* (** First character of a text block. *), DocBlockId, NoSpex, NoSpex2, TextSpex: CHAR;
     Wfile: Files.File; R: Files.Rider; DelBuf: Buffer; H: Objects.Handler;
-	nameChars: ARRAY 256 OF BOOLEAN; 
+	nameChars*: ARRAY 256 OF BOOLEAN; 
 	obs: Objects.Library;
 	
 (** Load text block from ASCII file f to text T. *)
@@ -151,7 +151,7 @@ TYPE
       N, lib: SHORTINT;
       type, ref, tag: CHAR;
       LName: ARRAY 32 OF CHAR;
-      Dict: ARRAY 32 OF Objects.Library;
+      Dict: ARRAY 64 OF Objects.Library;
       i: INTEGER;
   BEGIN
       NEW(Q); Q.f := Wfile; Q.off := 0; Q.len := 1; Q.ref := MIN(INTEGER);
@@ -254,7 +254,7 @@ TYPE
       type, ch: CHAR;
       obj: Objects.Object;
       M: Objects.BindMsg;
-      Dict: ARRAY 32 OF Objects.Name;
+      Dict: ARRAY 64 OF Objects.Name;
       allObjs, curObjs, objs: ObjsBlock;
   BEGIN
     Files.Set(W, f, pos);

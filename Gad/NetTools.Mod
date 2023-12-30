@@ -1,8 +1,8 @@
 (* ETH Oberon, Copyright 2001 ETH Zuerich Institut fuer Computersysteme, ETH Zentrum, CH-8092 Zuerich.
 Refer to the "General ETH Oberon System Source License" contract available at: http://www.oberon.ethz.ch/ *)
 
-MODULE NetTools;	(** portable *) (* ejz,   *)
-	IMPORT Input, Files, Objects, Strings, Texts, Oberon, NetSystem, Gadgets, Documents, HyperDocs, Attributes, Streams,
+MODULE NetTools;	(** portable *) (* ejz,  *)
+	IMPORT AosIP, Input, Files, Objects, Strings, Texts, Oberon, NetSystem, Gadgets, Documents, HyperDocs, Attributes, Streams,
 		SYSTEM;
 
 (** NetTools is a utility module that contains procedures commonly used with TCP services. *)
@@ -92,7 +92,7 @@ MODULE NetTools;	(** portable *) (* ejz,   *)
 			Texts.WriteString(W, host); Texts.Write(W, ":"); Texts.WriteInt(W, port, 0); Texts.Append(Oberon.Log, W.buf)
 		END;
 		NetSystem.GetIP(host, adr);
-		IF adr = NetSystem.anyIP THEN
+		IF AosIP.AdrsEqual(adr, NetSystem.anyIP) THEN
 			C := NIL;
 			IF log THEN
 				Texts.WriteString(W, " invalid address"); Texts.WriteLn(W); Texts.Append(Oberon.Log, W.buf)

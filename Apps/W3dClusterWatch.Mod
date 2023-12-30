@@ -6,7 +6,7 @@ IMPORT
 	AosOut, AosKernel, AosPlugins, MathL, AosActive, AosIO, AosModules, AosFS, AosCommands, AosBoot,
 	Utilities, 
 (* Window Manager *)	
-	WM := WMWindowManager, Rect := WMRectangles, Raster, 
+	WM := WMWindowManager, Rect := WMRectangles, Raster, WMGraphics,
 (* Network *)
 	 AosIP, AosDNS, AosTCP,
 (* 3d framework *)
@@ -26,7 +26,7 @@ CONST CATPort = 9999;
 	BoxDistance = 250;
 
 VAR OSColor : ARRAY 6 OF LONGINT;
-		OSImg : ARRAY 6 OF Raster.Image;
+	OSImg : ARRAY 6 OF Raster.Image;
 
 TYPE
 	UpdateProc = PROCEDURE {DELEGATE};
@@ -57,7 +57,8 @@ TYPE
 		END Init;
 		
 		PROCEDURE RefreshInfo(host: ARRAY OF CHAR; VAR osName, osLoad: ARRAY OF CHAR) : BOOLEAN;
-		VAR res, fip : LONGINT;
+		VAR res: LONGINT;
+			fip: AosIP.Adr;
 			in : AosIO.Reader;
 			out : AosIO.Writer;
 		BEGIN 
@@ -173,6 +174,7 @@ TYPE
 		VAR f : AosFS.File;
 			scanner : Scanner.Scanner;
 			parser : XMLParser.Parser;
+			reader : AosFS.Reader;
 			doc : XML.Document;
 			p : PTR;
 			root: XML.Element;
@@ -184,7 +186,8 @@ TYPE
 			index := 1;
 			f := AosFS.Old(filename);
 			IF f # NIL THEN 
-				NEW(scanner, f); NEW(parser, scanner); doc := parser.Parse()
+				NEW(reader, f, 0);
+				NEW(scanner, reader); NEW(parser, scanner); doc := parser.Parse()
 			END;
 			
 			root := doc.GetRoot();
@@ -321,43 +324,43 @@ BEGIN IF a > b THEN RETURN a ELSE RETURN b END
 END Max;
 
 BEGIN
-	NEW(timg); Raster.Load(timg, "tux.bmp", res);
-	IF res THEN 
+	timg := WMGraphics.LoadImage("tux.bmp", TRUE);
+	IF timg # NIL THEN 
 		NEW(OSImg[LinuxCAT]); Raster.Create(OSImg[LinuxCAT], timg.width, timg.height, Raster.BGR565);
 		Raster.InitMode(mode, Raster.srcCopy);
 		Raster.Copy(timg, OSImg[LinuxCAT], 0, 0, timg.width, timg.height, 0, 0, mode)
 	END;	
 
-	NEW(timg); Raster.Load(timg, "windows.bmp", res);
-	IF res THEN 
+	timg := WMGraphics.LoadImage("windows.bmp", TRUE);
+	IF timg # NIL THEN  
 		NEW(OSImg[WindowsCAT]); Raster.Create(OSImg[WindowsCAT], timg.width, timg.height, Raster.BGR565);
 		Raster.InitMode(mode, Raster.srcCopy);
 		Raster.Copy(timg, OSImg[WindowsCAT], 0, 0, timg.width, timg.height, 0, 0, mode)
 	END;	
 	
-	NEW(timg); Raster.Load(timg, "aos.gif", res);
-	IF res THEN 
+	timg := WMGraphics.LoadImage("aos.gif", TRUE);
+	IF timg # NIL THEN  
 		NEW(OSImg[AosCAT]); Raster.Create(OSImg[AosCAT], timg.width, timg.height, Raster.BGR565);
 		Raster.InitMode(mode, Raster.srcCopy);
 		Raster.Copy(timg, OSImg[AosCAT], 0, 0, timg.width, timg.height, 0, 0, mode)
 	END;	
 	
-	NEW(timg); Raster.Load(timg, "suse.bmp", res);
-	IF res THEN 
+	timg := WMGraphics.LoadImage("suse.bmp", TRUE);
+	IF timg # NIL THEN  
 		NEW(OSImg[SuseCAT]); Raster.Create(OSImg[SuseCAT], timg.width, timg.height, Raster.BGR565);
 		Raster.InitMode(mode, Raster.srcCopy);
 		Raster.Copy(timg, OSImg[SuseCAT], 0, 0, timg.width, timg.height, 0, 0, mode)
 	END;	
 	
-	NEW(timg); Raster.Load(timg, "nocat.bmp", res);
-	IF res THEN 
+	timg := WMGraphics.LoadImage("nocat.bmp", TRUE);
+	IF timg # NIL THEN  
 		NEW(OSImg[NoCAT]); Raster.Create(OSImg[NoCAT], timg.width, timg.height, Raster.BGR565);
 		Raster.InitMode(mode, Raster.srcCopy);
 		Raster.Copy(timg, OSImg[NoCAT], 0, 0, timg.width, timg.height, 0, 0, mode)
 	END;	
 	
-	NEW(timg); Raster.Load(timg, "unknowncat.bmp", res);
-	IF res THEN 
+	timg := WMGraphics.LoadImage("unknowncat.bmp", TRUE);
+	IF timg # NIL THEN  
 		NEW(OSImg[UnknownCAT]); Raster.Create(OSImg[UnknownCAT], timg.width, timg.height, Raster.BGR565);
 		Raster.InitMode(mode, Raster.srcCopy);
 		Raster.Copy(timg, OSImg[UnknownCAT], 0, 0, timg.width, timg.height, 0, 0, mode)
@@ -367,7 +370,7 @@ BEGIN
 	OSColor[WindowsCAT] := 008080H; OSColor[SuseCAT] := 0FFH; OSColor[UnknownCAT] := 0FFFFFFH;
 	AosModules.InstallTermHandler(Cleanup)
 END W3dClusterWatch.
- 
+
 
 Aos.Call W3dClusterWatch.Watch Cluster.XML 60000~
 

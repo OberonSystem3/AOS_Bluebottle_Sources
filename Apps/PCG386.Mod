@@ -425,7 +425,7 @@ BEGIN
 	op := instr.op;
 	IF (PCLIR.InstructionSet[op].format IN PCLIR.form1X) OR (op = PCLIR.case) THEN
 		NEW(info);  instr.info := info;  instr.suppress := FALSE;  info.alias := none;  info.i386 := none;
-	ELSIF (op = PCLIR.label) THEN
+	ELSIF (op = PCLIR.label) OR (op = PCLIR.finallylabel) THEN
 		NEW(info);  instr.info := info;  instr.suppress := FALSE;  info.disp := none;  info.imm := 0
 	ELSIF PCLIR.InstructionSet[op].format = PCLIR.formM1 THEN
 		NEW(info);  instr.info := info;  instr.suppress := FALSE;
@@ -1245,7 +1245,7 @@ END FixAbsolute;
 (* GenEnter - Create Procedure activation frame of given size and clear the stack *)
 
 PROCEDURE GenEnter(code: PCLIR.Code;  VAR instr: PCLIR.Instruction;  pc: LONGINT);
-VAR  size, L, i: LONGINT;  adr: PCBT.Procedure;
+VAR  size, L, i: LONGINT;  padr: PCBT.Procedure (* ug *); adr: PCBT.Attribute (* ug *);
 
 	PROCEDURE SetAddress(proc: PCBT.Procedure);
 	VAR pos, dw: LONGINT;
@@ -1255,22 +1255,24 @@ VAR  size, L, i: LONGINT;  adr: PCBT.Procedure;
 				pos := proc.fixlist; proc.fixlist := PCBT.FixupSentinel;
 				REPEAT
 					PCO.GetDWord(pos, dw); PCO.PutDWordAt(pos, PCO.pc - 4 - pos);
-					pos := SYSTEM.LSH(dw, -16);
+					pos := dw
 				UNTIL pos = PCBT.FixupSentinel
 			END
 		END
 	END SetAddress;
 	
 BEGIN
-	IF (instr.adr # NIL) & (instr.adr IS PCBT.Procedure) THEN
-		adr := instr.adr(PCBT.Procedure);
-		PCBT.context.AddOwnProc(adr, PCO.pc);
-		SetAddress(adr);
-		size := adr.locsize
-	ELSE
-		size := 0
-	END;
-	IF instr.val = PCBT.OberonCC THEN
+	IF instr.adr IS PCBT.Procedure THEN (* ug *)
+		padr := instr.adr(PCBT.Procedure);
+		PCBT.context.AddOwnProc(padr, PCO.pc);
+		SetAddress(padr);
+		size := padr.locsize;
+		adr := padr;
+	ELSIF instr.adr IS PCBT.Module THEN
+		size := 0;
+		adr := instr.adr(PCBT.Module)
+	END; (* ug *)
+	IF (instr.val = PCBT.OberonCC) OR (instr.val = PCBT.WinAPICC) THEN (* ejz *)
 		ASSERT(size MOD 4 = 0, 100);
 		size := size DIV 4;		(* number of DOUBLE WORDS to be allocated *)
 		PCO.GenPUSH(PCO.Regs, EBP, noBase, noInx, noScale, noDisp, noImm);
@@ -1296,13 +1298,19 @@ BEGIN
 			END;
 		ELSIF size > 0 THEN
 			PCO.GenTyp1(PCO.SUB, PCO.ImmReg, ESP, noBase, noInx, noScale, noDisp, size*4)
+		END;
+		IF instr.val = PCBT.WinAPICC THEN (* ejz *)
+			PCO.GenPUSH(PCO.Regs, EBX, noBase, noInx, noScale, noDisp, noImm);
+			PCO.GenPUSH(PCO.Regs, EDI, noBase, noInx, noScale, noDisp, noImm);
+			PCO.GenPUSH(PCO.Regs, ESI, noBase, noInx, noScale, noDisp, noImm)
 		END
 	ELSIF instr.val = PCBT.OberonPassivateCC THEN
 		PCO.GenPUSH(PCO.Regs, EBP, noBase, noInx, noScale, noDisp, noImm);
-		PCO.GenMOV(PCO.MemReg, EBP, ESP, noInx, noScale, 8, noImm);
+		PCO.GenMOV(PCO.MemReg, EBP, ESP, noInx, noScale, 8, noImm)
 	ELSE
 		HALT(99)
 	END;
+	IF adr # NIL THEN adr.SetBeginOffset(PCO.pc) END;
 	FreeAll
 END GenEnter;
 
@@ -1311,9 +1319,17 @@ END GenEnter;
 PROCEDURE GenExit(code: PCLIR.Code;  VAR instr: PCLIR.Instruction;  pc: LONGINT);
 VAR  size: LONGINT;
 BEGIN
-	IF instr.val = PCBT.OberonCC THEN
+	IF instr.adr # NIL THEN (* ug *)
+		instr.adr(PCBT.Attribute).SetEndOffset(PCO.pc)
+	END;	
+	IF (instr.val = PCBT.OberonCC) OR (instr.val = PCBT.WinAPICC) THEN (* ejz *)
 		size := instr.src1;
 		ASSERT(size MOD 4 = 0, 100);
+		IF instr.val = PCBT.WinAPICC THEN (* ejz *)
+			PCO.GenPOP(PCO.Regs, ESI, noBase, noInx, noScale, noDisp);
+			PCO.GenPOP(PCO.Regs, EDI, noBase, noInx, noScale, noDisp);
+			PCO.GenPOP(PCO.Regs, EBX, noBase, noInx, noScale, noDisp)
+		END;
 		PCO.GenMOV(PCO.RegReg, ESP, EBP, noInx, noScale, noDisp, noImm);
 		PCO.GenPOP(PCO.Regs, EBP, noBase, noInx, noScale, noDisp);
 		PCO.GenRET(size)
@@ -1671,6 +1687,17 @@ BEGIN
 		pc := next - 10000H
 	END;
 	IF instr.val # 0 THEN  PCO.errpos := instr.val  END;
+		
+	IF (instr.op = PCLIR.finallylabel) THEN		
+		IF (instr.adr # NIL) THEN			
+			IF (instr.adr IS PCBT.Procedure) THEN				
+				instr.adr(PCBT.Procedure).finallyOff := info.imm;
+			ELSIF (instr.adr IS PCBT.Module) THEN
+				instr.adr(PCBT.Module).finallyOff := info.imm;
+			END;
+		END;
+	END;
+	
 END GenLabel;
 
 PROCEDURE EmitJcc(op: SHORTINT;  dest: LONGINT;  VAR chain: LONGINT);
@@ -1741,7 +1768,7 @@ BEGIN
 	ELSIF adr.codeoffset # 0 THEN
 		PCO.GenCALL(PCO.Imme, 0, noBase, noInx, noScale, adr.codeoffset - PCO.pc - 5)
 	ELSE	(*local call*)
-		PCO.GenCALL(PCO.Imme, 0, noBase, noInx, noScale, adr.fixlist * 10000H);
+		PCO.GenCALL(PCO.Imme, 0, noBase, noInx, noScale, adr.fixlist);
 		adr.fixlist := PCO.pc-4
 (*
 	ELSE	(* external procedure *)
@@ -2647,7 +2674,6 @@ BEGIN
 	max := instr.src3;
 	range := max-min+1;
 
-(*allocate table*)
 	table := PCBT.context.constsize;
 	INC(PCBT.context.constsize, SHORT(range*4));
 	IF PCBT.context.constsize > LEN(PCBT.context.const^) THEN
@@ -2656,19 +2682,9 @@ BEGIN
 		PCBT.context.const := const
 	END;
 	pos := PCBT.context.constsize-4;
-	(*pos := table+4*range-4;*)	(*last entry*)
-(*
-(*allocate syscall*)
-	last := PCBT.context.syscalls[PCBT.casetable];
-	PCBT.context.syscalls[PCBT.casetable] := table;
-(*fill table*)
-	WHILE pos >= table DO
-		PCBT.context.const[pos+2] := CHR(last);
-		PCBT.context.const[pos+3] := CHR(last DIV 100H);
-		last := pos;  DEC(pos, 4)
-	END;
-*)
-	FOR i := table TO pos BY 4 DO PCBT.context.UseSyscall(PCBT.casetable, i) END;
+
+	IF PCBT.context.syscalls[PCBT.casetable] = NIL THEN PCBT.context.UseSyscall(PCBT.casetable, table) END; 	
+	PCBT.context.casetablesize := PCBT.context.casetablesize + SHORT(range);								
 
 	UseRegister(code, instr.src1, reg);
 	IF min # 0 THEN PCO.GenTyp1(PCO.SUB, PCO.ImmReg, reg, noBase, noInx, noScale, noDisp, min) END;
@@ -2693,7 +2709,9 @@ BEGIN
 	offset := instr.val - p.instr[pos].src2;	(*val-min*)
 	table := info.addr(PCBT.GlobalVariable).offset + offset*4;
 	PCBT.context.const[table+0] := CHR(PCO.pc);
-	PCBT.context.const[table+1] := CHR(PCO.pc DIV 100H)	
+	PCBT.context.const[table+1] := CHR(PCO.pc DIV 100H);
+	PCBT.context.const[table+2] := CHR(PCO.pc DIV 10000H); 	(* ug *)
+	PCBT.context.const[table+3] := CHR(PCO.pc DIV 1000000H)  	(* ug *)	
 END GenCaseLine;
 
 PROCEDURE GenCaseElse(code: PCLIR.Code;  VAR instr: PCLIR.Instruction;  pc: LONGINT);
@@ -2708,9 +2726,11 @@ BEGIN
 	min := info.addr(PCBT.GlobalVariable).offset;
 	max := min + size*4;
 	FOR i := min TO max BY 4 DO
-		IF (PCBT.context.const[i]=0X) & (PCBT.context.const[i+1]=0X) THEN
+		IF (PCBT.context.const[i]=0X) & (PCBT.context.const[i+1]=0X) & (PCBT.context.const[i+2]=0X) & (PCBT.context.const[i+3]=0X)THEN
 			PCBT.context.const[i+0] := CHR(PCO.pc);
-			PCBT.context.const[i+1] := CHR(PCO.pc DIV 100H)
+			PCBT.context.const[i+1] := CHR(PCO.pc DIV 100H);
+			PCBT.context.const[i+2] := CHR(PCO.pc DIV 10000H);		(* ug *)
+			PCBT.context.const[i+3] := CHR(PCO.pc DIV 1000000H)	(* ug *)
 		END
 	END
 END GenCaseElse;
@@ -2921,10 +2941,15 @@ END Done;
 		PCLIR.CG.GetCode := GetCode;
 		PCLIR.CG.DumpCode := DumpCode;
 		PCLIR.CG.Optimize := DoOptimize;
-		PCLIR.CG.MaxCodeSize := 10000H;
+		PCLIR.CG.MaxCodeSize := PCO.MaxCodeLength;
+		PCLIR.CG.ParamAlign := 4;
 		PCBT.SetNumberOfSyscalls(PCBT.DefaultNofSysCalls);
 		NEW(PCLIR.CG.SysCallMap, PCBT.NofSysCalls);
 		PCLIR.InitDefaultSyscalls;	
+		
+		PCLIR.Address := PCLIR.Int32;
+		PCLIR.Set := PCLIR.Int32;
+		PCLIR.SizeType := PCLIR.Int32;
 		
 		PCLIR.InstructionInit := InstructionInit;
 		PCLIR.SetMethods(PCLIR.enter, GenEnter);
@@ -2946,6 +2971,7 @@ END Done;
 		PCLIR.SetMethods(PCLIR.out, GenOut);
 		PCLIR.SetMethods(PCLIR.nop, GenNop);
 		PCLIR.SetMethods(PCLIR.label, GenLabel);
+		PCLIR.SetMethods(PCLIR.finallylabel, GenLabel);
 		FOR i := PCLIR.je TO PCLIR.jnf DO
 			PCLIR.SetMethods(i, GenJcc)
 		END;
@@ -3103,6 +3129,7 @@ BEGIN  Configure;
 END PCG386.
 
 (*
+	15.11.06	ug	GenCase, GenCaseLine, GenCaseElse adapted such that fixup chain contains 32 bit offsets
 	20.09.03	prk	"/Dcode" compiler option added
 	03.07.03	prk	setcc with float operands did spill destination register and store in wrong register when result used in return (return of float comparison is wrong)
 	02.07.03	prk	bug in setcc with 64bit operands fixed (did trash module body)

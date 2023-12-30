@@ -23,14 +23,12 @@ IMPORT
 		DefDest = "386";
 		
 	VAR
-		Nrep0, Nrep1: LONGINT;
 		ErrorFile: ARRAY 256 OF CHAR;
 		
 	TYPE
 		StringBuf = ARRAY 256 OF CHAR;
 
 	VAR
-		log: AosIO.Writer;	(* logger to AosOut *)
 		LastDest: ARRAY 16 OF CHAR;	(*last code generator loaded*)
 	
 	PROCEDURE ReportError(pos, err: LONGINT; msg: ARRAY OF CHAR);
@@ -70,7 +68,7 @@ IMPORT
 	VAR name, msg: ARRAY 32 OF CHAR;  i, j, res: LONGINT;  m: AosModules.Module;  p: AosModules.CommandProc;
 	BEGIN
 		i := 0;
-		WHILE (base[i] # 0X) DO  name[i] := base[i]; INC(i)  END;
+		WHILE (base[i] # 0X) DO  name[i] := base[i]; INC(i)  END; 
 		j := 0;
 		WHILE dest[j] # 0X DO  name[i] := dest[j]; INC(i); INC(j)  END;
 		name[i] := 0X;
@@ -79,6 +77,7 @@ IMPORT
 			p := AosModules.ThisCommand(m, "Install");
 			IF p # NIL THEN
 				p;	(*call Install*)
+				PCV.SetBasicSizes;
 			ELSIF errorIsFatal THEN
 				PCM.LogWStr("Cannot install code-generator (no Install procedure)");
 				PCM.LogWLn;
@@ -122,19 +121,7 @@ IMPORT
 		opts[i] := 0X
 	END GetOptions;
 	
-	PROCEDURE InOptions(VAR opt: ARRAY OF CHAR; ch: CHAR): BOOLEAN;
-		VAR i: LONGINT;
-	BEGIN
-		i := 0;
-		WHILE (opt[i] # 0X) & (opt[i] # ch) DO
-			IF (opt[i] = ".") OR (opt[i] = "P") OR (opt[i] = "d") OR (opt[i] = "D") THEN
-				REPEAT  INC(i)   UNTIL (opt[i] = 0X) OR (opt[i] = " ")
-			ELSE INC(i) END
-		END;
-		RETURN opt[i] # 0X
-	END InOptions;
-	
-	PROCEDURE ParseOptions(VAR options, prefix, extension, dest, dump: ARRAY OF CHAR;  VAR cOpt, pOpt: SET);
+	PROCEDURE ParseOptions(VAR options, prefix, extension, dest, dump, objF: ARRAY OF CHAR;  VAR cOpt, pOpt: SET);
 	VAR  i: LONGINT;  ch: CHAR;
 	
 		PROCEDURE SubString(VAR str: ARRAY OF CHAR);
@@ -159,6 +146,7 @@ IMPORT
 		i := 0;
 		REPEAT
 			ch := options[i]; INC(i);
+			(* fof: note that symmetric difference works as a switch: {1,2}/{2}={1}, {1,2}/{3}={1,2,3} *) 
 			IF ch = "s" THEN pOpt := pOpt / {PCM.NewSF}
 			ELSIF ch = "e" THEN pOpt := pOpt / {PCM.ExtSF}
 			ELSIF ch = "n" THEN pOpt := pOpt / {PCM.NoFiles}
@@ -174,6 +162,10 @@ IMPORT
 			ELSIF ch = "P" THEN SubString(prefix)
 			ELSIF ch = "d" THEN SubString(dest)
 			ELSIF ch = "D" THEN SubString(dump)
+			ELSIF ch = "O" THEN cOpt := cOpt / {PCM.Optimize}
+			ELSIF ch = "F" THEN SubString(objF)
+			ELSIF ch = "W" THEN pOpt := pOpt / {PCM.Warnings}
+			ELSIF ch = "S" THEN pOpt := pOpt / {PCM.SkipOldSFImport}
 			END
 		UNTIL ch = 0X;
 	END ParseOptions;
@@ -190,21 +182,21 @@ IMPORT
 	
 	PROCEDURE Module*(scanner: PCS.Scanner; options: ARRAY OF CHAR; breakpc: LONGINT; log: AosIO.Writer; 
 		errlist: PCM.ErrorList; VAR error: BOOLEAN);
-		VAR scope: PCT.ModScope; dest: ARRAY 16 OF CHAR;
-			size: LONGINT; R: PCM.Rider; new, extend, nofile: BOOLEAN;
+		VAR scope: PCT.ModScope; dest, objF: ARRAY 16 OF CHAR;
+			size: LONGINT; R: PCM.Rider; new, extend, nofile, skip: BOOLEAN;
 			version: CHAR; res: LONGINT;
-			bug: PCP.Parser;	(*temp: I don't have the latest OP2 fix at home*)
 			str: StringBuf;
 			msg: ARRAY 32 OF CHAR;
 	BEGIN {EXCLUSIVE}
 		PCM.log := log;
 		PCM.Init(ReportError);		(*also resets PCM.count!!*)
-		ParseOptions(options, PCM.prefix, PCM.suffix, dest, PCM.dump, PCM.codeOptions, PCM.parserOptions);
+		ParseOptions(options, PCM.prefix, PCM.suffix, dest, PCM.dump, objF, PCM.codeOptions, PCM.parserOptions);
 		IF dest # LastDest THEN LoadBackEnd(dest) END;
 		OutMsg(scanner);
 		new := PCM.NewSF IN PCM.parserOptions;
 		extend := PCM.ExtSF IN PCM.parserOptions;
 		nofile := PCM.NoFiles IN PCM.parserOptions;
+		skip := PCM.SkipOldSFImport IN PCM.parserOptions;
 		PCM.bigEndian := PCM.BigEndian IN PCM.parserOptions;
 		PCM.breakpc := MAX(LONGINT);
 		IF PCM.Breakpoint IN PCM.parserOptions THEN
@@ -219,11 +211,7 @@ IMPORT
 			NEW(scope); PCT.InitScope(scope, NIL, {}, FALSE);
 			PCP.ParseModule(scope, scanner);
 			IF ~PCM.error & ~nofile THEN
-				IF PCM.OldFileFormat THEN
-					version := PCM.OldFileVersion
-				ELSE
-					version := PCM.NewFileVersion
-				END;
+				version := PCM.FileVersion;
 				StringPool.GetString(scope.owner.name, str);
 				PCM.Open(str, R, version);
 				IF ~(PCM.Breakpoint IN PCM.parserOptions) THEN
@@ -233,13 +221,17 @@ IMPORT
 						PCT.Register(PCT.database, scope.owner)
 *)
 					END;
-					PCOM.Export(R, scope.owner, new, extend, msg);
+					PCOM.Export(R, scope.owner, new, extend, skip, msg);
 					PCM.LogWStr(msg)
 				END;
 				IF ~PCM.error THEN
 					PCT.TraverseScopes(scope, EmitScope);
-					PCOF.Init;
-					IF ~PCM.error & ~(PCM.Breakpoint IN PCM.parserOptions) THEN  PCOF.Generate(R, scope, size)  END;
+					IF objF # "" THEN
+						Configure("PCOF", objF, TRUE)
+					ELSE
+						PCOF.Install
+					END;
+					IF ~PCM.error & ~(PCM.Breakpoint IN PCM.parserOptions) THEN  PCBT.generate(R, scope, size)  END;
 				END
 			END;
 			PCM.MakeErrorList(errlist);
@@ -280,11 +272,11 @@ IMPORT
 	
 	PROCEDURE CompileFile*(name, opt: ARRAY OF CHAR; pc: LONGINT; log: AosIO.Writer;
 		errlist: PCM.ErrorList; VAR error: BOOLEAN);
-		VAR atu: AosTexts.Text; res: LONGINT;
+		VAR atu: AosTexts.Text; format, res: LONGINT;
 	BEGIN
 		PCM.log := log;
 		NEW(atu);
-		AosTextUtilities.LoadOberonText(atu, name, res);
+		AosTextUtilities.LoadAuto(atu, name, format, res);
 		IF res # 0 THEN
 			PCM.LogWStr(name); PCM.LogWStr(" not found"); PCM.LogWLn; PCM.LogFlush;
 			error := TRUE; RETURN
@@ -327,11 +319,13 @@ IMPORT
 		count := 0;
 		WHILE  ~S.EOLN() & ~error DO
 			S.String(name);
-			INC(count);
-			COPY(globalOpt, localOpt);
-			GetOptions(S, localOpt);
-			CompileFile(name, localOpt, MAX(LONGINT), NIL, NIL, error);
-			IF count MOD 32 = 0 THEN PCT.InitDB(PCT.database) END;
+			IF name # "" THEN
+				INC(count);
+				COPY(globalOpt, localOpt);
+				GetOptions(S, localOpt);
+				CompileFile(name, localOpt, MAX(LONGINT), NIL, NIL, error);
+				IF count MOD 32 = 0 THEN PCT.InitDB(PCT.database) END;
+			END
 		END;
 		PCT.InitDB(PCT.database);
 		RETURN NIL
@@ -353,6 +347,7 @@ IMPORT
 		e: XML.Element; enum, msgEnum: XMLObjects.Enumerator; p: PTR;
 		code, i: LONGINT; str: XML.String;
 		dynStr: DynamicStrings.DynamicString;		
+		r : AosFS.Reader;
 	BEGIN
 		AosConfig.Get("Paco.ErrorMessages", ErrorFile);
 		IF ErrorFile = "" THEN ErrorFile := DefaultErrorFile END;
@@ -363,7 +358,8 @@ IMPORT
 			RETURN;
 		END;
 		(* f # NIL *)
-		NEW(scanner, f);
+		AosFS.OpenReader(r, f, 0);
+		NEW(scanner, r);
 		NEW(parser, scanner); parser.reportError := TrapHandler;
 		errors := parser.Parse();
 		e := errors.GetRoot();
@@ -382,8 +378,8 @@ IMPORT
 					NEW(dynStr);
 					WHILE msgEnum.HasMoreElements() DO
 						p := msgEnum.GetNext();
-						IF p IS XML.CharData THEN
-							str := p(XML.CharData).GetStr();
+						IF p IS XML.Chars THEN
+							str := p(XML.Chars).GetStr();
 							dynStr.Append(str^);
 						ELSIF p IS XML.CDataSect THEN
 							str := p(XML.CDataSect).GetStr();
@@ -419,6 +415,7 @@ BEGIN
 END PC0.
 
 (*
+	15.11.06	ug	new compiler option /S added, FileVersion incremented
 	25.11.03	mb	added InitErrMsg: read error messages from XML file
 	20.09.03	prk	"/Dcode" compiler option added
 	24.06.03	prk	Check that name after END is the same as declared after MODULE

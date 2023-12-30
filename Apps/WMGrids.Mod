@@ -1,16 +1,20 @@
 MODULE WMGrids;	(** AUTHOR "TF"; PURPOSE "Generic grid component"; *)
-
+(**
+ * History:
+ *
+ *	10.01.2007	Added GenericGrid.adjustFocusPosition property (staubesv)
+ *	09.03.2007	Call DrawBackground of super class in GenericGrid.DrawBackground (staubesv)
+ *)
+ 
 IMPORT
-	AosOut, WM := WMWindowManager, AosInputs, AosModules, AosKernel, AosCommands, WMComponents, 
-	WMStandardComponents, Utilities, Graphics := WMGraphics, Rect := WMRectangles,
-	WMMessages, WMProperties, WMEvents, XMLObjects;
+	AosInputs, AosModules, WMComponents, 
+	WMStandardComponents, Utilities, Graphics := WMGraphics, WMRectangles,
+	WMProperties, WMEvents,
+	WM := WMWindowManager;
 	
 TYPE
-	(* Local type-alias for convenience *)
+	(* Local type - alias for convenience *)
 	String = Utilities.String;
-	CompCommand = WMMessages.CompCommand;
-	Canvas = Graphics.Canvas;
-	Rectangle = Rect.Rectangle;
 
 	(* return the desired size of the cell. Only used for auto-sizing. *)
 	MeasureCellProc* = PROCEDURE {DELEGATE} (x, y : LONGINT; VAR width, height : LONGINT);
@@ -52,7 +56,6 @@ TYPE
 	*)
 	GenericGrid* = OBJECT(WMComponents.VisualComponent)
 	VAR
-		getMeasureCell : MeasureCellProc;
 		getCellSpans : GetCellSpansProc;
 		drawCell : DrawCellProc;
 		getCellState : GetCellStateProc;
@@ -70,7 +73,16 @@ TYPE
 		fixedColsC, fixedRowsC : LONGINT; (* internal cache of the respective property values *)
 		defaultColWidth-, defaultRowHeight- : WMProperties.Int32Property;
 		defaultColWidthC, defaultRowHeightC : LONGINT; (* internal cache of the respective property values *)
+		allowColResize-, allowRowResize- : WMProperties.BooleanProperty;
 		
+		(** 
+		 * If set to TRUE, 
+		 *	- clicking on a cell which is not completely visible will scroll the grid so it's visible
+		 *	- when dragging and the pointer leaves the visible part of the grid, the grid is scrolled
+		 * default : TRUE;
+		 *)
+		adjustFocusPosition- : WMProperties.BooleanProperty;
+				
 		focus, focusCell, highlight : CellPos; (* focusCell is the master Cell of focus *)
 		selectionMode : LONGINT;
 		selStart, selEnd : CellPos; 
@@ -92,10 +104,8 @@ TYPE
 		dragCellSpacingPos : LONGINT;
 		dragCellSpacingWidth : BOOLEAN;
 		dragCellSpacingHeight : BOOLEAN;
-		allowColResize, allowRowResize : WMProperties.BooleanProperty;
 		
 		downX, downY : LONGINT;
-		lastDownCell : CellPos;
 		dragPossible : BOOLEAN;
 		selectOnPointerOver : BOOLEAN;
 		lastkeys : SET;
@@ -115,6 +125,8 @@ TYPE
 			scrolly.onPositionChanged.Add(Scrolled);
 			
 			selectionMode := GridSelectSingleCell;
+			selStart.col := 0; selStart.row := 0;
+			selEnd.col := 0; selEnd.row := 0;
 			
 			(* properites *)
 			NEW(defaultColWidth, defaultColWidthProto, NIL, NIL); properties.Add(defaultColWidth);
@@ -130,6 +142,7 @@ TYPE
 			NEW(showScrollY, showScrollYProto, NIL, NIL); properties.Add(showScrollY);
 			NEW(alwaysShowScrollX, alwaysShowScrollXProto, NIL, NIL); properties.Add(alwaysShowScrollX);
 			NEW(alwaysShowScrollY, alwaysShowScrollYProto, NIL, NIL); properties.Add(alwaysShowScrollY);
+			NEW(adjustFocusPosition, adjustFocusPositionProto, NIL, NIL); properties.Add(adjustFocusPosition);
 
 			pointerInside := FALSE;
 			
@@ -164,6 +177,7 @@ TYPE
 			alwaysShowScrollXC := alwaysShowScrollX.Get();
 			alwaysShowScrollYC := alwaysShowScrollY.Get();
 			CheckScrollbarsNeeded;
+			AlignSubComponents
 		END RecacheAllProperties;
 		
 		PROCEDURE RecacheProperties;
@@ -171,7 +185,6 @@ TYPE
 			RecacheProperties^;
 			RecacheAllProperties
 		END RecacheProperties;
-		
 		
 		PROCEDURE PropertyChanged*(sender, property : PTR);
 		BEGIN
@@ -282,6 +295,15 @@ TYPE
 			FOR i := 0 TO fixedRowsC - 1 DO INC(h, GetRowHeight(i) + cellDistC) END;
 		END GetFixedPixels;
 				
+		PROCEDURE  SetCellSpansProc*(gcsp : GetCellSpansProc);	(* Dan *)
+		BEGIN
+			IF getCellSpans # gcsp THEN
+				Acquire;
+				getCellSpans := gcsp;
+				Release
+			END
+		END SetCellSpansProc;
+		
 		PROCEDURE GetCellSpans(x, y : LONGINT; VAR spanx, spany : LONGINT);
 		BEGIN
 			IF getCellSpans # NIL THEN getCellSpans(x, y, spanx, spany)
@@ -312,8 +334,7 @@ TYPE
 			NEW(position); position.pos.row := row; position.pos.col := col;
 			RETURN position
 		END GetCellData;
-		
-		
+
 		PROCEDURE GetCellState(x, y : LONGINT) : SET;
 		VAR state : SET;
 		BEGIN
@@ -343,7 +364,7 @@ TYPE
 		
 		(** col, row point to the master cell of (x, y). dx, dy are decreased by the respective decrement *)
 		PROCEDURE FindMasterCell(x, y : LONGINT; VAR col, row, xpos, ypos : LONGINT);
-		VAR tx, ty, w, h, cw, ch : LONGINT;
+		VAR cw, ch : LONGINT;
 		BEGIN
 			col := x; row := y;
 			GetCellSpans(col, row, cw, ch); 
@@ -356,7 +377,7 @@ TYPE
 		
 		(* Find the cell at position x, y (also fixed cells are returned) *)
 		PROCEDURE FindCellXY* (x, y : LONGINT; VAR col, row : LONGINT);
-		VAR tx, ty, w, h, dummy : LONGINT;
+		VAR tx, ty, dummy : LONGINT;
 		BEGIN
 			GetFixedPixels(tx, ty);
 			IF (x < tx) & (y < ty) THEN (* row and column fixed *)
@@ -388,8 +409,8 @@ TYPE
 			scrolly.visible.Set((alwaysShowScrollYC OR (ymax > 1)) & showScrollYC)
 		END CheckScrollbarsNeeded;
 		
-		PROCEDURE GetVisibleCellRect(col, row : LONGINT): Rectangle;
-		VAR x, y, i, tc, tr, tx, ty, w, h: LONGINT; rect : Rectangle;
+		PROCEDURE GetVisibleCellRect(col, row : LONGINT): WMRectangles.Rectangle;
+		VAR x, y, i, tc, tr, tx, ty, w, h: LONGINT; rect : WMRectangles.Rectangle;
 		BEGIN
 			GetFixedPixels(tx, ty);
 			IF (col < fixedColsC) & (row < fixedRowsC) THEN
@@ -414,8 +435,9 @@ TYPE
 		PROCEDURE DrawBackground(canvas : Graphics.Canvas);
 		VAR i, j, x, y, w, h, cw, ch, ti, tj, tx, ty, fx, fy : LONGINT;
 				skip : BOOLEAN;
-				r, clip : Rectangle;
+				r, clip : WMRectangles.Rectangle;
 		BEGIN
+			DrawBackground^(canvas);
 			tableStart.row := Utilities.Max(tableStart.row, fixedRowsC);
 			tableStart.col := Utilities.Max(tableStart.col, fixedColsC);
 			
@@ -428,8 +450,8 @@ TYPE
 				x := 0; h := GetRowHeight(j);
 				FOR i := 0 TO fixedColsC - 1 DO 
 					w := GetColWidth(i);
-					r := Rect.MakeRect(x, y, x + w, y + h);
-					IF Rect.Intersect(r, clip) THEN 
+					r := WMRectangles.MakeRect(x, y, x + w, y + h);
+					IF WMRectangles.Intersect(r, clip) THEN 
 						canvas.SetClipRect(r);
 						canvas.ClipRectAsNewLimits(x, y);
 						IF drawCell # NIL THEN drawCell(canvas, w, h, GetCellState(i, j), i, j) END;
@@ -446,8 +468,8 @@ TYPE
 				i := tableStart.col; x := fx; 
 				WHILE (i < nofColsC) & (x < bounds.GetWidth()) DO
 					w := GetColWidth(i);
-					r := Rect.MakeRect(x, y, x + w, y + h);
-					IF Rect.Intersect(r, clip) THEN 
+					r := WMRectangles.MakeRect(x, y, x + w, y + h);
+					IF WMRectangles.Intersect(r, clip) THEN 
 						canvas.SetClipRect(r);
 						canvas.ClipRectAsNewLimits(x, y);
 						IF drawCell # NIL THEN drawCell(canvas, w, h, GetCellState(i, j), i, j) END;
@@ -467,8 +489,8 @@ TYPE
 				i := 0; x := 0; 
 				FOR i := 0 TO fixedColsC - 1 DO
 					w := GetColWidth(i);
-					r := Rect.MakeRect(x, y, x + w, y + h);
-					IF Rect.Intersect(r, clip) THEN 
+					r := WMRectangles.MakeRect(x, y, x + w, y + h);
+					IF WMRectangles.Intersect(r, clip) THEN 
 						canvas.SetClipRect(r);
 						canvas.ClipRectAsNewLimits(x, y);
 						IF drawCell # NIL THEN drawCell(canvas, w, h, GetCellState(i, j), i, j) END;
@@ -481,7 +503,7 @@ TYPE
 			END;
 						
 			(* draw the table *)
-			canvas.SetClipRect(Rect.MakeRect(fx, fy, bounds.GetWidth(), bounds.GetHeight()));
+			canvas.SetClipRect(WMRectangles.MakeRect(fx, fy, bounds.GetWidth(), bounds.GetHeight()));
 			canvas.ClipRectAsNewLimits(0, 0);canvas.SaveState(tempState);
 			j := tableStart.row; y := fy;
 			WHILE (j < nofRowsC) & (y < bounds.GetHeight()) DO
@@ -496,8 +518,8 @@ TYPE
 							FindMasterCell(ti, tj, ti, tj, tx, ty);
 						END;
 						GetCellDimensions(ti, tj, cw, ch);
-						r := Rect.MakeRect(tx, ty, tx + cw, ty + ch);
-						IF Rect.Intersect(r, clip) THEN 
+						r := WMRectangles.MakeRect(tx, ty, tx + cw, ty + ch);
+						IF WMRectangles.Intersect(r, clip) THEN 
 							canvas.SetClipRect(r);
 							canvas.ClipRectAsNewLimits(tx, ty);
 							IF drawCell # NIL THEN drawCell(canvas, w, h, GetCellState(i, j), i, j) END;
@@ -540,7 +562,7 @@ TYPE
 		END GetTopPosition;
 		
 		PROCEDURE ScrollCellVisible(col, row : LONGINT);
-		VAR cur : CellPos; r : Rectangle; w, h: LONGINT;
+		VAR cur : CellPos; r : WMRectangles.Rectangle; w, h: LONGINT;
 		BEGIN
 			cur := tableStart;
 			w := bounds.GetWidth(); h := bounds.GetHeight();
@@ -556,6 +578,7 @@ TYPE
 		PROCEDURE SetFocusPos(col, row : LONGINT);
 		VAR oldfocus : CellPos; dummy : LONGINT;
 		BEGIN
+			IF ~adjustFocusPosition.Get() THEN RETURN; END;
 			oldfocus := focus; focus.col := col; focus.row := row;
 			FindMasterCell(focus.col, focus.row, focusCell.col, focusCell.row, dummy, dummy);
 			InvalidateCell(oldfocus.col, oldfocus.row); InvalidateCell(focusCell.col, focusCell.row);
@@ -586,7 +609,7 @@ TYPE
 		END Scrolled;
 				
 		PROCEDURE SetHighlight(col, row : LONGINT);
-		VAR or, nr, cr : Rectangle;
+		VAR or, nr, cr : WMRectangles.Rectangle;
 		BEGIN
 			Acquire;
 			IF (col = highlight.col) & (row = highlight.row)
@@ -602,23 +625,23 @@ TYPE
 				nr := GetVisibleCellRect(col, row);
 			END;
 			highlight.col := col; highlight.row := row;
-			cr := or; Rect.ExtendRect(cr, nr);
-			IF Rect.Area(or) + Rect.Area(nr) < Rect.Area(cr) THEN InvalidateRect(or); InvalidateRect(nr)
+			cr := or; WMRectangles.ExtendRect(cr, nr);
+			IF WMRectangles.Area(or) + WMRectangles.Area(nr) < WMRectangles.Area(cr) THEN InvalidateRect(or); InvalidateRect(nr)
 			ELSE InvalidateRect(cr)
 			END;
 			Release 
 		END SetHighlight;
 		
-		PROCEDURE GetVisibleColRect(col : LONGINT) : Rectangle;
-		VAR r : Rectangle;
+		PROCEDURE GetVisibleColRect(col : LONGINT) : WMRectangles.Rectangle;
+		VAR r : WMRectangles.Rectangle;
 		BEGIN
 			r := GetVisibleCellRect(col, tableStart.row);
 			r.t := 0; r.b := bounds.GetHeight();
 			RETURN r
 		END GetVisibleColRect;
 		
-		PROCEDURE GetVisibleRowRect(row: LONGINT) : Rectangle;
-		VAR r : Rectangle;
+		PROCEDURE GetVisibleRowRect(row: LONGINT) : WMRectangles.Rectangle;
+		VAR r : WMRectangles.Rectangle;
 		BEGIN
 			r := GetVisibleCellRect(tableStart.col, row);
 			r.l := 0; r.r := bounds.GetWidth(); 
@@ -626,7 +649,7 @@ TYPE
 		END GetVisibleRowRect;
 		
 		PROCEDURE SetSelection*(scol, srow, ecol, erow : LONGINT);
-		VAR or, nr, cr : Rectangle; done : BOOLEAN;
+		VAR or, nr, cr : WMRectangles.Rectangle; done : BOOLEAN;
 			oldStart, oldEnd : CellPos;
 		BEGIN
 			Acquire;
@@ -649,8 +672,8 @@ TYPE
 				Invalidate(); done := TRUE
 			END;
 			IF ~done THEN
-				cr := or; Rect.ExtendRect(cr, nr);
-				IF Rect.Area(or) + Rect.Area(nr) < Rect.Area(cr) THEN InvalidateRect(or); InvalidateRect(nr)
+				cr := or; WMRectangles.ExtendRect(cr, nr);
+				IF WMRectangles.Area(or) + WMRectangles.Area(nr) < WMRectangles.Area(cr) THEN InvalidateRect(or); InvalidateRect(nr)
 				ELSE InvalidateRect(cr)
 				END;
 			END;
@@ -716,7 +739,7 @@ TYPE
 		END OnFixedYGridLine;
 	
 		PROCEDURE PointerDown(x, y : LONGINT; keys : SET); (** PROTECTED *)
-		VAR col, row, sc, sr, ec, er : LONGINT; state : SET;
+		VAR col, row : LONGINT; state : SET;
 		BEGIN
 			PointerDown^(x, y, keys);
 			lastkeys := keys;
@@ -795,7 +818,7 @@ TYPE
 						CASE selectionMode OF
 							| GridSelectSingleCell, GridSelectSingleCol, GridSelectSingleRow : SetSelection(col, row, col, row)
 							| GridSelectCols, GridSelectRows, GridSelectBlock, GridSelectHorizontal, GridSelectVertical: 
-							SetSelection(selA.col, selA.row, col, row)
+									SetSelection(selA.col, selA.row, col, row)
 						ELSE
 						END;
 						SetFocusPos(col, row)
@@ -846,7 +869,7 @@ VAR GSonSelect, GSonClick, GSonClickSelected,
 	GSonSelectInfo, GSonClickInfo, GSonClickSelectedInfo: String;
 	fixedColsProto, fixedRowsProto : WMProperties.Int32Property; 
 	defaultColWidthProto, defaultRowHeightProto : WMProperties.Int32Property;
-	allowColResizeProto, allowRowResizeProto : WMProperties.BooleanProperty;
+	allowColResizeProto, allowRowResizeProto, adjustFocusPositionProto : WMProperties.BooleanProperty;
 	nofColsProto, nofRowsProto, cellDistProto : WMProperties.Int32Property;
 	showScrollXProto, showScrollYProto, alwaysShowScrollXProto, alwaysShowScrollYProto : WMProperties.BooleanProperty;
 	
@@ -867,12 +890,12 @@ BEGIN
 	NEW(defaultColWidthProto, NIL, NewString("defaultColWidth"), NewString("default width of a column"));
 	NEW(defaultRowHeightProto, NIL, NewString("defaultRowHeight"), NewString("default height of a row"));
 	defaultColWidthProto.Set(100); defaultRowHeightProto.Set(20); 
-	
-	
 	NEW(allowColResizeProto, NIL, NewString("allowColResize"), NewString("can columns be resized"));
 	allowColResizeProto.Set(TRUE);
 	NEW(allowRowResizeProto, NIL, NewString("allowRowResize"), NewString("can rows be resized"));
 	allowRowResizeProto.Set(TRUE);
+	NEW(adjustFocusPositionProto, NIL, NewString("adjustFocusPosition"), NewString("focus adjusting when clicking/dragging cells"));
+	adjustFocusPositionProto.Set(TRUE);
 	NEW(nofColsProto, NIL, NewString("nofCols"), NewString("number of columns in the table"));
 	nofColsProto.Set(1);
 	NEW(nofRowsProto, NIL, NewString("nofRows"), NewString("number of rows in the table"));
@@ -889,17 +912,19 @@ END InitProto;
 
 PROCEDURE GenGrid*(par : PTR) : PTR;
 VAR grid : GenericGrid;
-BEGIN NEW(grid); RETURN grid
+BEGIN
+	NEW(grid);
+	RETURN grid
 END GenGrid;
 	
 PROCEDURE Register;
 BEGIN
-	WMComponents.registry.RegisterElement("TestGrid", GenGrid);
+	WMComponents.registry.RegisterElement("TestGrid", GenGrid)
 END Register;
 
 PROCEDURE Cleanup;
 BEGIN
-	WMComponents.registry.UnregisterElement("TestGrid");
+	WMComponents.registry.UnregisterElement("TestGrid")
 END Cleanup;
 
 PROCEDURE NewString*(x : ARRAY OF CHAR) : String;
@@ -914,5 +939,9 @@ BEGIN
 	AosModules.InstallTermHandler(Cleanup)
 END WMGrids.
 
-System.Free 
-	WMGrids ~
+S.Free WMGrids ~
+
+History:
+
+	03.04.2006	Added AlignSubComponents in last line for GenericGrid.RecacheAllProperties
+

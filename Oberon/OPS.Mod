@@ -75,7 +75,7 @@ MODULE OPS;	(** non-portable *)
 		repeat* =  50; for* =  51; loop* =  52; with* =  53; exit* =  54; 
 		return* =  55; array* =  56; object* =  57; record* =  58; pointer* =  59; 
 		begin* =  60; code* =  61; const* =  62; type* =  63; var* =  64; 
-		procedure* =  65; import* =  66; module* =  67; eof* =  68; 
+		procedure* =  65; import* =  66; module* =  67; finally*=68; eof* =  69; 
 
 	PROCEDURE err(n: INTEGER);
 	BEGIN OPM.err(n)
@@ -356,6 +356,7 @@ MODULE OPS;	(** non-portable *)
 			| "F": Identifier(s);
 						IF name = "FALSE" THEN s := false
 						ELSIF name = "FOR" THEN s := for
+						ELSIF name = "FINALLY" THEN s := finally
 						END
 			| "I": Identifier(s);
 						IF name = "IF" THEN s := if

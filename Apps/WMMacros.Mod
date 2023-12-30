@@ -11,8 +11,14 @@ TYPE
 		a, b : LONGINT;
 	END;
 	ParameterList = POINTER TO ARRAY OF ParameterEntry; 
+	
+CONST
+	(* Default keysym of key that invokes macros *)
+	DefaultMacroKeySym =  0FF63H; (* Insert key *)
 
-VAR macros : XML.Element;
+VAR 
+	macros : XML.Element;
+	macroKeySym : LONGINT; (* keysym of key that invokes macros *)
 	hasErrors : BOOLEAN;
 
 PROCEDURE IsStop(ch : Char32) : BOOLEAN;
@@ -89,7 +95,7 @@ END ParseToRight;
 
 PROCEDURE InsertParameter(text : AosTexts.Text; parameter: ParameterEntry; pos : LONGINT);
 BEGIN
-	text.CopyToText(parameter.a, parameter.b - parameter.a, text, pos)
+	text.CopyFromText(text, parameter.a, parameter.b - parameter.a, pos)
 END InsertParameter;
 
 PROCEDURE FindMacro*(parent: XML.Element; key : ARRAY OF CHAR): XML.Element;
@@ -122,8 +128,8 @@ VAR
 		BEGIN
 			en := xml.GetContents();
 			p := en.GetNext();
-			IF p IS XML.CharData THEN
-				s := p(XML.CharData).GetStr();
+			IF p IS XML.ArrayChars THEN
+				s := p(XML.ArrayChars).GetStr();
 				IF s # NIL THEN AosTextUtilities.StrToText(text, cursor.GetPosition(), s^) END;
 			END
 		END HandleString;
@@ -159,7 +165,7 @@ BEGIN
 				IF s^ = "String" THEN HandleString(p(XML.Element))
 				ELSIF s^ = "CR" THEN 					
 					InsertChar(AosTexts.NewLineChar);
-					IF nofWhitespace > 0 THEN text.CopyToText(lineStart, nofWhitespace, text, cursor.GetPosition()) END;
+					IF nofWhitespace > 0 THEN text.CopyFromText(text, lineStart, nofWhitespace, cursor.GetPosition()) END;
 				ELSIF s^ = "Indent" THEN InsertChar(9)
 				ELSIF s^ = "LT" THEN InsertChar(ORD("<"))
 				ELSIF s^ = "GT" THEN InsertChar(ORD(">"))
@@ -212,7 +218,7 @@ BEGIN
 			END;
 		ELSE AosOut.String("Macro assertion failed") END;
 	ELSE
-		AosOut.String("no macro found"); AosOut.Ln
+		AosOut.String("WMMacros: Macro not found."); AosOut.Ln;
 	END;
 	text.InsertUCS32(cursor.GetPosition(), buf) (* cursor moves automagically *)
 END Insert;
@@ -222,17 +228,44 @@ VAR md : WMEditors.MacroData; text : AosTexts.Text; cursor : WMTextView.Position
 BEGIN
 	IF (data # NIL) & (data IS WMEditors.MacroData) THEN
 		md := data(WMEditors.MacroData);
-		IF md.keySym = 0FF63H THEN
+		IF md.keySym = macroKeySym THEN
 			text := md.text; cursor := md.cursor;
 			IF (text # NIL) & (cursor # NIL) THEN Insert(text, cursor); md.handled := TRUE END
 		END;
 	END
 END Handle;
 
+(* <MacroKey keysym="..."/> can be used to specify the key to be used to invoke macros. This procedure tries to		*)
+(* find and parse this element in the Macro file. If the keysym value cannot be retrieved, the DefaultMacrokeysym is	*)
+(* returned.																										*)
+PROCEDURE GetMacroKeySym() : LONGINT;
+VAR 
+	enum : XMLObjects.Enumerator; elem : XML.Element; s : XML.String; p : PTR;
+	keysym, res : LONGINT; 
+BEGIN
+	IF macros # NIL THEN
+		enum := macros.GetContents();
+		WHILE enum.HasMoreElements() DO
+			p := enum.GetNext();
+			IF p IS XML.Element THEN
+				elem := p (XML.Element); s := elem.GetName();
+				IF (s # NIL) & (s^ = "MacroKey") THEN
+					s := elem.GetAttributeValue("keysym");
+					IF s # NIL THEN
+						Utilities.HexStrToInt(s^, keysym, res);
+						IF res = Utilities.Ok THEN RETURN keysym; END;
+					END;
+				END;
+			END;
+		END;
+	END;
+	RETURN DefaultMacroKeySym;
+END GetMacroKeySym;
+
 (* Report errors while parsing *)
 PROCEDURE Error(pos, line, row: LONGINT; msg: ARRAY OF CHAR);
 BEGIN
-	AosOut.String("Parse error at pos "); AosOut.Int(pos, 5); AosOut.String(" in line "); AosOut.Int(line, 5); 
+	AosOut.String("WMMacros: Parse error at pos "); AosOut.Int(pos, 5); AosOut.String(" in line "); AosOut.Int(line, 5); 
 	AosOut.String(" row "); AosOut.Int(row, 5); AosOut.String(" - "); AosOut.String(msg); AosOut.Ln;
 	hasErrors := TRUE
 END Error;
@@ -241,19 +274,25 @@ PROCEDURE Read(name : ARRAY OF CHAR);
 VAR f : AosFS.File;
 	scanner : XMLScanner.Scanner;
 	parser : XMLParser.Parser;
+	reader : AosFS.Reader;
 	doc : XML.Document;	
 BEGIN
 	hasErrors := FALSE;
 	f := AosFS.Old(name);
 	IF f # NIL THEN
-		NEW(scanner, f); scanner.reportError := Error;
+		NEW(reader, f, 0);
+		NEW(scanner, reader); scanner.reportError := Error;
 		NEW(parser, scanner); parser.reportError := Error;
 		doc := parser.Parse();
-		IF hasErrors THEN AosOut.String("Stylefile not ok"); AosOut.Ln
+		AosOut.String("WMMacros: Macro file "); AosOut.String(name); 
+		IF hasErrors THEN 
+			AosOut.String(" has errors.");
 		ELSE
 			macros := doc.GetRoot();
-			AosOut.String("Macro file "); AosOut.String(name); AosOut.String(" loaded."); AosOut.Ln
-		END
+			macroKeySym := GetMacroKeySym();
+			AosOut.String(" loaded.");
+		END;
+		AosOut.Ln;
 	END
 END Read;
 
@@ -270,12 +309,13 @@ BEGIN {EXCLUSIVE}
 END ReadMacros;
 
 BEGIN
-	Read("Macros.XML")
+	macroKeySym := DefaultMacroKeySym;
+	Read("Macros.XML");
 END WMMacros.
 
+WMMacros.ReadMacros Macros.XML ~  S.Free WMMacros ~ 
 
-
-S.Free WMMacros ~ 
-WMMacros.ReadMacros Macros.XML ~
-
+History:
+	
+	20.02.2006	Added option to specify the macro key in the macro XML file (staubesv) 
 

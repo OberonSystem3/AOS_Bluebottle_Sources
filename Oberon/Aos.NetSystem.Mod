@@ -1,6 +1,7 @@
 (* Aos, Copyright 2001, Pieter Muller, ETH Zurich *)
+(* modified to obtain correct host name (*alm 11/11/2004*) *)
 
- MODULE NetSystem; (** portable *)	(* pjm *)
+MODULE NetSystem; (** portable *)	(* pjm *)
 
 (* A Portable Oberon Interface to the Internet Protocols. *)
 
@@ -34,7 +35,7 @@ TYPE
 		pcb: AosTCP.Connection
 	END;
 
-	IPAdr* = LONGINT; (** IP address in network byte order! *)
+	IPAdr* = AosIP.Adr; (** IP address in network byte order! *)
 
 	Socket* = POINTER TO SocketDesc;	(** handle for UDP "connections" *)
 	SocketDesc* = RECORD
@@ -69,7 +70,7 @@ VAR
 PROCEDURE ToHost* (num: ARRAY OF CHAR; VAR adr: IPAdr; VAR done: BOOLEAN);
 BEGIN
 	adr := AosIP.StrToAdr(num);
-	done := (adr # AosIP.NilAdr)
+	done := ~(AosIP.IsNilAdr(adr));
 END ToHost;
 
 (** Convert an IPAdr value to a dotted IP address string. *)
@@ -85,7 +86,7 @@ PROCEDURE GetIP*(name: ARRAY OF CHAR; VAR adr: IPAdr);
 VAR res: LONGINT;
 BEGIN
 	adr := AosIP.StrToAdr(name);
-	IF adr = AosIP.NilAdr THEN
+	IF AosIP.IsNilAdr(adr) THEN
 		IF started THEN
 			AosDNS.HostByName(name, adr, res);
 			IF res # 0 THEN adr := AosIP.NilAdr END
@@ -178,12 +179,6 @@ PROCEDURE Cleanup(c: SYSTEM.PTR);
 BEGIN
 	WITH c: Connection DO
 		IF c.pcb # NIL THEN
-			(*IF Trace THEN
-				AosOut.String("NetSystem: Cleanup ");
-				ToNum(SYSTEM.VAL(IPAdr, c.port.rip), s);  AosOut.String(s);
-				AosOut.Char(":");  AosOut.Int(c.port.rport, 1);
-				AosOut.Ln
-			END;*)
 			CloseConnection(c); c.pcb := NIL
 		END
 	END
@@ -369,6 +364,7 @@ END OpenSocket;
 
 PROCEDURE CloseSocket* (S: Socket);
 BEGIN
+	S.pcb.Close;
 	S.pcb := NIL; S.res := done
 END CloseSocket;
 
@@ -655,28 +651,59 @@ VAR
 	i: LONGINT;
 	s: Texts.Scanner;
 	tab: AosPlugins.Table;
+	interfaceList: AosIP.InterfaceList;
+	interfaceListItem: AosIP.InterfaceList;
+	auxint*: AosIP.Interface;(*alm 11/11/2004*)
+	remoteIP : ARRAY 128 OF CHAR;
 BEGIN
+	(* In Oberon only IPv4 interfaces are used! *)
 	IF ~started THEN
 		int := NIL;
 		AosNet.registry.GetAll(tab);
 		IF tab # NIL THEN
 			i := 0;
+			Texts.WriteLn (w);
+			Texts.WriteString (w, "Under Oberon only IPv4 interfaces are supported");
+			Texts.WriteLn (w);
 			WHILE (i < LEN(tab)) & (int = NIL) DO
-				IF (int = NIL) OR (tab[i].name # "Loopback") THEN
-					int := AosIP.InterfaceByDevice(tab[i](AosNet.LinkDevice));
+				Texts.WriteString (w, "Device name: "); (*alm 11/11/2004*)
+				Texts.WriteString (w, tab[i].name);
+				interfaceList := AosIP.InterfaceListByDevice(tab[i](AosNet.LinkDevice));
+				interfaceListItem := interfaceList;
+				WHILE (interfaceListItem # NIL) & (interfaceListItem.interface.protocol # AosIP.IPv4)  DO
+					interfaceListItem := interfaceListItem.next;
+				END;
+				auxint := interfaceListItem.interface;
+				
+				AosIP.AdrToStr(auxint.localAdr, remoteIP);
+				Texts.WriteString (w, " ([");
+				Texts.WriteString (w, remoteIP);
+				Texts.WriteString (w, "]");
+				Texts.WriteLn (w);
+				IF (int = NIL) &  (tab[i].name # "Loopback") THEN
+					interfaceListItem := interfaceList;
+					WHILE (interfaceListItem # NIL) & (interfaceListItem.interface.protocol # AosIP.IPv4) DO
+						interfaceListItem := interfaceListItem.next;
+					END;
+					
+					IF interfaceListItem # NIL THEN
+						int := interfaceListItem.interface;
+					END;
 				END;
 				INC(i);
 			END;
 		END;
 		IF int # NIL THEN
 			hostIP := int.localAdr;
-			IF hostIP # AosIP.NilAdr THEN
+			IF ~AosIP.IsNilAdr(hostIP) THEN
 				Oberon.OpenScanner(s, "NetSystem.LocalName");
+				started := TRUE; (*alm 11/11/2004*)
 				IF s.class IN {Texts.String, Texts.Name} THEN COPY(s.s, hostName)
 				ELSE SetHostname
 				END;
-				started := TRUE;
-				Texts.WriteString(w, "NetSystem started"); Texts.WriteLn(w);
+				Texts.WriteString(w, "NetSystem started as "); 
+				Texts.WriteString (w, hostName);
+				Texts.WriteLn(w);
 				Texts.Append(Oberon.Log, w.buf)
 			END
 		END
@@ -785,7 +812,11 @@ BEGIN
 	state[AosTCP.SynReceived] := inout; state[AosTCP.Established] := inout;
 	state[AosTCP.CloseWait] := out; state[AosTCP.FinWait1] := in; state[AosTCP.Closing] := closed;
 	state[AosTCP.LastAck] := closed; state[AosTCP.FinWait2] := in; state[AosTCP.TimeWait] := closed;
-	anyIP := AosIP.NilAdr; allIP := 0FFFFFFFFH;
+	anyIP := AosIP.NilAdr; 
+	allIP := AosIP.NilAdr;
+	allIP.usedProtocol := AosIP.IPv4;
+	allIP.ipv4Adr := 0FFFFFFFFH;
+
 	crlf[0] := CR; crlf[1] := LF;
 	started := FALSE; hostName := "";
 	Texts.OpenWriter(w); passwords := NIL;

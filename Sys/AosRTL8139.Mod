@@ -307,10 +307,14 @@ TYPE
 			SYSTEM.PUT32(base, AosNet.Get4(dev.local, 0)); dummy:=SYSTEM.GET32(base);
 			SYSTEM.PUT32(base + 4, AosNet.Get4(dev.local, 4));dummy:=SYSTEM.GET32(base + 4);
 		
+			(* MAR Multicast Filter Setup (33 33 xx xx xx xx) *)
+			SYSTEM.PUT32(base + 8H, 0FFFF3333H);
+			SYSTEM.PUT32(base + 0CH, 0FFFFFFFFH);	
+
 			(* enable Tx interrupt for testing *)
 		(*	SYSTEM.PUT16(base + 3CH, SYSTEM.VAL(LONGINT, SYSTEM.VAL(SET, LONG(SYSTEM.GET16(base + 3CH)))+{2, 0, 4}));*)
 			SYSTEM.PUT16(base + 3CH, SYSTEM.VAL(LONGINT, SYSTEM.VAL(SET, LONG(SYSTEM.GET16(base + 3CH)))+{1..6, 13..15}));
-			
+				
 			(* Set Max DMA Burst Size*)
 			SYSTEM.PUT32(base + 40H, SYSTEM.VAL(SET, SYSTEM.GET32(base + 40H))+{9, 10});
 
@@ -435,6 +439,7 @@ TYPE
 		BEGIN
 			ack:={0};
 			status:=SYSTEM.VAL(SET, LONG(SYSTEM.GET16(base + 3EH)));
+
 			 (* System Error: PCI bus error *)
 			 IF 15 IN status THEN
 				AosKernel.AtomicInc(nPCIError)
@@ -484,8 +489,8 @@ TYPE
 			END;
 			
 			(* receive ok *)
-			IF 0 IN status THEN 
-				AosKernel.AtomicInc(nRxOk);
+			IF 0 IN status THEN 			
+				AosKernel.AtomicInc(nRxOk);			
 				ReadPacket;
 				INCL(ack, 0);
 			END;
@@ -596,9 +601,9 @@ BEGIN
 	chipsetInfo[Chipset8139C].flags := {HasLWake}; chipsetInfo[Chipset8139C].configSet:={28..31, 17..22, 6};
 
 END AosRTL8139.
- 
 
-System.Free AosRTL8139 ~
+
+S.Free AosRTL8139 ~
 AosRTL8139.Install
 System.OpenKernelLog 
 AosTestNet.Mod

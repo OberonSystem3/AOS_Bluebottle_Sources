@@ -1,13 +1,11 @@
 MODULE TestComponentDragDrop;	(** AUTHOR "TF"; PURPOSE "Testing Component Drag & Drop"; *)
 
 IMPORT
-	AosOut, Utilities, AosModules, AosCommands, WMStandardComponents, 
-	WM := WMWindowManager, WMComponents, WMMessages, 
-	WMGraphics, WMDialogs;
+	AosOut, AosModules, WMStandardComponents,
+	WMComponents, WMGraphics, WMDialogs,
+	WM := WMWindowManager;
 
 TYPE
-	String = Utilities.String;
-	
 	TestComponent = OBJECT(WMComponents.VisualComponent)
 		PROCEDURE PointerDown(x, y : LONGINT; keys : SET);
 		BEGIN
@@ -22,12 +20,12 @@ TYPE
 			END
 		END PointerDown;
 		
-		PROCEDURE DragOver(x, y: LONGINT; dragInfo : WM.DragInfo);
+		PROCEDURE DragOver(x, y : LONGINT; dragInfo : WM.DragInfo);
 		BEGIN
 			AosOut.String("Drag Over @ "); AosOut.Int(x, 4); AosOut.Int(y, 4); AosOut.Ln
 		END DragOver;
 		
-		PROCEDURE DragDropped(x, y: LONGINT; dragInfo : WM.DragInfo);
+		PROCEDURE DragDropped(x, y : LONGINT; dragInfo : WM.DragInfo);
 		BEGIN
 			AosOut.String("Drag dropped @ "); AosOut.Int(x, 4); AosOut.Int(y, 4); AosOut.Ln;
 			IF dragInfo.sender = SELF THEN ConfirmDrag(FALSE, dragInfo)
@@ -85,21 +83,16 @@ TYPE
 		
 		PROCEDURE Close;
 		BEGIN
-			FreeWindow;
-			Close^
+			Close^;
+			window := NIL
 		END Close;
 		
 	END Window;
 
 VAR window : Window;
 
-PROCEDURE FreeWindow;
-BEGIN {EXCLUSIVE}
-	window := NIL
-END FreeWindow;
-
-PROCEDURE Open*(par: PTR): PTR;
-BEGIN {EXCLUSIVE}
+PROCEDURE Open*(par : PTR) : PTR;
+BEGIN
 	IF window = NIL THEN NEW(window)
 	ELSE AosOut.String("Already open"); AosOut.Ln
 	END;
@@ -108,13 +101,13 @@ END Open;
 
 PROCEDURE Cleanup;
 BEGIN
-	IF window # NIL THEN window.Close END;
+	IF window # NIL THEN window.Close END
 END Cleanup;
 
 BEGIN
 	AosModules.InstallTermHandler(Cleanup)
 END TestComponentDragDrop.
 
-Aos.Call TestComponentDragDrop.Open ~
-System.Free TestComponentDragDrop ~
-WMComponents.Mod
+TestComponentDragDrop.Open ~
+S.Free TestComponentDragDrop ~
+

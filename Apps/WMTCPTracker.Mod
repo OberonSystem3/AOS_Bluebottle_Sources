@@ -106,11 +106,11 @@ TYPE
 			grid.SetSelectionMode(WMGrids.GridSelectSingleRow);
 			grid.Acquire;
 			grid.model.Acquire;
-			grid.model.SetNofCols(32);
+			grid.model.SetNofCols(33);
 			grid.model.SetNofRows(1);
-			NEW(colWidth, 32);
+			NEW(colWidth, 33);
 			f.GetStringSize("-999999999", minWidth, dy);
-			FOR i := 0 TO 32 - 1 DO
+			FOR i := 0 TO 33 - 1 DO
 				GetTitleStr(i, str);
 				f.GetStringSize(str, dx, dy);
 				colWidth[i] := Utilities.Max(dx + 4, minWidth);
@@ -174,15 +174,14 @@ TYPE
 				|29 : COPY("ISS", x)
 				|30 : COPY("IRS", x)
 				|31 : COPY("SSThresh", x)
+				|32 : COPY("Track", x)
 			ELSE COPY("", x);
 			END
 		END GetTitleStr;
 		
 		PROCEDURE Click(sender, data : ANY);
 		BEGIN
-			AosOut.String("Cilck"); AosOut.Ln; 
 			IF (data # NIL) & (data IS AosTCP.Connection) (* & (data(AosTCP.Connection).state # AosTCP.Listen)*) THEN
-				AosOut.String("Huga"); AosOut.Ln; 
 				selectedConnection := data(AosTCP.Connection);
 				detailPanel.visible.Set(TRUE)
 			ELSE detailPanel.visible.Set(FALSE)
@@ -282,6 +281,7 @@ TYPE
 						|29 : Utilities.IntToStr(c.iss, str)
 						|30 : Utilities.IntToStr(c.irs, str)
 						|31 : Utilities.IntToStr(c.sndssthresh, str) 
+						|32 : Utilities.IntToStr(c.traceflow, str) 
 					ELSE
 					END
 				END;
@@ -313,7 +313,7 @@ TYPE
 			grid.model.Acquire;
 			grid.model.SetNofRows(nofConnections + 1);
 			FOR i := 0 TO nofConnections - 1 DO
-				FOR j := 0 TO 32 - 1 DO
+				FOR j := 0 TO 33 - 1 DO
 					s := grid.model.GetCellText(j, i + 1); (* recycle the string *) 
 					IF s = NIL THEN NEW(s, 64) END;
 					GetConnectionStr(i, j, s^);
@@ -392,7 +392,8 @@ BEGIN{EXCLUSIVE}
 		ELSE NEW(window, 250, NIL) 
 		END
 	ELSE WMWindowManager.DefaultBringToView(window, TRUE)
-	END
+	END;
+	RETURN NIL
 END Restore;
 
 

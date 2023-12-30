@@ -31,7 +31,7 @@ VAR log : AosLog.Log;
 TYPE 	
 	CodeRedPlugin = OBJECT(WebHTTPServer.HTTPPlugin)
 		
-		PROCEDURE CanHandle(host: WebHTTPServer.Host; VAR h : WebHTTP.RequestHeader): BOOLEAN;
+		PROCEDURE CanHandle(host: WebHTTPServer.Host; VAR h : WebHTTP.RequestHeader; secure : BOOLEAN): BOOLEAN;
 		VAR i : LONGINT;
 		BEGIN
 			WHILE (h.uri[i] # 0X) & (i < LEN(h.uri)) DO INC(i) END;
@@ -54,7 +54,7 @@ TYPE
 TYPE
 	NimdaPlugin = OBJECT(WebHTTPServer.HTTPPlugin)
 		
-		PROCEDURE CanHandle(host: WebHTTPServer.Host; VAR h : WebHTTP.RequestHeader): BOOLEAN;
+		PROCEDURE CanHandle(host: WebHTTPServer.Host; VAR h : WebHTTP.RequestHeader; secure : BOOLEAN): BOOLEAN;
 		BEGIN
 			RETURN h.uri = "/scripts/root.exe"
 		END CanHandle;

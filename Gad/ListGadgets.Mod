@@ -883,6 +883,26 @@ BEGIN
 	M.res := 0
 END TrackPoint;
 
+PROCEDURE TrackWheel (F: Frame; x, y: INTEGER; VAR M: Oberon.InputMsg);
+VAR Q: Display3.Mask; R: ListRiders.Rider; oldorg: LONGINT; keysum: SET;
+		left, top, w, ox, oy, ow, dy, cnt: INTEGER; update: BOOLEAN; loc: Loc;
+BEGIN
+	update := FALSE; oldorg := F.first.n;
+	left := x + F.left - F.hoff; top := y + F.H; w := F.W - F.left - F.right;
+	Gadgets.MakeMask(F, x, y, M.dlink, Q); Display3.Copy(Q, Q);
+	Display3.AdjustMask(Q, x + F.left, y + F.bottom, w, F.H - (F.top - F.bottom));
+	LocateLine(F, y, M.Y, loc, cnt);
+	IF M.ch = 0C2X THEN 
+		dy := 1; 
+		Scroll(F, Q, x, y, 1, M.dlink, dy);
+	ELSIF M.ch = 0C1X THEN
+		dy := -1; 
+		Scroll(F, Q, x, y, -1, M.dlink, dy);
+	END; 
+	
+	M.res := 0
+END TrackWheel;
+
 PROCEDURE TrackCaret (F: Frame; x, y: INTEGER; VAR M: Oberon.InputMsg);
 VAR Q: Display3.Mask; T: Texts.Text; keysum: SET; oldorg, time, beg, end: LONGINT; oy, dy, cnt: INTEGER; loc: Loc;
 BEGIN
@@ -1376,6 +1396,8 @@ BEGIN
 										IF Oberon.New & (locked IN F.state0) THEN TrackPoint(F, x, y, M)
 										ELSE TrackCaret(F, x, y, M)
 										END
+									ELSIF M.keys= {31} THEN 
+										TrackWheel(F,x,y,M)
 									END
 								ELSE Gadgets.framehandle(F, M)
 								END

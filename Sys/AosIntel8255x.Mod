@@ -793,6 +793,8 @@ BEGIN {EXCLUSIVE}
 		ScanPCI(8086H, 1036H);	(* Reserved *)
 		ScanPCI(8086H, 1037H);	(* Reserved *)
 		ScanPCI(8086H, 1038H);	(* Reserved *)
+		ScanPCI(8086H, 103DH);	(* In VAIO *)
+		ScanPCI(8086H, 1064H); 	(* 82562ET/EZ/GT/GZ - Pro/100 VE (LOM) *)
 		ScanPCI(8086H, 1209H);	(* 82559ER *)
 		ScanPCI(8086H, 1229H);	(* Ethernet Pro 100 *)
 	END;
@@ -867,7 +869,7 @@ END Delay;
 BEGIN
 	AosModules.InstallTermHandler(Cleanup);
 END AosIntel8255x.
- 
+
 
 PC.Compile \s AosIntel8255x.Mod ~
 System.OpenKernelLog ~

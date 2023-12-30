@@ -1,76 +1,86 @@
 (* Aos, Copyright 2001, Pieter Muller, ETH Zurich *)
 
-MODULE AosDisplayWM;	(* pjm *)
+MODULE AosDisplayWM;
 (** AUTHOR "pjm"; PURPOSE "Aos display driver for WM window"; *)
 
-(* Based on Window.Display.Mod and OberonWindow.Mod of tf. *)
-
-IMPORT SYSTEM, AosBoot, AosIO, AosCommands, AosDisplays, AosInputs, Raster, WMWindowManager, Rect := WMRectangles;
+IMPORT SYSTEM, AosBoot, AosCommands, AosDisplays, AosInputs, AosIO, AosModules, AosPlugins, Raster,
+	WMRectangles,
+	WM := WMWindowManager;
 
 CONST
 	DefaultDisplayName = "Oberon";
 	DefaultWidth = 1024;
 	DefaultHeight = 768;
 
-	AlphaCursor = 128;
+	AlphaCursor = 10;
 	
 	KeyBufSize = 64;	
-	
-	SHIFT* = 0;  CTRL* = 1;  ALT* = 2;	(** for KeyState *)
 
 	Flip = FALSE;
 	
 	Cache = TRUE;
 	
 VAR
-	nilpix: Raster.Pixel;
+	nilpix : Raster.Pixel;
 
 TYPE
-	OberonWindow = OBJECT (WMWindowManager.BufferWindow)
-		VAR
-			input: OberonInput;	(* initialized from outside *)
-		
-			curKeys:SET;
-			curX, curY:LONGINT;
-	
-			keyhead, keytail: LONGINT;
-			keybuf: ARRAY KeyBufSize OF CHAR;	
-			
-			keys: SET;
-			break: BOOLEAN;
-			fixMM : BOOLEAN;
-			lastCtrl : BOOLEAN;
-			
-		PROCEDURE Mouse(VAR x, y: INTEGER; VAR keys:SET);
+	OberonWindow = OBJECT (WM.BufferWindow)
+	VAR
+		input : OberonInput;	(* initialized from outside *)
+
+		curKeys : SET;
+		curX, curY : LONGINT;	(* Coordinates of the mouse pointer while moving or when released. *)
+
+		keyhead, keytail : LONGINT;
+		keybuf : ARRAY KeyBufSize OF CHAR;
+
+		keys : SET;
+		break : BOOLEAN;
+		fixMM : BOOLEAN;	(* Value TRUE denotes the presence of a 2-button mouse, Ctrl-key acts then as middle button. *)
+		lastCtrl : BOOLEAN;	(* Value TRUE denotes Ctrl-key pressed. *)
+
+		PROCEDURE Mouse(VAR x, y : INTEGER; VAR keys : SET);
 		BEGIN {EXCLUSIVE}
 			keys := {};
 			IF 0 IN curKeys THEN INCL(keys, 2) END;
 			IF 1 IN curKeys THEN INCL(keys, 1) END;
 			IF 2 IN curKeys THEN INCL(keys, 0) END;
+			IF 30 IN curKeys THEN IF curKeys={30} THEN INCL(keys, 30); END; curKeys := curKeys - {30} END; (*fof*)
+			IF 31 IN curKeys THEN IF curKeys={31} THEN INCL(keys, 31); END; curKeys := curKeys - {31}  END;
 			x := SHORT(curX);
 			y := SHORT(curY)
 		END Mouse;
-		
-		PROCEDURE PointerMove(x, y:LONGINT; keys:SET);
+
+		PROCEDURE PointerMove(x, y : LONGINT; keys :SET);
 		BEGIN {EXCLUSIVE}
-			curX := x; curY := y; curKeys := keys;
+			curX := x; curY := y; curKeys := curKeys * {30, 31} + keys;
 			IF fixMM &lastCtrl THEN INCL(curKeys, 1) END;
 			IF input # NIL THEN input.timer.Wakeup END	(* have to check, because upcalls to us can start immediately *)
 		END PointerMove;
-		
-		PROCEDURE PointerUp(x, y:LONGINT; keys:SET);
+
+		PROCEDURE WheelMove(dz : LONGINT); (*fof*)
+		BEGIN
+			IF dz > 0 THEN
+				INCL(curKeys, 30);
+			ELSIF dz < 0 THEN
+				INCL(curKeys, 31);
+			END;
+			IF input # NIL THEN input.timer.Wakeup END	(* have to check, because upcalls to us can start immediately *)
+		END WheelMove;
+
+		PROCEDURE PointerUp(x, y : LONGINT; keys : SET);
 		BEGIN {EXCLUSIVE}
 			curX := x; curY := y; curKeys := keys;
 			IF input # NIL THEN input.timer.Wakeup END
 		END PointerUp;
 
 			(* Keyboard handling *)
-		PROCEDURE InsertKey(ch:CHAR; keysym: LONGINT; flags:SET);
+		PROCEDURE InsertKey(ch : CHAR; keysym : LONGINT; flags : SET);
 		BEGIN
 			keys := {};
-			IF flags * AosInputs.Shift # {} THEN INCL(keys, SHIFT) END;
-			IF flags * AosInputs.Ctrl # {} THEN INCL(keys, CTRL) END;
-			IF flags * AosInputs.Alt # {} THEN INCL(keys, ALT) END;
+			IF flags * AosInputs.Shift # {} THEN INCL(keys, AosInputs.SHIFT) END;
+			IF flags * AosInputs.Ctrl # {} THEN INCL(keys, AosInputs.CTRL) END;
+			IF flags * AosInputs.Alt # {} THEN INCL(keys, AosInputs.ALT) END;
 			IF ch # 0X THEN
 				IF (keytail+1) MOD KeyBufSize # keyhead THEN
 					keybuf[keytail] := ch; keytail := (keytail+1) MOD KeyBufSize
@@ -82,14 +92,14 @@ TYPE
 			ELSE
 				(* skip *)
 			END 
-		END InsertKey;	
-		
+		END InsertKey;
+
 		PROCEDURE Close;
 		BEGIN {EXCLUSIVE}
 			InsertKey(0FFX, 0, {})
 		END Close;
 
-		PROCEDURE KeyEvent(ucs:LONGINT; flags:SET; keysym: LONGINT);
+		PROCEDURE KeyEvent(ucs : LONGINT; flags : SET; keysym : LONGINT);
 		BEGIN {EXCLUSIVE}
 			IF fixMM & ((flags * AosInputs.Ctrl # {}) # lastCtrl)  THEN
 				lastCtrl := flags * AosInputs.Ctrl # {};
@@ -100,63 +110,68 @@ TYPE
 				IF input # NIL THEN input.timer.Wakeup END
 			END;
 		END KeyEvent;
-		
-		PROCEDURE Read(VAR ch: CHAR; VAR b: BOOLEAN);
+
+		PROCEDURE Read(VAR ch : CHAR; VAR b : BOOLEAN);
 		BEGIN {EXCLUSIVE}
 			AWAIT(keyhead # keytail);
 			ch := keybuf[keyhead]; keyhead := (keyhead+1) MOD KeyBufSize;
 			b := break; break := FALSE
 		END Read;
-	
-		PROCEDURE Available(VAR num: INTEGER; VAR b: BOOLEAN);
+
+		PROCEDURE Available(VAR num : INTEGER; VAR b : BOOLEAN);
 		BEGIN {EXCLUSIVE}
 			num := SHORT((keytail-keyhead) MOD KeyBufSize);
 			b := break; break := FALSE
 		END Available;
-	
-		PROCEDURE KeyState(VAR k: SET);
+
+		PROCEDURE KeyState(VAR k : SET);
 		BEGIN {EXCLUSIVE}
 			k := keys
 		END KeyState; 
-		
+
 	END OberonWindow;
 
 TYPE
 	OberonInput = OBJECT (AosInputs.OberonInput)
-		VAR window: OberonWindow;
-		
-		PROCEDURE Mouse(VAR x, y: INTEGER; VAR keys:SET);
+		VAR window : OberonWindow;
+
+		PROCEDURE Mouse(VAR x, y : INTEGER; VAR keys : SET);
 		BEGIN
 			window.Mouse(x, y, keys)
 		END Mouse;
-		
-		PROCEDURE Read(VAR ch: CHAR; VAR b: BOOLEAN);
+
+		PROCEDURE Read(VAR ch : CHAR; VAR b : BOOLEAN);
 		BEGIN
 			window.Read(ch, b)
 		END Read;
-		
-		PROCEDURE Available(VAR num: INTEGER; VAR b: BOOLEAN);
+
+		PROCEDURE Available(VAR num : INTEGER; VAR b : BOOLEAN);
 		BEGIN
 			window.Available(num, b)
 		END Available;
 
-		PROCEDURE KeyState(VAR k: SET);
+		PROCEDURE KeyState(VAR k : SET);
 		BEGIN
 			window.KeyState(k)
 		END KeyState;
 
 	END OberonInput;
-	
+
 TYPE
+	(* Implementation of the virtual display driver.
+		A concrete Display must implement at least the Transfer function
+		or initialize a linear frame buffer and call the InitFrameBuffer method.
+	*)
+
 	Display* = OBJECT (AosDisplays.Display)	(* custom display object only accessed by Oberon (no EXCLUSIVE) *)
 		VAR
-			disp: OberonWindow;
-			inp: OberonInput;
-			bufimg: Raster.Image;
-			mode, mode1: Raster.Mode;
-			ml, mt, mr, mb: LONGINT;
-			
-		PROCEDURE LocalAddDirty(l, t, r, b: LONGINT);
+			disp : OberonWindow;
+			inp : OberonInput;
+			bufimg : Raster.Image;
+			mode, mode1 : Raster.Mode;
+			ml, mt, mr, mb : LONGINT;
+
+		PROCEDURE LocalAddDirty(l, t, r, b : LONGINT);
 		BEGIN
 			IF Cache THEN
 				IF l < ml THEN ml := l END;	(* enlarge dirty rectangle *)
@@ -164,19 +179,19 @@ TYPE
 				IF r > mr THEN mr := r END;
 				IF b > mb THEN mb := b END
 			ELSE
-				disp.Invalidate(Rect.MakeRect(l, t, r, b))
+				disp.Invalidate(WMRectangles.MakeRect(l, t, r, b))
 			END
 		END LocalAddDirty;
-		
+
 		PROCEDURE Update;
 		BEGIN
 			IF Cache & (ml # MAX(LONGINT)) THEN
-				disp.Invalidate(Rect.MakeRect(ml, mt, mr, mb));	(* updated dirty rectangle *)
+				disp.Invalidate(WMRectangles.MakeRect(ml, mt, mr, mb));	(* updated dirty rectangle *)
 				ml := MAX(LONGINT); mt := MAX(LONGINT); mr := MIN(LONGINT); mb := MIN(LONGINT)
 			END
 		END Update;
-		
-		PROCEDURE Transfer*(VAR buf: ARRAY OF CHAR; ofs, stride, x, y, w, h, op: LONGINT);
+
+		PROCEDURE Transfer*(VAR buf : ARRAY OF CHAR; ofs, stride, x, y, w, h, op : LONGINT);
 		BEGIN
 			Raster.InitMode(mode, Raster.srcCopy);
 			IF Flip THEN
@@ -199,8 +214,8 @@ TYPE
 				END
 			END
 		END Transfer;
-		
-		PROCEDURE Fill*(col, x, y, w, h: LONGINT);
+
+		PROCEDURE Fill*(col, x, y, w, h : LONGINT);
 		BEGIN
 			IF Flip THEN
 				Fill^(col, x, y, w, h)	(* supermethod not exclusive *)
@@ -216,8 +231,8 @@ TYPE
 				LocalAddDirty(x, y, x+w,  y+h)
 			END
 		END Fill;
-		
-		PROCEDURE Dot*(col, x, y: LONGINT);
+
+		PROCEDURE Dot*(col, x, y : LONGINT);
 		BEGIN
 			IF Flip THEN
 				Dot^(col, x, y)	(* supermethod not exclusive *)
@@ -232,9 +247,9 @@ TYPE
 				LocalAddDirty(x, y, x+1, y+1)
 			END
 		END Dot;
-		
-		PROCEDURE Mask*(VAR buf: ARRAY OF CHAR; bitofs, stride, fg, bg, x, y, w, h: LONGINT);
-		VAR p, i, y0, h0: LONGINT; s: SET; fgp, bgp: Raster.Pixel;
+
+		PROCEDURE Mask*(VAR buf : ARRAY OF CHAR; bitofs, stride, fg, bg, x, y, w, h : LONGINT);
+		VAR p, i, y0, h0 : LONGINT; s : SET; fgp, bgp : Raster.Pixel;
 		BEGIN
 			IF Flip THEN
 				Mask^(buf, bitofs, stride, fg, bg, x, y, w, h)	(* supermethod not exclusive *)
@@ -280,8 +295,8 @@ TYPE
 				END
 			END
 		END Mask;
-		
-		PROCEDURE Copy*(sx, sy, w, h, dx, dy: LONGINT);
+
+		PROCEDURE Copy*(sx, sy, w, h, dx, dy : LONGINT);
 		BEGIN
 			IF Flip THEN
 				Copy^(sx, sy, w, h, dx, dy)	(* supermethod not exclusive *)
@@ -291,10 +306,9 @@ TYPE
 				LocalAddDirty(dx, dy, dx+w,  dy+h)
 			END
 		END Copy;
-		
-		PROCEDURE &Init(name: ARRAY OF CHAR; w, h: LONGINT);
-		VAR res: LONGINT; ptr: WMWindowManager.PointerInfo; pixel: Raster.Pixel; mode: Raster.Mode;
-			manager : WMWindowManager.WindowManager;
+
+		PROCEDURE &Init(name : ARRAY OF CHAR; w, h : LONGINT);
+		VAR res : LONGINT; ptr : WM.PointerInfo; pixel : Raster.Pixel; mode : Raster.Mode;
 			s : ARRAY 16 OF CHAR;
 		BEGIN
 			ml := MAX(LONGINT); mt := MAX(LONGINT); mr := MIN(LONGINT); mb := MIN(LONGINT);
@@ -306,10 +320,10 @@ TYPE
 			NEW(inp);
 			inp.window := disp; disp.input := inp;	(* "multiple inheritance" *)
 			CASE disp.img.fmt.code OF
-				Raster.d8: format := AosDisplays.index8
-				|Raster.bgr565: format := AosDisplays.color565
-				|Raster.bgr888: format := AosDisplays.color888
-				|Raster.bgra8888: format := AosDisplays.color8888
+				| Raster.d8 :		format := AosDisplays.index8
+				| Raster.bgr565 :	format := AosDisplays.color565
+				| Raster.bgr888 :	format := AosDisplays.color888
+				| Raster.bgra8888 :	format := AosDisplays.color8888
 			END;
 			IF ~Flip THEN
 				NEW(ptr); ptr.hotX := 2; ptr.hotY := 2;
@@ -322,86 +336,111 @@ TYPE
 				disp.SetPointerInfo(ptr)
 			END;
 			IF Flip THEN
-				disp.SetTitle(WMWindowManager.NewString("Oberon for Bluebottle down under"))
+				disp.SetTitle(WM.NewString("Oberon for Bluebottle down under"))
 			ELSE
-				disp.SetTitle(WMWindowManager.NewString("Oberon for Bluebottle"))
+				disp.SetTitle(WM.NewString("Oberon for Bluebottle"))
 			END;
-			WMWindowManager.ExtAddWindow(disp, 0, 0, {WMWindowManager.FlagFrame});
-				(* register display *)
+			WM.ExtAddWindow(disp, 0, 0, {WM.FlagFrame});
+				(* Register virtual display driver *)
 			SELF.desc := "WM virtual display driver";
 			SELF.SetName(name);
 			AosDisplays.registry.Add(SELF, res);
 			ASSERT(res = 0);
-				(* register input *)
+
+				(* Register virtual input driver *)
 			inp.desc := "WM virtual input driver";
 			inp.SetName(name);
 			AosInputs.oberonInput.Add(inp, res);
 			ASSERT(res = 0)
 		END Init;
-		
+
 		PROCEDURE Finalize;
 		BEGIN
 			IF disp = NIL THEN RETURN END;
-			AosInputs.oberonInput.Remove(inp);
-			AosDisplays.registry.Remove(SELF);
+			AosInputs.oberonInput.Remove(inp);	(* Unregister virtual input driver *)
+			AosDisplays.registry.Remove(SELF);	(* Unregister virtual display driver *)
 			disp.manager.Remove(disp);	(* close window *)
-			bufimg := NIL; disp := NIL; inp := NIL;	(* cause further drawing calls to trap *)
-			IF main = SELF THEN main := NIL END
+			(* bufimg := NIL; disp := NIL; inp := NIL;	remove the potentially endless traps *)(* cause further drawing calls to trap *)
+			IF win = SELF THEN win := NIL END
 		END Finalize;
 		
 	END Display;
 
 VAR
-	main: Display;
+	win : Display;
 
-PROCEDURE Install*(par: PTR): PTR;	(** name width height ~ (separated by single spaces) *)
-VAR w, h: LONGINT; p: AosCommands.Parameters; r: AosIO.StringReader; name: ARRAY 32 OF CHAR;
+(** Usage: AosDisplayWM.Install [ name ] width [ character ] height ~
+		Default name: Oberon
+		character: single character e.g. blank or "x"	*)
+PROCEDURE Install*(par : PTR) : PTR;
+VAR w, h : LONGINT; sr : AosIO.StringReader; name : ARRAY 32 OF CHAR;
+dw, dh : LONGINT; disp : AosPlugins.Plugin;
 BEGIN
-	IF main = NIL THEN
+	IF win = NIL THEN
 		w := 0; h := 0; name := "";
 		IF par # NIL THEN
-			p := par(AosCommands.Parameters);
-			NEW(r, LEN(p.str^)); r.Set(p.str^);
-			r.SkipSpaces; r.Token(name);
-			r.SkipSpaces; r.Int(w, FALSE);
-			r.SkipBytes(1); r.Int(h, FALSE)	(* skip "x" or single space *)
+			AosCommands.PosPar(par, sr);
+			AosCommands.GetTok(sr, name);
+			sr.Int(w, FALSE);
+			sr.SkipBytes(1);	(* skip "x" or single space *)
+			 sr.Int(h, FALSE)
 		END;
 		IF name = "" THEN name := DefaultDisplayName END;
-		IF w <= 0 THEN w := DefaultWidth END;
-		IF h <= 0 THEN h := DefaultHeight END;
-		NEW(main, name, w, h)
+
+		IF (w <= 0) OR (h <= 0) THEN 
+			dw := DefaultWidth; dh := DefaultHeight; 
+			disp := AosDisplays.registry.Get("");
+			IF disp # NIL THEN
+				WITH disp: AosDisplays.Display DO
+					dw := disp.width;
+					dh := disp.height;
+				END;
+			END;
+		END;
+		IF w <= 0 THEN w := dw END;
+		IF h <= 0 THEN h := dh END;
+		NEW(win, name, w, h)
 	END;
 	RETURN NIL
 END Install;
 
 PROCEDURE Remove*(par: PTR): PTR;
 BEGIN
-	IF main # NIL THEN main.Finalize END;
+	IF win # NIL THEN win.disp.Close END;
 	RETURN NIL
 END Remove;
 
 PROCEDURE SwitchToWM*;
 BEGIN
-	IF main # NIL THEN 
+	IF win # NIL THEN 
 		(* send magic key to Oberon (assume Oberon.Loop will read it) *)
-		main.disp.InsertKey(0FEX, AosInputs.KsNil, {})
+		win.disp.InsertKey(0FEX, AosInputs.KsNil, {})
 	END 
 END SwitchToWM;
 
+PROCEDURE Cleanup;
+BEGIN
+	IF Remove(NIL) = NIL THEN END;
+END Cleanup;
 
 BEGIN
-	main := NIL
+	AosModules.InstallTermHandler(Cleanup);
 END AosDisplayWM.
 
-AosDisplayWM.Install
+AosDisplayWM.Install Oberon 1024x768;System.Init Oberon ~
 
-System.Free TempDisplayTests TempDisplay AosDisplayWM ~
+AosDisplayWM.Install 1024 768;System.Init ~
 
-TempDisplayTests.Mod
-TempDisplay.Mod
+AosDisplayWM.Remove ~
+
+S.Free AosDisplayWM ~
+
 
 (*
 o mode set every time?
 o clean up at exit
 o optimization: remove exclusive, factor out all modes (src, dst, mode combinations) [what about finalize?]
 *)
+
+Now AosOberonInput.Mod is to be removed and Aos.System.Mod simplified (AosOberonInput.Remove
+is commentarized in LoadWM)

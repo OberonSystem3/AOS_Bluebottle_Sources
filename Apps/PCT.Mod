@@ -3,14 +3,13 @@
 MODULE PCT; (** AUTHOR "prk"; PURPOSE "Parallel Compiler: symbol table"; *)
 
 IMPORT
-		AosOut, 
-		StringPool, PCM, PCS;
+	AosOut, StringPool, Utilities, PCM, PCS;
 
 CONST
 	MaxPlugins = 4;
 	
 	(** Error Codes *)
-	Ok* = 0;
+	Ok* = 0; 
 	DuplicateSymbol* = 1;
 	NotAType* = 53;
 	IllegalPointerBase* = 57;
@@ -26,13 +25,19 @@ CONST
 	NotImplemented* = 200;
 	ObjectOnly* = 249;
 	InitializerOutsideObject* = 253;
+	IndexerNotVirtual* = 991;
 
 	(** Reserved Names *)
 	BodyNameStr* = "@Body";
 	SelfNameStr* = "@Self";
 	AnonymousStr* = "@NoName";
+	PtrReturnTypeStr* = "@PtrReturnType"; (* ug *)
+	AssignIndexer*= "@AssignIndexer";
+	ReadIndexer*= "@ReadIndexer";
 
-
+	AwaitProcStr = "@AwaitProc"; (* ug *)
+	HiddenProcStr ="@tmpP"; (* ug *)	
+		
 	(**Search.mode*)
 	local* = 0;
 	
@@ -40,17 +45,20 @@ CONST
 	structdeclared* = 1;	(** all structures declared *)
 	structallocated* = 2;	(** all structures allocated (size set) *)
 	procdeclared* = 3;	(** all procedures declared *)
-	modeavailable* = 4;	(** body mode available (ACTIVE, EXCLUSIVE) *)
-	complete* = 5;	(** code available *)
+	hiddenvarsdeclared* = 4; (** all proc. calls returning pointers or delegates as hidden variables declared *)    (* ug *)
+	modeavailable* = 5;	(** body mode available (ACTIVE, EXCLUSIVE) *)
+	complete* = 6;	(** code available *)
 	
 	(** Access Flags *)
-	InternalR* = 0;	(** can read symbol in same module *)
-	InternalW* = 1;	(** can write symbol in same module *)
-	ProtectedR* = 2;	(** can read symbol in type extentions *)
-	ProtectedW* = 3;	(** can write symbol in type extentions *)
-	PublicR* = 4;	(** can read everywhere *)
-	PublicW* = 5;	(** can write everywhere *)
-	
+	HiddenRW* = 0;		(** can neither read nor write symbol in same module *)   (* ug *)
+	InternalR* = 1;		(** can read symbol in same module *)
+	InternalW* = 2;		(** can write symbol in same module *)
+	ProtectedR* = 3;	(** can read symbol in type extentions *)
+	ProtectedW* = 4;	(** can write symbol in type extentions *)
+	PublicR* = 5;		(** can read everywhere *)
+	PublicW* = 6;		(** can write everywhere *)
+
+	Hidden* = {HiddenRW};	(* ug *)	
 	Internal* = {InternalR, InternalW};
 	Protected* = {ProtectedR, ProtectedW};
 	Public* = {PublicR, PublicW};
@@ -62,7 +70,7 @@ CONST
 	exclusive* = 0; active* = 1; safe* = 2; class* = 16; interface* = 17;
 	
 	(** Symbol .flags / all *)
-	used* = 16;	(**object is accessed*)
+	used* = 16;	(**object is accessed*)		
 	
 	(** Symbol .flags / Proc only *)
 	Constructor* = 1;
@@ -70,23 +78,30 @@ CONST
 	copy* = 3;	(** copy of a method defined in a superinterface *)
 	NonVirtual* = 7;	(** Non-virtual method, cannot be overridden *)
 	Operator* = 10;
+	Indexer *= 11;
 	
 	(** Symbol .flags / Variable only *)
 	(**PCM.Untraced = 4 -> PCT.Variable only*)
 	
+	(** Parameter .flags *)
+	CParam* = PCM.CParam; (* ejz *)
+	(** Calling Conventions *)
+	OberonCC* = 1;  OberonPassivateCC* = 2;  WinAPICC* = 3; (* ejz *)	
+	
 	(** Struct flags *)
-	StaticMethodsOnly* = 5;	(** Delegate / restriction, static methods only *)
+	StaticMethodsOnly* = 5;			(** Delegate / restriction, static methods only *)
 	SystemType* = 6;				(** Record / hidden system type descs (pointer to array of pointers/descriptors), allocated by need *)
-
 	
 	(** Scope.flags *)
 	Overloading* = 31;	(**Modules only: duplicate entries allowed (applies to all scopes in the module)*)
 	AutodeclareSelf* = 30;	(**Methods only: self is automatically allocated when the method is created*)
 	SuperclassAvailable* = 29;	(**Records only: Superclass available before (or by a different thread) the actual one is entered*)
 	CanSkipAllocation* = 28; 	(** Records only: the pointer only is used, record allocation can be skipped (no need to wait for StructComplete *)
+	
+
 
 VAR
-	BodyName-, SelfName-, Anonymous-: LONGINT;	(** indexes to stringpool *)
+	BodyName-, SelfName-, Anonymous-, PtrReturnType- (* ug *) : LONGINT;	(** indexes to stringpool *)
 	
 	(*debug/trace counters*)
 	AWait, ANoWait: LONGINT;
@@ -98,8 +113,8 @@ TYPE
 
 	Struct* = POINTER TO RECORD
 		owner-: Type;	(* canonical name of structure, if any *)
-		size*: PCM.Attribute;	(* back-end: size information *)
-		sym*: PCM.Attribute;	(* fingerprinting information *)
+		size*: PCM.Attribute;		(* back-end: size information *)
+		sym*: PCM.Attribute;		(* fingerprinting information *)
 		flags-: SET;
 	END;
 	
@@ -113,7 +128,7 @@ TYPE
 			sorted-: Symbol;
 			inScope-: Scope;
 			dlink*: Symbol;	(* chain for user defined purposes *)
-			info*: PTR;	(** user defined data *)
+			info*: PTR;	(** user defined data *)  
 		
 		PROCEDURE Use;
 		BEGIN INCL(flags, used)
@@ -136,12 +151,14 @@ TYPE
 			sorted-, last-: Symbol;	(** objects in the scope; last is the last object inserted *)
 			firstValue-, lastValue-: Value;
 			firstVar-, lastVar-: Variable;
+			firstHiddenVar-, lastHiddenVar-: Variable;  (* ug *) (** variables denoting proc. calls that return pointers, not inserted in sorted list of all symbols *)
 			firstProc-, lastProc-: Proc;
 			firstType-, lastType-: Type;
 			parent-: Scope;
 			code*: PCM.Attribute;
 			imported-: BOOLEAN;	(*cached information*)
 			valueCount-, varCount-, procCount-, typeCount-: LONGINT;	(** variables/procedures in this scope. *)
+			tmpCount: LONGINT; (* ug *)
 			
 		
 		PROCEDURE Await*(state: SHORTINT);
@@ -165,10 +182,10 @@ TYPE
 			Insert(SELF, o, res);
 		END CreateSymbol;
 		
-		PROCEDURE CreateValue*(name: StringIndex; vis: SET; c: Const; VAR res: LONGINT);
+		PROCEDURE CreateValue*(name: StringIndex; vis: SET; c: Const; pos: LONGINT; (*fof*) VAR res: LONGINT);
 			VAR v: Value;
 		BEGIN
-			v := NewValue(name, vis, c);
+			v := NewValue(name, vis, c); v.pos := pos; (*fof*)
 			Insert(SELF, v, res);
 			IF res = Ok THEN
 				INC(valueCount);
@@ -177,11 +194,11 @@ TYPE
 			END
 		END CreateValue;
 		
-		PROCEDURE CreateType*(name: StringIndex;  vis: SET;  type: Struct; VAR res: LONGINT);
+		PROCEDURE CreateType*(name: StringIndex;  vis: SET;  type: Struct; pos: LONGINT; (*fof*) VAR res: LONGINT);
 			VAR t: Type;
 		BEGIN
 			NEW(t);
-			InitType(t, name, vis, type);
+			InitType(t, name, vis, type); t.pos := pos; (*fof*)
 			Insert(SELF, t, res);
 			IF res = Ok THEN
 				INC(typeCount);
@@ -200,19 +217,59 @@ TYPE
 			Insert((* scope *) SELF, v, res)
 		END CreateAlias;
 		
-		PROCEDURE CreateVar*(name: StringIndex;  vis, flags: SET;  type: Struct; VAR res: LONGINT);
+		PROCEDURE CreateVar*(name: StringIndex;  vis, flags: SET;  type: Struct; pos: LONGINT; (*fof*)  info: PTR; (* ug *) VAR res: LONGINT);
 		BEGIN  HALT(99)	(*abstract*)
 		END CreateVar;
 		
-		PROCEDURE CreateProc*(name: StringIndex;  vis, flags: SET;  scope: (*Proc*)Scope;  return: Struct; VAR res: LONGINT);
+		PROCEDURE CreateProc*(name: StringIndex;  vis, flags: SET;  scope: (*Proc*)Scope;  return: Struct; pos: LONGINT; (*fof*) VAR res: LONGINT);
 		BEGIN  HALT(99)	(*abstract*)
 		END CreateProc;
+		
+		(* ug *)
+		PROCEDURE CreateHiddenVarName*(VAR name: StringPool.Index);
+			VAR s1, s: ARRAY 256 OF CHAR;
+		BEGIN
+			Utilities.IntToStr(tmpCount, s1);
+			Utilities.Concat(HiddenProcStr, s1, s);
+			StringPool.GetIndex(s, name);
+			INC(tmpCount)
+		END CreateHiddenVarName;
+		
+		(* ug *)
+		PROCEDURE CreateAwaitProcName*(VAR name: StringPool.Index; count: LONGINT);
+			VAR s1, s: ARRAY 256 OF CHAR;
+		BEGIN
+			Utilities.IntToStr(count, s1);
+			Utilities.Concat(AwaitProcStr, s1, s);
+			StringPool.GetIndex(s, name)
+		END CreateAwaitProcName;
+		
+		(* ug *)
+		PROCEDURE FindHiddenVar*(pos: LONGINT; info: PTR): Variable;
+			VAR p: Variable; s: Scope;
+		BEGIN
+			s := SELF;
+			WHILE s IS WithScope DO s := s.parent END;
+			p := s.firstHiddenVar;
+			WHILE (p # NIL) & ((p.pos # pos) OR (p.info # info)) DO p := p.nextVar END;
+			RETURN p
+		END FindHiddenVar;
 
 	END Scope;
 	
 	WithScope* = OBJECT (Scope)
 	VAR
 		withGuard*, withSym*: Symbol;
+
+		(* ug *)
+		PROCEDURE CreateVar*(name: StringIndex;  vis, flags: SET;  type: Struct; pos: LONGINT; (*fof*)  info: PTR; VAR res: LONGINT);
+		VAR s: Scope;
+		BEGIN
+			s := parent;
+			WHILE s IS WithScope DO s := s.parent END;
+			s.CreateVar(name, vis, flags, type, pos, info, res)
+		END CreateVar;
+
 	END WithScope;
 	
 	ProcScope* = OBJECT(Scope)
@@ -220,29 +277,70 @@ TYPE
 			ownerS-: Delegate;
 			ownerO-: Proc;
 			firstPar-, lastPar-: Parameter;
-			parCount-: LONGINT;	(**parameters in this scope; set by CreatePar (includes self for methods)*)
-		
-		PROCEDURE CreateVar*(name: StringIndex;  vis, flags: SET;  type: Struct; VAR res: LONGINT);
+			formalParCount-, 			(* number of formal parameters *) (* ug *)
+			parCount-: LONGINT;		(* number of total parameters, including PtrReturnType and SELF parameters *)
+			cc-: LONGINT;
+
+		PROCEDURE &Init(); (* ejz *)
+		BEGIN
+			cc := OberonCC
+		END Init;
+
+		PROCEDURE SetCC*(cc: LONGINT);
+		BEGIN
+			SELF.cc := cc
+		END SetCC;
+
+		PROCEDURE CreateVar*(name: StringIndex;  vis, flags: SET;  type: Struct; pos: LONGINT; (*fof*) info: PTR; (*ug*) VAR res: LONGINT);
 			VAR v: LocalVar;
 		BEGIN
-			NEW(v);
+			NEW(v); v.pos := pos; (*fof*) 
 			InitSymbol(v, name, vis, type);
 			v.flags := flags;
+			v.info := info; (* ug *)
 			v.level := ownerO.level;
 			CheckVar(v, {static, open}, res);
 			IF (v.type IS Array) & (v.type(Array).mode IN {open}) & ~v.type(Array).isDynSized THEN
 				res := IllegalType; v.type := UndefType;
 			END;
-			Insert(SELF, v, res);
-			IF res = Ok THEN
-				INC(varCount);
-				IF lastVar = NIL THEN firstVar := v ELSE lastVar.nextVar := v END;
-				lastVar := v
+			IF vis = Hidden THEN (* ug *)
+				IF lastHiddenVar = NIL THEN firstHiddenVar := v ELSE lastHiddenVar.nextVar := v END;
+				lastHiddenVar := v;
+				res := Ok
+			ELSE
+				Insert(SELF, v, res);
+				IF res = Ok THEN
+					INC(varCount);
+					IF lastVar = NIL THEN firstVar := v ELSE lastVar.nextVar := v END;
+					lastVar := v
+				END
 			END
 		END CreateVar;
 		
+		PROCEDURE ReversePars*(); (* ejz *)
+			VAR p, next: Parameter;
+		BEGIN
+			p := firstPar; firstPar := NIL; lastPar := p;
+			WHILE p # NIL DO
+				next := p.nextPar;
+				p.nextPar := firstPar; firstPar := p;
+				p := next
+			END
+		END ReversePars;
+
 		PROCEDURE CreatePar*(vis: SET;  ref: BOOLEAN;  name: StringIndex;  flags: SET;  type: Struct; VAR res: LONGINT);
 			VAR p: Parameter;
+
+			(* ug *)			
+			PROCEDURE IsHiddenPar(name: StringIndex): BOOLEAN;
+			BEGIN
+				IF (name = PtrReturnType) OR (name = SelfName) THEN 
+					RETURN TRUE 
+				ELSE 
+					RETURN FALSE 
+				END
+			END IsHiddenPar;
+			
 		BEGIN
 			NEW(p);
 			InitSymbol(p, name, vis, type);
@@ -252,15 +350,17 @@ TYPE
 			Insert(SELF, p, res);
 			IF res = Ok THEN
 				INC(parCount);
+				IF ~IsHiddenPar(name) THEN INC(formalParCount) END; (* ug *)
 				IF lastPar = NIL THEN firstPar := p ELSE lastPar.nextPar := p END;
 				lastPar := p
 			END
 		END CreatePar;
-		
-		PROCEDURE CreateProc*(name: StringIndex;  vis, flags: SET;  scope: (*Proc*)Scope;  return: Struct; VAR res: LONGINT);
+
+		PROCEDURE CreateProc*(name: StringIndex;  vis, flags: SET;  scope: (*Proc*)Scope;  return: Struct; pos: LONGINT; (*fof*) VAR res: LONGINT);
 			VAR p: Proc;
 		BEGIN
 			p := NewProc(vis, name, flags, scope(ProcScope), return, res);
+			p.pos := pos; (*fof*)
 			Insert(SELF, p, res);
 			IF res = Ok THEN
 				INC(procCount);
@@ -278,14 +378,16 @@ TYPE
 			firstMeth-, lastMeth-: Method;
 			totalVarCount-, totalProcCount-: LONGINT;	(**var/proc count including base type (overwritten method are counted only once)*)
 		
-		PROCEDURE CreateVar*(name: StringIndex;  vis, flags: SET;  type: Struct; VAR res: LONGINT);
+		PROCEDURE CreateVar*(name: StringIndex;  vis, flags: SET;  type: Struct; pos: LONGINT; (*fof*) info : PTR; (*ug*) VAR res: LONGINT);
 			VAR f: Field; obj: Symbol;
 		BEGIN
+			ASSERT(vis # Hidden);
 			IF CheckForRecursion(type, owner) THEN
 				res := RecursiveType;
 				type := Int32 (*NoType -> trap in TypeSize*)
 			END;
-			NEW(f); InitSymbol(f, name, vis, type); f.flags := flags; CheckVar(f, {static}, res);
+			NEW(f); f.pos := pos; (*fof*) InitSymbol(f, name, vis, type); f.flags := flags; CheckVar(f, {static}, res);
+			f.info := info; (* ug *)
 			IF (SuperclassAvailable IN flags) & (owner.brec # NIL) THEN	(*import: already ok*)
 				obj := Find(SELF, owner.brec.scope, name, structdeclared, FALSE);
 				IF obj # NIL THEN  res := DuplicateSymbol END
@@ -298,13 +400,14 @@ TYPE
 			END
 		END CreateVar;
 
-		PROCEDURE CreateProc*(name: StringIndex;  vis, flags: SET;  scope: (*Proc*)Scope;  return: Struct; VAR res: LONGINT);
+		PROCEDURE CreateProc*(name: StringIndex;  vis, flags: SET;  scope: (*Proc*)Scope;  return: Struct; pos: LONGINT; (*fof*) VAR res: LONGINT);
 			VAR m: Method;
 		BEGIN
 			m := NewMethod(vis, name, flags, scope(ProcScope), return, owner, res);
+			m.pos := pos; (* fof *)
 			Insert(SELF, m, res);
 			IF res = Ok THEN
-				INC(procCount);
+				INC(procCount);				
 				IF lastMeth = NIL THEN
 					firstProc := m; firstMeth := m
 				ELSE
@@ -323,22 +426,30 @@ TYPE
 			records-: Record;
 			nofRecs-: INTEGER;
 		
-		PROCEDURE CreateVar*(name: StringIndex;  vis, flags: SET;  type: Struct; VAR res: LONGINT);
+		PROCEDURE CreateVar*(name: StringIndex;  vis, flags: SET;  type: Struct; pos: LONGINT; (*fof*) info: PTR; (*ug*) VAR res: LONGINT);
 			VAR v: GlobalVar;
 		BEGIN
-			NEW(v); InitSymbol(v, name, vis, type); v.flags := flags; CheckVar(v, {static}, res);
-			Insert(SELF, v, res);
-			IF res = Ok THEN
-				INC(varCount);
-				IF lastVar = NIL THEN firstVar := v ELSE lastVar.nextVar := v END;
-				lastVar := v
-			END;
+			NEW(v); v.pos := pos; (*fof*) InitSymbol(v, name, vis, type); v.flags := flags; CheckVar(v, {static}, res);
+			v.info := info; (* ug *)
+			IF vis = Hidden THEN (* ug *)
+				IF lastHiddenVar = NIL THEN firstHiddenVar := v ELSE lastHiddenVar.nextVar := v END;
+				lastHiddenVar := v;
+				res := Ok
+			ELSE
+				Insert(SELF, v, res);
+				IF res = Ok THEN
+					INC(varCount);
+					IF lastVar = NIL THEN firstVar := v ELSE lastVar.nextVar := v END;
+					lastVar := v
+				END
+			END
 		END CreateVar;
 
-		PROCEDURE CreateProc*(name: StringIndex;  vis, flags: SET;  scope: (*Proc*)Scope;  return: Struct; VAR res: LONGINT);
+		PROCEDURE CreateProc*(name: StringIndex;  vis, flags: SET;  scope: (*Proc*)Scope;  return: Struct; pos: LONGINT; (*fof*) VAR res: LONGINT);
 			VAR p: Proc;
 		BEGIN
 			p := NewProc(vis, name, flags, scope(ProcScope), return, res);
+			p.pos := pos; (* fof *)
 			Insert(SELF, p, res);
 			IF res = Ok THEN
 				INC(procCount);
@@ -347,9 +458,10 @@ TYPE
 			END;
 		END CreateProc;
 
-		PROCEDURE AddModule*(alias: StringIndex; m: Module; VAR res: LONGINT);
+		PROCEDURE AddModule*(alias: StringIndex; m: Module; pos: LONGINT; (* fof *) VAR res: LONGINT);
 		BEGIN
-			Insert(SELF, NewModule(alias, TRUE, m.flags, m.scope), res)
+			Insert(SELF, NewModule(alias, TRUE, m.flags, m.scope), res);
+			m.pos := pos; (* fof *)
 		END AddModule;
 
 	END ModScope;
@@ -379,7 +491,7 @@ TYPE
 		imported-: BOOLEAN;
 		link-: Record;	(** Module.records, embedded list *)
 		(*td*: PCM.Attribute;	(**type descriptor*) in PCBT.RecSize*)
-		pvused*, pbused*: BOOLEAN;	(*what features of the record are used, to decide which fp to use [pvfp/pbfp]*)
+		pvused*, pbused*: BOOLEAN;	(*what features of the record are used, to decide which fp to use [pvfp/pbfp]*)		
 	END;
 	
 	Pointer* = POINTER TO RECORD (Struct) 
@@ -411,11 +523,13 @@ TYPE
 	
 	Value* = POINTER TO RECORD (Symbol) 
 		const-: Const;
+		pos-: LONGINT; (*fof*)
 		nextVal-: Value;	(** next value in scope (by insertion order) *)
 	END;
 	
 	Variable* = POINTER TO RECORD (Symbol) 
 		level-: SHORTINT;	(**LocalVar and Parameter only*)
+		pos-: LONGINT; (*fof*) 
 		nextVar-: Variable;	(** next variable in scope (by insertion order) *)
 	END;
 	
@@ -440,19 +554,21 @@ TYPE
 	
 	Proc* = POINTER TO RECORD (Symbol) 
 		scope-: ProcScope;
+		pos-: LONGINT; (*fof*)
 		nextProc-: Proc;
-		level-: SHORTINT
+		level-: SHORTINT;		
 	END;
 	
 	Method* = POINTER TO RECORD (Proc) 
 		super-: Method;
 		boundTo-: Record;
 		self-: Parameter;
-		nextMeth-: Method;
+		nextMeth-: Method;										
 	END;
 	
 	Type* = OBJECT (Symbol) 
 		VAR
+			pos-: LONGINT; (*fof*)
 			nextType-: Type;
 			
 		PROCEDURE Use;
@@ -467,6 +583,7 @@ TYPE
 	
 	Module* = OBJECT (Symbol) 
 		VAR
+			pos-: LONGINT; (* fof *)
 			scope-: ModScope;
 			imported-, sysImported-: BOOLEAN;
 			imports*: ModuleArray;	(** directly and indirectly imported modules, no duplicates allowed, no aliases *)
@@ -513,13 +630,15 @@ TYPE
 VAR
 	Byte-, Bool-, Char8-, Char16-, Char32-: Struct;
 	Int8-, Int16-, Int32-, Int64-, Float32-, Float64-: Struct;
-	Set-, Ptr-, String-, NilType-, NoType-, UndefType-: Struct;
+	Set-, Ptr-, String-, NilType-, NoType-, UndefType-, Address*, SetType*, Size*: Struct;
 	NumericType-: ARRAY 6 OF Basic;	(**Int8 .. Float64*)
 	CharType-: ARRAY 3 OF Basic;	(** Char8 .. Char32 *)
-	PreAllocate*, Allocate*, PostAllocate*: PROCEDURE (context, scope: Scope);
+	Allocate*: PROCEDURE(context, scope: Scope; hiddenVarsOnly: BOOLEAN); (* ug *)
+	PreAllocate*, PostAllocate*: PROCEDURE (context, scope: Scope); (* ug *)
 	Universe-, System-: Module;
 	True-, False-: Const;
-	
+	SystemAddress-, SystemSize-: Type;
+	AddressSize*, SetSize*: LONGINT;	
 	
 	import: ARRAY MaxPlugins OF ImporterPlugin;
 	nofImportPlugins: LONGINT;
@@ -559,6 +678,57 @@ VAR
 	PROCEDURE IsPointer*(t: Struct): BOOLEAN;
 	BEGIN  RETURN (t = Ptr) OR (t = NilType) OR (t IS Pointer)
 	END IsPointer;
+
+(* ug: new procedure *)	
+(* This procedure was necessary to insert because the parser must know whether a type contains pointers at the state PCT.structdeclared.
+    The procedure PCV.TypeSize computes the size of a type and as a side effect sets the field containPtrs of the size object. However, this occurs 
+    sometimes too late for the parser, namely at the state change to PCT.structallocated. 
+    It is the programmer's responsability not to call the following procedure before t's scope has reached PCT.structdeclared. *)
+	PROCEDURE ContainsPointer*(t: Struct): BOOLEAN; 
+		VAR b: BOOLEAN; f: Variable;
+	BEGIN
+		IF (t IS Pointer) OR (t = Ptr)  THEN  (* PTR/ANY, generic object type or open array *)
+			RETURN TRUE
+		ELSIF t IS Record THEN
+			WITH t: Record DO
+				IF t.brec # NIL THEN
+					b:= ContainsPointer(t.brec)
+				END;
+				f := t.scope.firstVar;
+				WHILE (f # NIL) & ~b DO
+					b := ContainsPointer(f.type);
+					f := f.nextVar
+				END
+			END;
+			RETURN b
+		ELSIF (t IS Array) & (t(Array).mode = static) THEN
+			RETURN ContainsPointer(t(Array).base)
+		ELSIF (t IS Delegate) & ~(StaticMethodsOnly IN t.flags) THEN
+			RETURN TRUE
+		ELSE RETURN FALSE
+		END
+	END ContainsPointer;
+
+	(* ug *)	
+	PROCEDURE IsOpenArrayContainingPtr*(t: Struct): BOOLEAN;
+	BEGIN
+		IF (t IS Array) & (t(Array).mode = open) THEN
+			WHILE (t IS Array) & (t(Array).mode = open) DO
+				t := t(Array).base
+			END;
+			RETURN ContainsPointer(t)
+		ELSE
+			RETURN FALSE
+		END;
+	END IsOpenArrayContainingPtr;
+	
+	PROCEDURE IsStaticDelegate*(t: Struct): BOOLEAN;
+	BEGIN RETURN (t IS Delegate) & (StaticMethodsOnly IN t.flags)
+	END IsStaticDelegate;
+	
+	PROCEDURE IsDynamicDelegate*(t: Struct): BOOLEAN;
+	BEGIN RETURN (t IS Delegate) & ~(StaticMethodsOnly IN t.flags)
+	END IsDynamicDelegate;
 	
 	PROCEDURE IsRecord*(t: Struct): BOOLEAN;
 	BEGIN
@@ -859,7 +1029,7 @@ VAR
 			WHILE (p # NIL) & (StringPool.CompareString(p.name, obj.name) < 0) DO  q := p; p := p.sorted  END;
 			IF (p = NIL) OR (p.name # obj.name) THEN
 				(* ok *)
-			ELSIF (Overloading IN scope.module.scope.flags) OR (Operator IN obj.flags) THEN
+			ELSIF (Overloading IN scope.module.scope.flags) OR ((Operator IN obj.flags) & ~(Indexer IN obj.flags)) THEN
 				IF obj IS Proc THEN
 					WITH obj: Proc DO
 						IF ~(p IS Proc) THEN q := p; p := p.sorted END;
@@ -888,8 +1058,8 @@ VAR
 			END
 		END
 	END Insert;
-	
-	PROCEDURE Lookup(scope: Scope;  name: StringIndex): Symbol;
+
+	PROCEDURE Lookup(scope: Scope; name: StringIndex): Symbol;
 	VAR  p: Symbol;
 	BEGIN
 		(* it is cheaper to traverse the whole list, than to compare the strings *)
@@ -902,12 +1072,23 @@ VAR
 		END;
 		RETURN p
 	END Lookup;
+
+	(* ug *)	
+	PROCEDURE HiddenVarExists*(scope: Scope; info: PTR): BOOLEAN;
+		VAR v: Variable;
+	BEGIN
+		v := scope.firstHiddenVar;
+		WHILE (v # NIL) & ((v.vis # Hidden) OR (v.info # info)) DO v := v.nextVar END;			
+		RETURN v # NIL
+	END HiddenVarExists;
 	
 	PROCEDURE IsVisible(vis: SET; current, search: Scope;  localsearch: BOOLEAN): BOOLEAN;
 		VAR res: BOOLEAN; rec, tmp: Record;
 	BEGIN
 		res := FALSE;
-		IF current = search THEN
+		IF HiddenRW IN vis THEN (* ug *)
+			res := FALSE
+		ELSIF current = search THEN
 			res := TRUE
 		ELSIF PublicR IN vis THEN
 			res := TRUE
@@ -975,19 +1156,34 @@ VAR
 		END;
 		IF mark & (p # NIL) THEN p.Use END;
 		RETURN p
-	END Find;
+	END Find;	
 
-	PROCEDURE FindOperator*(current, search: Scope; parents: BOOLEAN; name: StringIndex; pars: ARRAY OF Struct; pos: LONGINT): Proc;
+
+	PROCEDURE FindIndexer*(scope: RecScope; name: StringIndex): Method;
+	VAR s: Symbol;
+	BEGIN
+		IF scope = NIL THEN RETURN NIL END;
+		s := Lookup(scope, name);
+		IF (s # NIL) & (s IS Method) THEN RETURN s(Method) ELSE 
+			IF scope.owner.brec # NIL THEN
+				RETURN FindIndexer(scope.owner.brec.scope, name) 
+			ELSE
+				RETURN NIL
+			END
+		END
+	END FindIndexer;
+	
+
+	PROCEDURE FindOperator*(current, search: Scope; parents: BOOLEAN; name: StringIndex; pars: ARRAY OF Struct; parCount (*ug*), pos: LONGINT): Proc;
 	VAR
 		p: Symbol;
 		hitProc: Proc;
 		hitScope: Scope;
-		parCount, dist, hit, i: LONGINT;
+		dist, hit, i: LONGINT;
 		hitClash, localDone: BOOLEAN;
 	BEGIN
 		localDone := FALSE;
 		hitClash := FALSE;
-		parCount := LEN(pars);
 		hit := MAX(LONGINT);
 		hitProc := NIL;		
 		i := 0;
@@ -997,9 +1193,9 @@ VAR
 		WHILE ~localDone DO		
 			p := Lookup(search, name);
 			WHILE (p # NIL) & (p.name = name) DO
-				IF (p IS Proc) & (p(Proc).scope.parCount = parCount) THEN
+				IF (p IS Proc) & (p(Proc).scope.formalParCount = parCount) THEN (* ug *)
 					IF IsVisible(p.vis, current, search, current = search) THEN
-						dist := Distance(pars, p(Proc).scope.firstPar);
+						dist := Distance(pars, p(Proc).scope.firstPar, parCount (* ug *)); 
 						(* dist := SignatureDistance0(parCount, pars, p(Proc).scope.firstPar); *)
 						IF dist >= MAX(LONGINT) THEN
 							(* operator not applicable *)
@@ -1042,9 +1238,9 @@ VAR
 				IF (PCM.GetProcessID() # search(ModScope).owner.imports[i].scope.ownerID) THEN search.Await(procdeclared) END;
 				p := Lookup(search(ModScope).owner.imports[i].scope, name);
 				WHILE (p # NIL) & (p.name = name) DO
-					IF (p IS Proc) & (p(Proc).scope.parCount = parCount) THEN
+					IF (p IS Proc) & (p(Proc).scope.formalParCount = parCount) (* ug *) THEN
 						IF IsVisible(p.vis, current, search(ModScope).owner.imports[i].scope, current = search(ModScope).owner.imports[i].scope) THEN
-							dist := Distance(pars, p(Proc).scope.firstPar);
+							dist := Distance(pars, p(Proc).scope.firstPar, parCount (* ug *));
 							(* dist := SignatureDistance0(parCount, pars, p(Proc).scope.firstPar); *)
 							IF dist >= MAX(LONGINT) THEN
 								(* operator not applicable *)
@@ -1076,12 +1272,12 @@ VAR
 		AosOut.String(str);
 	END PrintString;
 	
-	PROCEDURE Distance(pars: ARRAY OF Struct; param: Parameter): LONGINT;
+	PROCEDURE Distance(pars: ARRAY OF Struct; param: Parameter; parCount: LONGINT (* ug *)): LONGINT;
 	VAR dist, res, i: LONGINT;
 		baseA, baseF: Struct;
 	BEGIN
 		dist := 0;
-		FOR i := 0 TO LEN(pars)-1 DO
+		FOR i := 0 TO parCount-1 DO (* ug *)
 			IF (pars[i] = NilType) OR (param.type = NilType) THEN
 				RETURN MAX(LONGINT);
 			END;
@@ -1113,7 +1309,7 @@ VAR
 	END Distance;
 
 	PROCEDURE FindProcedure*(current, search: Scope;  name: StringIndex;  parCount: LONGINT;  pars: ARRAY OF Struct; identicSignature, mark: BOOLEAN): Proc;
-		VAR p: Symbol; hitProc: Proc; rec: Record; backtrack: Scope; localsearch: BOOLEAN; totCount, hit, dist: LONGINT;
+		VAR p: Symbol; hitProc: Proc; rec: Record; backtrack: Scope; localsearch: BOOLEAN; totCount, hit, dist: LONGINT;		
 	BEGIN
 		IF identicSignature THEN hit := 1 ELSE hit := MAX(LONGINT) END;
 		localsearch := current = search;
@@ -1121,14 +1317,14 @@ VAR
 		IF (search IS RecScope) THEN
 			INC(totCount);	(* include SELF *)
 			rec := search(RecScope).owner;
-			IF localsearch THEN  backtrack := search.parent  END	(*allow search outside the record hierarchy*)
+			IF localsearch THEN backtrack := search.parent  END	(*allow search outside the record hierarchy*)
 		END;
 		
 		WHILE (hit # 0) & (search # NIL) DO
 			IF (PCM.GetProcessID() # search.ownerID) THEN search.Await(procdeclared) END;
 			p := Lookup(search, name);
-			
-			WHILE (p # NIL) & (p.name = name) DO
+						
+			WHILE (p # NIL) & (p.name = name) DO			
 				IF IsVisible(p.vis, current, search, localsearch) & (p IS Proc) THEN
 					WITH p: Proc DO
 						IF (totCount = p.scope.parCount) THEN
@@ -1195,7 +1391,11 @@ VAR
 			CASE scope.state+1 OF
 			|  structdeclared:
 			|  structallocated:
-					IF scope.imported THEN Allocate(NIL, scope) ELSE Allocate(scope.module.scope, scope) END;
+					IF scope.imported THEN 
+						Allocate(NIL, scope, FALSE) 					(* ug: hiddenVarsOnly = FALSE *)
+					ELSE 
+						Allocate(scope.module.scope, scope, FALSE)	(* ug: hiddenVarsOnly = FALSE *) 
+					END;
 			|  procdeclared:
 					IF (scope IS RecScope) THEN
 						rscope := scope(RecScope); rec := rscope.owner;
@@ -1208,7 +1408,7 @@ VAR
 							mth := rscope.firstMeth;
 							WHILE mth# NIL DO
 								IF ~(NonVirtual IN mth.flags) THEN
-									mth.super := FindOverwrittenMethod(rec, mth.name, mth.scope, res); ASSERT(res = Ok)
+									mth.super := FindOverwrittenMethod(rec, mth.name, mth.scope,res); ASSERT(res = Ok)
 								END;
 								IF mth.super # NIL THEN DEC(rscope.totalProcCount) END;
 								mth := mth.nextMeth
@@ -1234,6 +1434,12 @@ VAR
 						IF res # 0 THEN PCM.Error(res, pos, "") END
 					END;
 					PostAllocate(NIL, scope)
+			|  hiddenvarsdeclared: 
+					IF scope.imported THEN 
+						Allocate(NIL, scope, TRUE) 					(* ug: hiddenVarsOnly = TRUE *)
+					ELSE 
+						Allocate(scope.module.scope, scope, TRUE)	(* ug: hiddenVarsOnly = TRUE *) 
+					END;
 			|  modeavailable:
 			|  complete:
 			END;
@@ -1455,7 +1661,7 @@ VAR
 					par := par.nextPar
 				END;
 				f := m.flags;
-				scope.CreateProc(m.name, m.vis, m.flags-{used}+{copy}, s, m.type, res);
+				scope.CreateProc(m.name, m.vis, m.flags-{used}+{copy}, s, m.type, 0(*fof*), res);
 				IF res = 1 THEN
 					AosOut.String("CopyMethods: Duplicate Interface Method"); AosOut.Ln;
 					res := 0
@@ -1465,7 +1671,7 @@ VAR
 			END;
 			INC(i);
 		END;
-	END CopyMethods;
+	END CopyMethods;	
 
 	PROCEDURE InitRecord*(r: Record;  base: Struct;  intf: Interfaces; scope: RecScope;  isInterface, isImported, isDynamic: BOOLEAN; VAR res: LONGINT);
 		VAR i: LONGINT;
@@ -1581,7 +1787,7 @@ VAR
 		ASSERT(scope # NIL, 501);
 		ASSERT(scope.ownerS = NIL, 502);
 		ASSERT(scope.ownerO = NIL, 503);
-		ASSERT(flags - {StaticMethodsOnly} = {}, 504);
+		ASSERT(flags - {StaticMethodsOnly, CParam} = {}, 504); (* ejz *)
 		p.return := return; p.scope := scope; scope.ownerS := p;
 		p.flags := flags;
 		IF ~IsLegalReturnType(return) THEN
@@ -1662,7 +1868,7 @@ VAR
 	PROCEDURE FindOverwrittenMethod(owner: Record; name: StringPool.Index; mscope: ProcScope; VAR res: LONGINT): Method;
 		VAR pars: ARRAY 32 OF Struct; i, parCount: LONGINT; obj: Symbol; super: Method; par: Parameter;
 	BEGIN
-		IF owner.brec # NIL THEN
+		IF owner.brec # NIL THEN					
 			IF Overloading IN owner.brec.scope.module.scope.flags THEN
 				ASSERT(mscope.lastPar.name = SelfName);
 				parCount := mscope.parCount-1;
@@ -1670,7 +1876,7 @@ VAR
 				WHILE i < parCount DO pars[i] := par.type; INC(i); par := par.nextPar END;
 				ASSERT(par = mscope.lastPar);
 				obj := FindProcedure(owner.scope, owner.brec.scope, name, parCount, pars, TRUE, FALSE);
-			ELSE
+			ELSE				
 				obj := Find(owner.scope, owner.brec.scope, name, procdeclared, FALSE)
 			END;
 			IF obj # NIL THEN
@@ -1681,7 +1887,7 @@ VAR
 	END FindOverwrittenMethod;
 	
 	PROCEDURE NewMethod(vis: SET;  name: StringIndex;  flags: SET;  scope: ProcScope;  return: Struct;  boundTo: Record; VAR res: LONGINT): Method;
-	VAR p: Method;  faulty: Symbol; initializer: BOOLEAN;
+	VAR p: Method;  faulty: Symbol; initializer: BOOLEAN; 
 	BEGIN
 		res := Ok;
 		ASSERT(boundTo # NIL, 500);
@@ -1689,12 +1895,17 @@ VAR
 		IF Constructor IN flags THEN
 			initializer := TRUE; EXCL(flags, Constructor); vis := Public
 		END;
-		NEW(p);
-		IF flags -{copy, NonVirtual} # {} THEN res := 606(*NotImplemented*) END;
+		NEW(p);		
+		IF Indexer IN flags THEN
+			IF flags -{copy, NonVirtual, Operator, Indexer, Inline} # {} THEN res := 606(*NotImplemented*) END;		
+		ELSE
+			IF flags -{copy, NonVirtual} # {} THEN res := 606(*NotImplemented*) END;		
+		END;
+		
 		p.flags := flags;
 		p.boundTo := boundTo;
 
-		IF (SuperclassAvailable IN boundTo.scope.flags) & ~(NonVirtual IN flags) THEN
+		IF (SuperclassAvailable IN boundTo.scope.flags) & ~(NonVirtual IN flags) THEN			
 			p.super := FindOverwrittenMethod(boundTo, name, scope, res)
 		END;
 		IF AutodeclareSelf IN scope.flags THEN
@@ -1714,12 +1925,15 @@ VAR
 		ASSERT(p.self.name = SelfName);
 		InitProc(p, vis, name, scope, return, res);	(*InitProc creates the param-list, thus self must be already allocated*)
 		IF p.super # NIL THEN
-			IF ~ParameterMatch(scope.firstPar, p.super.scope.firstPar, faulty) THEN
+			IF (Indexer IN flags) & (Inline IN p.super.flags) THEN				
+				res := 992
+			ELSIF ~ParameterMatch(scope.firstPar, p.super.scope.firstPar, faulty) THEN
 				res := ParameterMismatch
 			ELSIF ~EqualTypes(return, p.super.type) THEN
 				res := ReturnMismatch
 			END
 		END;
+				
 		IF p.name = BodyName THEN
 			IF (boundTo.scope.body = NIL) & ((boundTo.ptr # NIL) OR ~(SuperclassAvailable IN boundTo.scope.flags)) THEN
 				boundTo.scope.body := p
@@ -1746,7 +1960,7 @@ VAR
 		NEW(m); 
 		m.name :=  name;
 		m.scope := scope; m.imported := imported; scope.module := m;
-		m.vis := Internal;
+		m.vis := Internal;		
 		IF scope.owner = NIL THEN
 			scope.owner := m;
 			IF imported THEN  PreAllocate(NIL, scope)  ELSE  PreAllocate(scope, scope)  END
@@ -1896,15 +2110,20 @@ VAR
 	
 	(* ---------------- Module Initialisation ------------------- *)
 
-	PROCEDURE DummyAllocate(context, scope: Scope);
+	PROCEDURE DummyAllocate(context, scope: Scope; hiddenVarsOnly: BOOLEAN (* ug *)); 
 	BEGIN
 	END DummyAllocate;
+
+	(* ug *)
+	PROCEDURE DummyPrePostAllocate(context, scope: Scope);
+	BEGIN
+	END DummyPrePostAllocate;
 
 	PROCEDURE NewBasic(m: Module;  name: ARRAY OF CHAR): Basic;
 	VAR b: Basic; res: LONGINT;
 	BEGIN
 		NEW(b);
-		m.scope.CreateType(StringPool.GetIndex1(name), Public, b, res); ASSERT(res = Ok);
+		m.scope.CreateType(StringPool.GetIndex1(name), Public, b, 0 (* fof *), res); ASSERT(res = Ok);
 		RETURN b
 	END NewBasic;
 	
@@ -1915,6 +2134,7 @@ VAR
 		BodyName := StringPool.GetIndex1(BodyNameStr);
 		SelfName := StringPool.GetIndex1(SelfNameStr);
 		Anonymous := StringPool.GetIndex1(AnonymousStr);
+		PtrReturnType := StringPool.GetIndex1(PtrReturnTypeStr); (* ug *)
 		
 		NEW(scope); InitScope(scope, NIL, {}, TRUE); SetOwner(scope);
 		idx := StringPool.GetIndex1("Universe");
@@ -1928,7 +2148,7 @@ VAR
 		Bool := NewBasic(Universe, "BOOLEAN");
 		CharType[0] := NewBasic(Universe, "CHAR"); Char8 := CharType[0];
 		IF PCM.LocalUnicodeSupport THEN
-			Universe.scope.CreateType(StringPool.GetIndex1("CHAR8"), Public, Char8, res); ASSERT(res = Ok);
+			Universe.scope.CreateType(StringPool.GetIndex1("CHAR8"), Public, Char8, 0(*fof*), res); ASSERT(res = Ok);
 			CharType[1] := NewBasic(Universe, "CHAR16"); Char16 := CharType[1];
 			CharType[2] := NewBasic(Universe, "CHAR32"); Char32 := CharType[2]
 		END;
@@ -1941,17 +2161,26 @@ VAR
 		Set := NewBasic(Universe, "SET");
 			(* adapt when moving from PTR to ANY, delete temporary code in PCS.Scanner.Identifier *)
 		Ptr := NewBasic(Universe, "PTR");
-		System.scope.CreateType(Ptr.owner.name, Public, Ptr, res); ASSERT(res = Ok);
+		System.scope.CreateType(Ptr.owner.name, Public, Ptr, 0(*fof*), res); ASSERT(res = Ok);
 		NEW(String);
 		NEW(NilType);
 		NEW(NoType);
 		NEW(UndefType);
 		True := NewBoolConst(TRUE);
 		False := NewBoolConst(FALSE);
+		
+		(* actual size will be patched later *)
+		System.scope.CreateType (StringPool.GetIndex1("ADDRESS"), Public, Int32, 0, res); ASSERT(res = Ok);
+		SystemAddress := System.scope.lastType;
+		
+		(* actual size will be patched later *)
+		System.scope.CreateType (StringPool.GetIndex1("SIZE"), Public, Int32, 0, res); ASSERT(res = Ok);
+		SystemSize := System.scope.lastType;
+		
 	END Init;
 
 BEGIN
-	PreAllocate := DummyAllocate; Allocate := DummyAllocate; PostAllocate := DummyAllocate;
+	PreAllocate := DummyPrePostAllocate; (* ug *) Allocate := DummyAllocate; PostAllocate := DummyPrePostAllocate; (* ug *)
 	Init
 END PCT.
 

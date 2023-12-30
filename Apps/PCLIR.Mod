@@ -3,7 +3,7 @@
 MODULE PCLIR; (** AUTHOR "prk / be"; PURPOSE "Parallel Compiler: intermediate code representation"; *)
 
 IMPORT
-		AosBoot, AosOut,
+		AosKernel, AosOut,
 		PCM, PCBT;
 
 
@@ -23,8 +23,6 @@ CONST
 	NoSize* = 0;
 	Int8* = 1;  Int16* = 2;  Int32* = 3;  Int64* = 4;  Float32* = 5;  Float64* = 6;
 	IntSize* = {Int8..Int64};  FloatSize* = {Float32 .. Float64};
-	
-	Address* = Int32;
 	
 	(**Special Register Values*)
 	none* = -1;  FP* = -2;  SP* = -3;  Absolute* = -4;
@@ -210,10 +208,10 @@ Remarks:
 	sub* =  59; add* =  60; and* =  61; or* =  62; xor* =  63; bts* =  64; 
 	btc* =  65; ash* =  66; bsh* =  67; rot* =  68; phi* =  69; move* =  70; 
 	inline* =  71; case* =  72; casel* =  73; casee* =  74; loadfp* = 75;
-	moveDown* = 76;
+	moveDown* = 76; finallylabel* = 77;
 
 	
-	NofOpcodes* = moveDown+1;
+	NofOpcodes* = finallylabel+1;
 
 		(*Module Configuration*)
 	PieceLen = 128;	(*size of a code piece (in instructions). TO BE TUNED*)
@@ -237,7 +235,7 @@ TYPE
 		
 		PROCEDURE & Init;
 		BEGIN len := 0; next := NIL; prev := NIL;
-			IF Statistics THEN  AosBoot.Inc(aPieceCount)  END
+			IF Statistics THEN  AosKernel.AtomicInc(aPieceCount)  END
 		END Init;
 	END Piece;
 	
@@ -299,7 +297,7 @@ TYPE
 
 		PROCEDURE & Init;
 		BEGIN
-			IF Statistics THEN  AosBoot.Inc(aCodeCount)  END;
+			IF Statistics THEN  AosKernel.AtomicInc(aCodeCount)  END;
 			NEW(first);  last := first;  barrier := 0
 		END Init;
 	END Code;
@@ -341,6 +339,7 @@ TYPE
 		Optimize*: PROCEDURE (code: Code);
 		GetCode*: GetCodeHandler;
 		DumpCode*: TraverseProc;
+		ParamAlign*: LONGINT;
 	END;
 
 
@@ -348,6 +347,8 @@ VAR
 	InstructionSet*: InstructionSetDescription;
 	InstructionInit*: PROCEDURE (VAR instr: Instruction);	(* plug-in, called whenever an instruction is created *)
 	CG*: CodeGenerator;
+	
+	Address*, Set*, SizeType*: Size;
 
 	RegName: ARRAY 8 OF CHAR;
 
@@ -456,7 +457,7 @@ VAR
 	
 	PROCEDURE EmitLoadRelative*(code: Code; size: Size; signed: BOOLEAN; VAR dest: Register; offset: LONGINT; base: Register);
 	BEGIN
-		ASSERT(Address = SizeOf(code, base),113);
+	(*	ASSERT(Address = SizeOf(code, base),113); *)
 		dest := code.pc;
 		NewInstr(code, load, size, signed, offset, base, none, none, NIL); 
 		Use(code, base);
@@ -487,14 +488,19 @@ VAR
 		NewInstr(code, call, NoSize, FALSE, none, none, none, none, proc);
 	END EmitCall;
 	
-	PROCEDURE EmitEnter*(code: Code;  callconv: LONGINT;  proc: PCM.Attribute);
+	PROCEDURE EmitEnter*(code: Code;  callconv: LONGINT;  attr: PCM.Attribute);
 	BEGIN
-		NewInstr(code, enter, NoSize, FALSE, callconv, none, none, none, proc);
+		NewInstr(code, enter, NoSize, FALSE, callconv, none, none, none, attr);
 	END EmitEnter;
-	
-	PROCEDURE EmitExit*(code: Code;  callconv, parSize: LONGINT);
+
+	PROCEDURE EmitFinallyLabel*(code: Code; attr: PCM.Attribute);
 	BEGIN
-		NewInstr(code, exit, NoSize, FALSE, callconv, parSize, none, none, NIL);
+		NewInstr(code, finallylabel, NoSize, FALSE, 0, none, none, none, attr);
+	END EmitFinallyLabel;
+	
+	PROCEDURE EmitExit*(code: Code;  callconv, parSize: LONGINT; attr: PCM.Attribute (* ug *));
+	BEGIN
+		NewInstr(code, exit, NoSize, FALSE, callconv, parSize, none, none, attr (* ug *));
 	END EmitExit;
 	
 	PROCEDURE Emit00*(code: Code;  op: Opcode);	(** op (no operands) *)
@@ -887,6 +893,7 @@ BEGIN
 	NewInstr(saveregs, form00, "saveregs");
 	NewInstr(loadregs, form00, "loadregs");
 	NewInstr(label, form0C, "label");
+	NewInstr(finallylabel, form0C, "finlabel");
 	NewInstr(je, form02C, "je");
 	NewInstr(jne, form02C, "jne");
 	NewInstr(jlt, form02C, "jlt");
@@ -985,7 +992,10 @@ BEGIN
 	IF Statistics THEN PCM.LogWLn; PCM.LogWStr("PCLIR.Statistics on") END
 END InitModule;
 
-BEGIN  InitModule
+BEGIN  
+	Address := Int32;
+	Set := Int32;
+	InitModule
 END PCLIR.
 
 (*

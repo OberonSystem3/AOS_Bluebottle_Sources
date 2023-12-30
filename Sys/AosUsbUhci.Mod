@@ -1,111 +1,150 @@
-MODULE AosUsbUhci; (** AUTHOR "cplattner"; PURPOSE "Intel UHCI driver" *)
+MODULE AosUsbUhci; (** AUTHOR "cplattner/staubesv"; PURPOSE "USB Universal Host Controller Driver" *)
 (**
-	Aos Intel UHCI USB Host Controller Driver
-	Implements the AosUsbHcdi host controller driver interface (HCDI)
+ *	Bluebottle UHCI USB Host Controller Driver
+ *	Implements the AosUsbHcdi host controller driver interface (HCDI)
+ *
+ *	IMPORTANT NOTE: 
+ *	The UHCI specification doesn't specify how to determine the number of downstream port of the root hub. The driver simply
+ *	assumes that you have two of these ports. 
+ *	In the case you're HC implementation provides more port, you have to adapt the NumberOfPorts constant.
+ *
+ * Usage:
+ *	
+ *	AosUsbUhci.Install ~ to load this device driver
+ *	S.Free AosUsbUhci ~ unloads it
+ *
+ * References: 
+ *	Universal Host Controller Interface (UHCI) Design Guide, Revision 1.1, http://www.intel.com
+ *
+ * History:
+ *
+ *	30.09.2000 	First release (cp)
+ *	18.10.2000 	Bugfixes, added new debug support (cp)
+ *	20.10.2000 	Memory fragmentation fixed (cp)
+ *	22.10.2000 	TD allocation changed, IRQ spread fixed, irq-out bugfix (cp)
+ *	10.11.2003 	Introduction of host controller driver interface (HCDI), OOP, new per pipe memory allocation (staubesv)
+ * 	20.11.2005 	PCIFindUhci changed to recognize UHCI HC's by their PCI class code, replaced SYSTEM.PUT/GET by SYSTEM.PUTxx/GETxx (staubesv)
+ *	13.12.2005	Fixed UhciController.RestartPipe for ShortPacket conditions (staubesv)
+ *	15.12.2005	Moved buffer checks to AosUsbHcdi.Mod (staubesv)
+ *	05.01.2006	Abort tranfer when number of TDs is too small instead of trapping (staubesv)
+ *	03.01.2006	Improved UnLinkTDs & RemoveQH (staubesv)
+ *	08.03.2006	Added check in LinkTDs (staubesv)
+ *	20.06.2006	Wait until HC has enabled port after setting the PortEnabled bit in procedure ResetPort (staubesv)
+ *	28.06.2006 	Use AosOut.Hex instead of AosUsbHcdi.PrintHex (staubesv)
+ *	03.07.2006	ResetAndEnablePort instead of two separate procedures (staubesv)
+ *	03.08.2006	Adapted to AosUsbHcdi (LinkTDsAllowed) (staubesv)
+ *	13.11.2006	UpdatePipeStatus: Set pipe.status to AosUsbdi.Stalled when a stall is detected (staubesv)
+ *	05.01.2007	Added Interrupts tracing (staubesv)
+ *
+ * TODOs
+ *	- recognize number of downstream ports automatically
+ *	- isochronous transfers
+ *	- suspend/resume
+ *	- use aligned memory space provided by AosUsbHcdi instead of doing it self
+ *)
 
-	Reference: Universal Host Controller Interface (UHCI) Design Guide, Revision 1.1, http://www.intel.com
-
-	30.09.2000 cp  first release
-	18.10.2000 cp  bugfixes, added new debug support
-	20.10.2000 cp  memory fragmentation fixed
-	22.10.2000 cp  TD allocation changed, IRQ spread fixed, irq-out bugfix
-	10.11.2003 sst  Introduction of a host controller driver interface (HCDI), OOP
-*)
-
-IMPORT AosOut, SYSTEM, PCI, AosKernel, AosActive, AosInterrupts, AosModules, AosUsbHcdi, AosPlugins;
+IMPORT AosOut, AosMemory,  SYSTEM, PCI, AosKernel, AosActive, AosInterrupts, AosModules, AosUsbHcdi, AosUsbdi, Debug := AosUsbDebug;
 
 CONST
 
-	Name = "UsbHc";
 	Description = "UHCI USB Host Controller";
 
-	Debug = FALSE;
-	
-	(* if DebugMask # {} then show the data structure of all USB transfers whose status includes all flags which are
-	included in DebugMask AND whose req.endpoint field matches DebugEndPoint AND whose req.device.address matches
-	DebugAddress (if not set to -1) *)
-	DebugMask = {};
-	DebugEndPoint = 81H; (* must include direction flag *)
-	DebugAddress = 1;
-
-	MaxTDPerController = 1000000; (* 1 TD is 16 Byte of RAM - we need 24576 TD's for 12Mbit/s *)
-	MaxGCEntries = 3;
-
+	(* Number of ports the host controller's root hub provide *)
+	NumberOfPorts = 2;
+		
 	(* Offsets of USB registers from base io-address according UHCI design guide *)
-	UsbCmd = 0H;	   (* command register*)
-	UsbSts = 2H;         (* status register*)
-	UsbIntr = 4H;	    (* interupt enable*)
-	FrNum = 6H;	     (* frame number *)
-	FlBaseAdr = 8H;    (* frame list base address *)
-	SofMod = 0CH;	  (* start of frame modify *)
-	PortSc1 = 10H;	  (* port 1 status / control *)
-	PortSc2 = 12H;	  (* port 2 status / control *)
+	UsbCmd = 0H;	(* command register*)
+	UsbSts = 2H;  	(* status register*)
+	UsbIntr = 4H;	(* interupt enable*)
+	FrNum = 6H;	(* frame number *)
+	FlBaseAdr = 8H;	(* frame list base address *)
+	SofMod = 0CH;	(* start of frame modify *)
+	PortSc1 = 10H;	(* port 1 status / control *)
+	PortSc2 = 12H;	(* port 2 status / control *)
 
 	(* Bits of the USB Command (UsbCmd) Register *)
-	CmdMaxPacket = { 7 };
-	CmdConfigureFlag = { 6 };
-	CmdSoftwareDebug = { 5 };
-	CmdForceGlobalResume = { 4 };
-	CmdEnterGlobalSuspend = { 3 };
-	CmdGlobalReset = { 2 };
-	CmdHostControllerReset = { 1 };
-	CmdRunStop = { 0 };
+	CmdMaxPacket = {7};
+	CmdConfigureFlag = {6};
+	CmdSoftwareDebug = {5};
+	CmdForceGlobalResume = {4};
+	CmdEnterGlobalSuspend = {3};
+	CmdGlobalReset = {2};
+	CmdHostControllerReset = {1};
+	CmdRunStop = {0};
 	
 	(* Bits of the USB Status (UsbSts) Register *)
-	StatusHChalted = { 5 };
-	StatusProcessError = { 4 };
-	StatusSystemError = { 3 };
-	StatusResumeDetect = { 2 };
-	StatusErrorInt = { 1 };
-	StatusInt = { 0 };
+	StatusHChalted = {5};
+	StatusProcessError = {4};
+	StatusSystemError = {3};
+	StatusResumeDetect = {2};
+	StatusErrorInt = {1};
+	StatusInt = {0};
 
 	(* Bits of the USB Interrupt Enable (UsbIntr) Register *)
-	IntShortPacket = { 3 };
-	IntIOC = { 2 };
-	IntResume = { 1 };
-	IntTimeoutCRC = { 0 };
+	IntShortPacket = {3};
+	IntIOC = {2};
+	IntResume = {1};
+	IntTimeoutCRC = {0};
 
 	(* Bits of the USB Port Status and Control (PortSc) Register *)
-	PortSuspend = { 12 };
-	PortReset = { 9 };
-	PortLowSpeed = { 8 };
-	PortResumeDetect = { 6 };
-	PortLineStatus = { 4,5 };
-	PortEnabledChange = { 3 };
-	PortEnabled = { 2 };
-	PortConnectStatusChange = { 1 };
-	PortCurrentConnectStatus = { 0 };
+	PortSuspend = {12};
+	PortReset = {9};
+	PortLowSpeed = {8};
+	PortResumeDetect = {6};
+	PortLineStatus = {4,5};
+	PortEnabledChange = {3};
+	PortEnabled = {2};
+	PortConnectStatusChange = {1};
+	PortCurrentConnectStatus = {0};
+	PortChangeMask = {1,3};
+	
+	(* Offsets of Queue Heads QH *)
+	QhLinkPointer = 0;
+	QhElementLinkPointer = 4;
+	
+	(* Fields of QhLinkPointer & QhElementLinkPointer *)
+	QhTerminate = {0}; 
+	QhTdSelect = {1};
+	
+	(* Offsets of 16byte transfer descriptors TDs *)
+	TDLinkPointer = 0;
+	TDControlStatus = 4;
+	TDToken = 8;
+	TDBufferPointer = 12;
 
 	(* Bits of the TD Link Pointer DWORD*)
-	TDTerminate = { 0 };
-	TDQHSelect = { 1 };
-	TDDepthFirst = { 2 };
+	TDTerminate = {0};
+	TDQHSelect = {1};
+	TDDepthFirst = {2};
 						
 	(* Bits of the TD Control and Status DWORD *)
-	TDBitStuff = { 17 };
-	TDCrcTimeout = { 18 };
-	TDNak = { 19 };
-	TDBabble = { 20 };
-	TDDataBuffer = { 21 };
-	TDStalled = { 22 };
-	TDActive = { 23 };
-	TDIOC = { 24 };
-	TDIOS = { 25 };
-	TDLS = { 26 };
-	TDERR0 = {}; TDERR1 = { 27 }; TDERR2 = { 28 }; TDERR3 = { 27, 28 };
-	TDSPD = { 29 };
+	TDBitStuff = {17};
+	TDCrcTimeout = {18};
+	TDNak = {19};
+	TDBabble = {20};
+	TDDataBuffer = {21};
+	TDStalled = {22};
+	TDActive = {23};
+	TDIOC = {24};
+	TDIOS = {25};
+	TDLS = {26};
+	TDERR0 = {}; TDERR1 = {27}; TDERR2 = {28}; TDERR3 = {27,28};
+	TDSPD = {29};
 				
 	(* Bits of the TD Token DWORD *)
-	TDDataToggle = { 19 };
+	TDDataToggle = {19};
 
 	(* TD Token Packet Identification (PID) field *)
 	PidOut = 0E1H;
 	PidIn = 069H;
 	PidSetup = 02DH;
 	
-	(* timer used by procedure DoSchedule *)
-	SleepTime = 1;
-
+	(* 3: control-,bulk- and isochronousTD;  11: interruptTD[0..11];  1: alignment  *)
+	TdListSize = 3 + 11 + 1;  
+	
+	(* How many Queue Heads should the debug procedure ShowSchedule() show; useful if the schedule data structure is corrupted *)
+	ShowScheduleMaxQH = 25;
+	
 TYPE
 
 	UhciFrameList = POINTER TO RECORD
@@ -114,1006 +153,592 @@ TYPE
 		field : ARRAY 2*1024 OF LONGINT; (* hack: double it, so that we pass a 4K page boundary; field must be 4K aligned *)
 	END;
 
-	UhciTDList = POINTER TO RECORD
-		index : LONGINT;
-		tdlistbase : LONGINT; 
-		field : ARRAY ((MaxTDPerController + 1) * 4) OF LONGINT; (* plus one, for the 16byte boundary alignment*)
-		freelist : ARRAY MaxTDPerController OF LONGINT;
-		first, last : LONGINT; (* indicies of the first and the last entry of the freelist *)
-	END;
-
 	UhciController = OBJECT (AosUsbHcdi.Hcd)                         
 	VAR
-		(* host controller configuration data *)
-		iobase: LONGINT;
-		irq : INTEGER;
-		portCount : INTEGER;
-		ports : POINTER TO ARRAY OF LONGINT;  (* addresses of the Port Status Control registers relative to iobase *)
+		(* Serial Bus Specification Release Number (for PCI config space)*)
+		bcdUSB : LONGINT;
 		
 		(* UHCI data structures specific *)
 		framelist : UhciFrameList;
-		tdlist : UhciTDList;
+		
+		(* queue heads; only exported for debug purposes *)
 		controlTD : LONGINT;
 		bulkTD : LONGINT;
 		isochronousTD : LONGINT;
 		interruptTD : ARRAY 11 OF LONGINT;
-		gcQueueList : ARRAY MaxGCEntries OF LONGINT;
-		gcQueueTimestamp :  ARRAY MaxGCEntries OF INTEGER;
 		
-		(* interrupt handling related fields *)
-		running : BOOLEAN;	(* controller is active and has been started *)
-		status : SET;				
-		interruptCounter : LONGINT;
-		intHandlers : AosUsbHcdi.UsbTReq;  (* list of UsbTReqs with interrupt handler procedures *)
+		(* This array will provide the 16byte aligned TD's for controlTD, bulkTD, isochronousTD and interruptTD[] *)
+		tdlist : POINTER TO ARRAY OF CHAR;
+		tdlistbase : LONGINT; (* first 16byte aligned TD in tdlist *)
 		
-		(* used by Wait() *)
-		timer : AosKernel.Timer;
-												
-		(** Enable port number <port> on this root hub *)
-		PROCEDURE EnablePort*(port : INTEGER);
-		(* not reentrant !! *)
-		BEGIN 
+		(** Enable power for the specified port *)
+		PROCEDURE EnablePortPower*(port : LONGINT);
+		BEGIN
+			(* Do nothing: Port power is always provided by UHCI host controllers *)
+		END EnablePortPower;
+		
+		(** Disable power of the specified port *)
+		PROCEDURE DisablePortPower*(port : LONGINT);
+		BEGIN
+			(* Do nothing: Port power is always provided by UHCI host controllers *)
+		END DisablePortPower;
+						
+		(** Reset and enable the specified port *)
+		PROCEDURE ResetAndEnablePort*(port : LONGINT) : BOOLEAN;
+		VAR status : INTEGER; mtimer : AosKernel.MilliTimer;
+		BEGIN
 			(* reset port *)
-			SYSTEM.PORTOUT(ports[port], SYSTEM.VAL(INTEGER, PortReset)); Wait (10);
-			SYSTEM.PORTOUT(ports[port], SYSTEM.VAL(INTEGER, 0)); Wait ( 1 ); (* HMMMMMMMMMM MASSIVE HACK *) 
+			SYSTEM.PORTIN(ports[port], SYSTEM.VAL(INTEGER, status));
+			SYSTEM.PORTOUT(ports[port], SYSTEM.VAL(INTEGER, SYSTEM.VAL(SET, status) + PortReset - PortChangeMask)); 					
+			Wait(AosUsbHcdi.PortResetTime); (* at least 10ms [USB2.0spec, 11.5.1.5 Resetting] *)
+			SYSTEM.PORTOUT(ports[port], SYSTEM.VAL(INTEGER, SYSTEM.VAL(SET, status) - PortReset - PortChangeMask));
+			Wait(2); (* Nowhere specified, but doesn't work without *) 
+			SYSTEM.PORTIN(ports[port], SYSTEM.VAL(INTEGER, status));
+			IF SYSTEM.VAL(SET, status) * PortReset # {} THEN RETURN FALSE; END;		
 			(* enable port *)
-			SYSTEM.PORTOUT(ports[port], SYSTEM.VAL(INTEGER, PortEnabled)); Wait ( 50 );
-		END EnablePort;
+			SYSTEM.PORTOUT(ports[port], SYSTEM.VAL(INTEGER, SYSTEM.VAL(SET, status) + PortEnabled - PortChangeMask));
+			AosKernel.SetTimer(mtimer, AosUsbHcdi.PortEnableTimeout);
+			REPEAT
+				SYSTEM.PORTIN(ports[port], SYSTEM.VAL(INTEGER, status));
+			UNTIL (SYSTEM.VAL(SET, status) * PortEnabled # {}) OR AosKernel.Expired(mtimer);
+			
+			(* The HC will set PortConnectStatusChange & PortEnabledChange, clear it *)
+			SYSTEM.PORTOUT(ports[port], SYSTEM.VAL(INTEGER, SYSTEM.VAL(SET, status) + PortChangeMask));
+			
+			RETURN SYSTEM.VAL(SET, status) * PortEnabled # {};
+		END ResetAndEnablePort;
 
 		(** Disables port number <port> on this root hub *)
-		PROCEDURE DisablePort*(port : INTEGER);
+		PROCEDURE DisablePort*(port : LONGINT);
+		VAR status : INTEGER; mtimer : AosKernel.MilliTimer;
 		BEGIN
-			SYSTEM.PORTOUT(ports[port], SYSTEM.VAL(INTEGER, 0));
+			SYSTEM.PORTIN(ports[port], SYSTEM.VAL(INTEGER, status));
+			SYSTEM.PORTOUT(ports[port], SYSTEM.VAL(INTEGER, SYSTEM.VAL(SET, status) - PortEnabled - PortChangeMask));
+			AosKernel.SetTimer(mtimer, AosUsbHcdi.PortEnableTimeout);
+			REPEAT
+				SYSTEM.PORTIN(ports[port], SYSTEM.VAL(INTEGER, status));
+			UNTIL (SYSTEM.VAL(SET, status) * PortEnabled = {}) OR AosKernel.Expired(mtimer);
+			
+			(* The HC will set PortConnectStatusChange & PortEnabledChange, clear it *)
+			SYSTEM.PORTOUT(ports[port], SYSTEM.VAL(INTEGER, SYSTEM.VAL(SET, status) + PortChangeMask));
 		END DisablePort;
 		
-		(** Get the status of the port <port> of this root hub. Registers which indicate changes are reset by GetPortStatus *)
-		PROCEDURE GetPortStatus*(port : INTEGER):SET;
-		VAR
-			status, s : SET;
+		(** 
+		 * Get the status of the port <port> of this root hub. 
+		 * Registers which indicate changes are reset by GetPortStatus if ack = TRUE;
+		 *)
+		PROCEDURE GetPortStatus*(port : LONGINT; ack : BOOLEAN):SET;
+		VAR status, s : SET;
 		BEGIN
 			SYSTEM.PORTIN(ports[port], SYSTEM.VAL(INTEGER, s));
-			status := {};
-			IF (s * PortCurrentConnectStatus) # {} THEN status := status + AosUsbHcdi.PortStatusDevicePresent END;             
-			IF (s * PortEnabled) # {} THEN status := status + AosUsbHcdi.PortStatusEnabled END;
-			IF (s * PortLowSpeed) # {} THEN status := status + AosUsbHcdi.PortStatusLowSpeed END;
-			IF (s * PortConnectStatusChange) # {} THEN status := status + AosUsbHcdi.PortStatusConnectChange; END;
-	
-			(* reset the PortEnabledChande and the PortConnectStatusChange bit *)
-			IF (s * (PortEnabledChange + PortConnectStatusChange)) # {} THEN
-				SYSTEM.PORTOUT(ports[port], SHORT(SYSTEM.VAL(LONGINT, s * (PortEnabled + PortEnabledChange + PortConnectStatusChange)))); (* PortEnabled *)
+
+			(* reset the PortEnabledChange and the PortConnectStatusChange bit *)
+			IF ack & (s * PortChangeMask # {}) THEN SYSTEM.PORTOUT(ports[port], SYSTEM.VAL(INTEGER, s)); END;
+
+			status := AosUsbHcdi.PortStatusPowered; (* UHCI root hub ports are always powered *)
+			IF s * PortCurrentConnectStatus	# {} THEN status := status + AosUsbHcdi.PortStatusDevicePresent END;             
+			IF s * PortConnectStatusChange 	# {} THEN status := status + AosUsbHcdi.PortStatusConnectChange; END;
+			IF s * PortEnabled 				# {} THEN status := status + AosUsbHcdi.PortStatusEnabled END;
+			IF s * PortEnabledChange 		# {} THEN status := status + AosUsbHcdi.PortStatusEnabledChange; END;
+			IF s * PortReset					# {} THEN status := status + AosUsbHcdi.PortStatusReset; END;
+			IF s * PortSuspend 				# {} THEN status := status + AosUsbHcdi.PortStatusSuspended; END;
+			IF s * PortLowSpeed				# {} THEN 
+				status := status + AosUsbHcdi.PortStatusLowSpeed;
+			ELSE
+				status := status + AosUsbHcdi.PortStatusFullSpeed;
 			END;
 			RETURN status;
 		END GetPortStatus;
 
-		(** Returns the number of ports of this root hub *)
-		PROCEDURE GetPortCount*():INTEGER;
+		(* Since UHCI host controllers do not support port change notification via interrupts, they must be polled *)
+		PROCEDURE SetStatusChangeHandler*(handler : AosUsbHcdi.StatusChangeHandler) : BOOLEAN;
 		BEGIN
-			RETURN portCount;
-		END GetPortCount;
+			RETURN FALSE;
+		END SetStatusChangeHandler;
+		
+		(** The Host Controller sends the global reset signal on the USB and then resets all its logic, including the internal 
+		 hub registers. The hub registers are reset to their power on state. *)
+		PROCEDURE Reset;
+		BEGIN {EXCLUSIVE}
+			(* do a global reset for 50ms, disconnect all devices *)
+			SYSTEM.PORTOUT(iobase + UsbCmd, SYSTEM.VAL(INTEGER, CmdGlobalReset) ); Wait (50);
+			SYSTEM.PORTOUT(iobase + UsbCmd, SYSTEM.VAL(INTEGER, 0) ); Wait (10);
+		END Reset;
 
 		(* Returns the current frame number; the frame number is incremented by the Host Controller at the end of each frame time;
-		GetFrameNumber() is used for time stamps *)
-		PROCEDURE GetFrameNumber() : INTEGER;
-		VAR
-			frameNumber : INTEGER;
+		 * GetFrameNumber() is used for time stamps *)
+		PROCEDURE GetFrameNumber*() : LONGINT;
+		VAR frameNumber : INTEGER;
 		BEGIN
-			SYSTEM.PORTIN(iobase + FrNum, frameNumber);
-			frameNumber := SHORT(SYSTEM.VAL(LONGINT, SYSTEM.VAL(SET, frameNumber) * {0..10}));
-			RETURN frameNumber;
+			SYSTEM.PORTIN(iobase + FrNum, frameNumber);   
+			frameNumber := SYSTEM.VAL(INTEGER, SYSTEM.VAL(SET, frameNumber) * {0..10});
+			RETURN SYSTEM.VAL(LONGINT, frameNumber);
 		END GetFrameNumber;
-					
-		(* Returns the address of the first free TD in the TD freelist. If the TD freelist is empty, some TD's are freed up if possible *)
-		PROCEDURE AllocTD():LONGINT;
-		VAR
-			retval : LONGINT;
-			timenow, i : INTEGER;
-			needwait, entryfound : BOOLEAN;
-		BEGIN {EXCLUSIVE}
-	
-			IF (tdlist.first = tdlist.last) THEN (* TD freelist is empty. Need to free up at least one TD *)
-	
-				timenow := GetFrameNumber(); needwait := FALSE; entryfound := FALSE;
-	
-				FOR i:= 0 TO MaxGCEntries - 1 DO
-					IF gcQueueList[i] # 1 THEN (* ok, entry found *)
-						IF (timenow # gcQueueTimestamp[i]) THEN (* good, entry can be free'd NOW *)
-							FreeDeadQHChain(gcQueueList[i]);
-							gcQueueList[i] := 1;
-							needwait := FALSE; entryfound := TRUE;
-						ELSE
-							IF entryfound = FALSE THEN needwait := TRUE; END; (* only wait for this entry if there is no other *)
-						END;
-					END;
-				END;
-	
-				IF needwait THEN
-					WHILE (GetFrameNumber() = timenow) DO (* nothing *) END; (* wait until the host controller has processed this queue *)
-					(* we can do the following, since in Native Oberon there wont be any new entries, there is no concurrency;
-						staubesv: should work, because AllocTD() is EXCLUSIVE, but: performance ??? *)			
-					FOR i:= 0 TO MaxGCEntries - 1 DO
-						IF gcQueueList[i] # 1 THEN FreeDeadQHChain(gcQueueList[i]); gcQueueList[i] := 1; END;
-					END;
-				END;
 				
-				IF (tdlist.first = tdlist.last) THEN (* ERROR: Couldn't free up any TD's. No TD's available *)
-					AosOut.String("AosUsbUhci: No more free TD's. Please increase the TD count in AosUsbUhci.Mod"); AosOut.Ln;
-					RETURN -1;
-				END;
-			END;
-	
-			retval := tdlist.freelist[tdlist.first];
-			tdlist.first := (tdlist.first + 1) MOD MaxTDPerController;
-	
-			RETURN retval;
-		END AllocTD;
-
-		PROCEDURE FreeTDX(addr : LONGINT);
-		BEGIN {EXCLUSIVE}
-			FreeTD(addr);
-		END FreeTDX;
-		
-		(* Inserts the TD at address addr into the tdlist.freelist *)
-		PROCEDURE FreeTD(addr : LONGINT);
-		BEGIN
-			ASSERT((addr >= tdlist.tdlistbase) OR (addr <= (tdlist.tdlistbase + MaxTDPerController*16))); 
-				  ASSERT( (SYSTEM.VAL(SET, addr) * {0..3}) = {} );  (* TD's have to be 16-byte aligned *)
-			tdlist.last := (tdlist.last + 1) MOD MaxTDPerController;
-			ASSERT(tdlist.first # tdlist.last);  (* something is REALLY going wrong, freeing something but nothing allocated?? *)
-			tdlist.freelist[tdlist.last] := addr;
-		END FreeTD;
-
-		PROCEDURE FreeDeadQHChainX(addr : LONGINT);
-		BEGIN {EXCLUSIVE}
-			FreeDeadQHChain(addr);
-		END FreeDeadQHChainX;
-		
-		(* Frees up all TD's in a queue. addr is the address of the queue head of the queue which shall be cleaned up. 
-    	The dead version is very fast, since it knows that the UHCI does not access this queue (=> dead)  *)
-		PROCEDURE FreeDeadQHChain(addr : LONGINT);
-		VAR
-			nexttd : LONGINT;
-		BEGIN
-			(* Get address of the first TD in the queue head with address addr *)
-			SYSTEM.GET(addr + 8, SYSTEM.VAL(LONGINT, nexttd)); (* nexttd := queue element link pointer *)
-	
-			FreeTD(addr);
-	
-			(* Free all the TDs in the chain *)
-			LOOP
-				(* bit 0 is a flag that indicates whether the link pointer of the TD is valid. If it's set, this TD is the last TD of the queue *)
-				IF (SYSTEM.VAL(SET, nexttd) * {0}) # {} THEN (* last TD in queue *) EXIT; END; 
-				addr := SYSTEM.VAL(LONGINT, SYSTEM.VAL(SET, nexttd) * {4..31}); (* addr := physical addr of nexttd; 16-byte aligned *)
-				SYSTEM.GET(addr, SYSTEM.VAL(LONGINT, nexttd)); (* nexttd := link pointer of td at addr *)
-				FreeTD(addr);
-			END;
-		END FreeDeadQHChain;
-
-			(* Frees up all TD's in the queue whose queue head is found at address addr. Live meaning: The UHCI does perhaps still access this queue, 
-		so we must be careful when we free some element of the queue. We do this by using a waitqueue. *)
-		PROCEDURE FreeLiveQHChain(addr : LONGINT);
-		VAR
-			nexttd : LONGINT;
-			timenow, i, freeentry : INTEGER;
-		BEGIN {EXCLUSIVE}
-			timenow := GetFrameNumber(); freeentry := -1;
-	
-			FOR i:= 0 TO MaxGCEntries - 1 DO
-				IF gcQueueList[i] = 1 THEN (* found a free entry to use *)
-						freeentry := i; 
-				ELSIF gcQueueTimestamp[i] # timenow THEN (* host controller has already processed this queue -> it's dead *)
-						FreeDeadQHChain(gcQueueList[i]);
-						gcQueueList[i] := 1;
-						freeentry := i; (* found a free entry to use *)
-				END;
-			END;
-			
-			IF freeentry # -1 THEN
-				gcQueueList[freeentry] := addr;
-				gcQueueTimestamp[freeentry] := timenow;
-			ELSE
-				(* THIS IS VERY UNLIKELY *)
-				IF Debug THEN AosOut.String("AosUsbUhci: Bad luck, GCqueue full"); AosOut.Ln; END;
-				WHILE (GetFrameNumber() = timenow) DO (* nothing *) END; (* wait until the queue has been processed by the host controller *)
-				FreeDeadQHChain(addr);
-				(* we can do the following, since in Native Oberon there wont be any new entries, there is no concurrency *)
-				FOR i:= 0 TO MaxGCEntries - 1 DO
-					IF gcQueueList[i] # 1 THEN FreeDeadQHChain(gcQueueList[i]); gcQueueList[i] := 1; END;
-				END;
-			END; 
-		END FreeLiveQHChain;
-
-		(* transaction schedules *)
-		PROCEDURE DoSchedule(req : AosUsbHcdi.UsbTReq; qh : LONGINT);
-		VAR
-		   queue : LONGINT; 
-			timer : AosKernel.Timer;
-			sleeps, rest : LONGINT; (* req.timeout = x*sleeps + rest *)
-			expired : BOOLEAN;
-			status : SET;
-		BEGIN
-			queue := InsertQH(req, qh);
-			
-			NEW(timer); 
-	
-			IF req.timeout = -1 THEN (* infinite timeout, wait until transfer completed *)
-				LOOP
-					status := GetQueueStatus(req, qh);
-					IF (status * AosUsbHcdi.ResInProgress) = {} THEN EXIT END;
-					timer.Sleep(SleepTime);
-				END;
-				
-			ELSE
-			(*	LOOP
-					status := GetQueueStatus(req,qh);
-					IF (status * AosUsbHcdi.ResInProgress) = {} THEN EXIT END;
-				END;
-			*)
-				
-				expired := FALSE;
-				sleeps := req.timeout DIV SleepTime;
-				rest := req.timeout MOD SleepTime;
-				
-				LOOP
-					status := GetQueueStatus(req, qh);
-					IF expired OR ((status * AosUsbHcdi.ResInProgress) = {}) THEN EXIT END;
-					
-					DEC(sleeps);
-					
-					IF sleeps>0 THEN 
-						timer.Sleep(SleepTime); DEC(sleeps);
-					ELSIF rest>0 THEN 
-						timer.Sleep(rest);
-						rest := 0;
-					ELSE
-						expired := TRUE;
-					END;
-				END;    
-				
-			END; 
-	
-			req.status := status;
-			
-			IF (DebugMask#{}) & (req.conSpec#NIL) & (req.endpoint=DebugEndPoint) THEN 
-			(* advanced debugging: show the data structure of the transfer *)
-				IF (DebugAddress#(-1)) & (DebugAddress=req.device.address) THEN
-					IF (DebugMask*req.status = DebugMask) THEN 
-						AosOut.String("AosUsbUhci: Debug mask matched: Showing tranfer"); AosOut.Ln;
-						AosOut.String("   Endpoint: ");PrintHex(req.endpoint);
-						AosOut.String("  Address: "); AosOut.Int(req.device.address,0);
-						AosOut.String("  TransferSize: "); AosOut.Int(req.bufferLen,0); AosOut.Ln;
-						HumanQH(req.conSpec.qh); 
-						AosOut.Ln;AosOut.String("FULL SCHEULDE::::"); AosOut.Ln;
-					END;
-				END;
-			END;
-			DeleteQH(req, queue, qh); 
-
-			IF Debug THEN AosOut.String("AosUsbUhci: Blocking transfer finished"); AosOut.Ln; END;
-		END DoSchedule;
-		
-		(** Updates the req.status field *)
-		PROCEDURE ProbeTransfer*(req : AosUsbHcdi.UsbTReq);
-		VAR
-			spec : AosUsbHcdi.ConSpec;
-		BEGIN 
-			IF req.conSpec = NIL THEN
-				AosOut.String("AosUsbUhci: Warning, trying to probe blocking transfer"); AosOut.Ln;
-				req.status := AosUsbHcdi.ResInternal;
-				RETURN;
-			END;
-			spec := req.conSpec (AosUsbHcdi.ConSpec);
-			req.status := GetQueueStatus(req, spec.qh); 
-		END ProbeTransfer;
+		(** Removes the USB transfer request <req> from the host controller schedule *)
+		PROCEDURE UnlinkTDs*(pipe : AosUsbHcdi.Pipe);
+		BEGIN  {EXCLUSIVE}
+			UnlinkTDsInternal(pipe);
+		END UnlinkTDs;
 
 		(** Removes the USB transfer request <req> from the host controller schedule *)
-		PROCEDURE DeleteTransfer*(req :AosUsbHcdi.UsbTReq);
-		VAR
-			spec : AosUsbHcdi.ConSpec;
-		BEGIN 
-			IF req.conSpec = NIL THEN
-				AosOut.String("AosUsbUhci: Warning, trying to delete trans again"); AosOut.Ln;
-				RETURN
-			END;
-	
-			spec := req.conSpec (AosUsbHcdi.ConSpec);
-			DeleteQH(req, spec.queue, spec.qh);
-			FreeLiveQHChain(spec.qh);
-			req.conSpec := NIL; 
-	
-			IF Debug THEN AosOut.String("AosUsbUhci: request deleted"); AosOut.Ln; END;	
-		END DeleteTransfer;
-
-		(** Restarts (reactivates) the interrupt transfer <req> *)
-		PROCEDURE RestartInterrupt*(req : AosUsbHcdi.UsbTReq);
-		VAR
-			spec : AosUsbHcdi.ConSpec;
-		BEGIN 
-			ASSERT(req.typ=AosUsbHcdi.TransferInterrupt);
-			IF Debug THEN AosOut.String("AosUsbUhci: got request for restarting interrupt"); AosOut.Ln; END;
-	
-			IF req.conSpec = NIL THEN
-				AosOut.String("AosUsbUhci: Warning, trying to restart blocking interrupt"); AosOut.Ln;		
-				req.status := AosUsbHcdi.ResInternal;
-				RETURN;
-			END;
-	
-			IF (req.status * AosUsbHcdi.ResInProgress) # {} THEN (* don't restart allready started transfers *) RETURN END;
-	
-			spec := req.conSpec (AosUsbHcdi.ConSpec);
-			req.status := AosUsbHcdi.ResInProgress;
-			RestartInterruptQH(req, spec.qh); 
-		END RestartInterrupt;
-
-		PROCEDURE RestartInterruptQH(req : AosUsbHcdi.UsbTReq; qh : LONGINT);
-		VAR
-			tdtmp, val, pid : LONGINT;
-			status : SET; 
-			datatoggle : BOOLEAN;
+		PROCEDURE UnlinkTDsInternal*(pipe : AosUsbHcdi.Pipe);
+		VAR td : LONGINT; dword : SET; timer : AosKernel.Timer;
 		BEGIN
-			SYSTEM.GET(qh + 8, SYSTEM.VAL(LONGINT, tdtmp));
-	
-			(* modify the data0/1 bit *)
-			SYSTEM.GET(tdtmp + 8, SYSTEM.VAL(LONGINT, val));
-			pid := SYSTEM.VAL(LONGINT, SYSTEM.VAL(SET, val) * {0..7});
-			status := SYSTEM.VAL(SET, val);
-	
-			IF pid = PidOut THEN
-				datatoggle := req.device.dataToggleOut[req.endpoint MOD 16];
-				req.device.dataToggleOut[req.endpoint MOD 16] := ~datatoggle;
-			ELSIF pid = PidIn THEN
-				datatoggle := req.device.dataToggleIn[req.endpoint MOD 16];
-				req.device.dataToggleIn[req.endpoint MOD 16] := ~datatoggle;
-			ELSE
-				AosOut.String("AosUsbUhci:RestartInterrupt:pid error");AosOut.Ln;
-				HALT(303);
+			IF pipe.firstTD = 0 THEN RETURN END; (* pipe has not yet been used *)
+			(* deactivate all TDs in list *)
+			td := pipe.firstTD; 
+			ASSERT(SYSTEM.VAL(SET, td) * {0..3} = {}); (* 16byte alignment *)
+			WHILE td < pipe.lastTD DO
+				dword := SYSTEM.VAL(SET, SYSTEM.GET32(td + TDControlStatus));
+				SYSTEM.PUT32(td + TDControlStatus, dword - TDActive);
+				td := td + 16;
 			END;
-	
-			IF datatoggle THEN
-				status := status + TDDataToggle;
-			ELSE
-				status := status - TDDataToggle;
-			END;
-			SYSTEM.PUT(tdtmp + 8, SYSTEM.VAL(LONGINT, status));	
-	
-			(* reactivate it *)
-			SYSTEM.GET(tdtmp + 4, SYSTEM.VAL(LONGINT, val));
-			status := SYSTEM.VAL(SET, val) + TDActive + TDERR3;
-			SYSTEM.PUT(tdtmp + 4, SYSTEM.VAL(LONGINT, status));
-	
-			(* set the queue element pointer so that the uhci will execute the element again *)
-			SYSTEM.PUT(qh + 4, SYSTEM.VAL(LONGINT, tdtmp));
-		END RestartInterruptQH;
+			NEW(timer); timer.Sleep(10); (* > 1ms to be sure that the HC doesn't access the tds anymore *)		
+			SYSTEM.PUT32(pipe.qh + QhElementLinkPointer, QhTerminate); (* Unlink TD list *)
+		END UnlinkTDsInternal;
 		
+		(* Set the QhTerminate bit in the Queue Head Element Link Pointer to unchain TDs *)
+		PROCEDURE ClearHalt*(pipe : AosUsbHcdi.Pipe);
+		VAR dword : SET;
+		BEGIN
+			ASSERT((pipe # NIL) & (pipe.qh # 0));
+			dword := SYSTEM.VAL(SET, SYSTEM.GET32(pipe.qh + QhElementLinkPointer));
+			ASSERT(dword * QhTdSelect = {}); (* We don't allow a QH to be queued in another QH, UHCI does, though *)
+			dword := dword + QhTerminate;
+			SYSTEM.PUT32(pipe.qh + QhElementLinkPointer, dword);
+		END ClearHalt;
+				
 		(* Insert the queue head qh into the appropriate queue *)
-		PROCEDURE InsertQH(req : AosUsbHcdi.UsbTReq; qh : LONGINT) : LONGINT; 
-		VAR
-			qhtmp, queue : LONGINT;
-			slots : LONGINT; 
-			index, queueslots : INTEGER;
-		BEGIN {EXCLUSIVE}
-		
-			IF req.typ = AosUsbHcdi.TransferControl THEN
-				queue := controlTD
-			ELSIF req.typ = AosUsbHcdi.TransferBulk THEN
-				queue := bulkTD
-			ELSIF req.typ = AosUsbHcdi.TransferInterrupt THEN
-				slots := 1024 DIV req.irqInterval;
-				index := 0; queueslots := 1024;
-				LOOP
-					IF queueslots = 0 THEN index := 10; EXIT; END;
-					IF slots >= queueslots THEN EXIT END;
-					queueslots := queueslots DIV 2; INC (index)
-				END;
-				queue := interruptTD[index]
-			ELSE 
-				AosOut.String("AosUsbUhci:InsertQH: transfer type not supported"); AosOut.Ln;
-				HALT(303); 
+		PROCEDURE InsertQH*(pipe : AosUsbHcdi.Pipe) : BOOLEAN; 
+		VAR qhtmp, slots, index, queueslots : LONGINT;
+		BEGIN (* only call from exclusive regions *)
+			(* build qh. Both link and queue head link pointer are invalid *)
+			ASSERT((pipe # NIL) & (pipe.qh # 0) & (SYSTEM.VAL(SET, pipe.qh) * {0..3} = {}));
+			BuildQH(pipe.qh, 3, 1, pipe, 0); (* 3: select QH (2) + Terminate (1) *) 
+			CASE pipe.type OF (* in which queue should we insert the pipe ? *)
+				AosUsbHcdi.PipeControl : pipe.queue := controlTD;
+				| AosUsbHcdi.PipeBulk : pipe.queue := bulkTD;
+				| AosUsbHcdi.PipeIsochronous : pipe.queue := isochronousTD;
+				| AosUsbHcdi.PipeInterrupt : 
+					BEGIN
+						slots := 1024 DIV pipe.irqInterval;
+						index := 0; queueslots := 1024;
+						LOOP
+							IF queueslots = 0 THEN index := 10; EXIT; END;
+							IF slots >= queueslots THEN EXIT END;
+							queueslots := queueslots DIV 2; INC (index)
+						END;
+						pipe.queue := interruptTD[index]
+					END;
+			ELSE
+				RETURN FALSE;
 			END;
-			
-			(* inserts queue head <qh> into the queue *)
-			SYSTEM.GET(queue, SYSTEM.VAL(LONGINT, qhtmp));  (* qhtmp:= queue head link pointer of queue head <queue> *)
-			SYSTEM.PUT(qh, SYSTEM.VAL(LONGINT, qhtmp));		(* queue head link pointer of <qh> := qhtmp  (hasn't been used before) *)
-			SYSTEM.PUT(queue, SYSTEM.VAL(LONGINT, SYSTEM.VAL(SET, qh) + {1} )); (* queue head link pointer of <queue> := pointer to <qh> *)
-	
-			RETURN queue
+			(* insert the pipe's queue head into the queue *)
+			qhtmp := SYSTEM.GET32(pipe.queue); (* qhtmp:= queue head link pointer of queue head <queue> *)
+			SYSTEM.PUT32(pipe.qh, qhtmp); (* queue head link pointer of <qh> := qhtmp  (hasn't been used before) *)
+			SYSTEM.PUT32(pipe.queue, SYSTEM.VAL(SET, pipe.qh) + {1}); (* queue head link pointer of <queue> := pointer to <qh> *)	
+			RETURN TRUE;
 		END InsertQH;
-
-		(* delete the queue head <qh> in the queue <queue> *)
-		PROCEDURE DeleteQH(req : AosUsbHcdi.UsbTReq; queue, qh : LONGINT); 
-		VAR
-			qhtmp, delthis : LONGINT;
-		BEGIN {EXCLUSIVE}
 		
-			delthis := SYSTEM.VAL(LONGINT, SYSTEM.VAL(SET, qh) + {1} );
+		(* Delete the queue head <qh> in the queue <queue> *)
+		PROCEDURE RemoveQH*(pipe : AosUsbHcdi.Pipe);
+		VAR qhtmp, queue, delthis : LONGINT; timer : AosKernel.Timer;
+		BEGIN (* caller must hold obj lock *)
+			UnlinkTDsInternal(pipe);
+		
+			delthis := SYSTEM.VAL(LONGINT, SYSTEM.VAL(SET, pipe.qh) + {1});
+			queue := pipe.queue;
 	
-			LOOP
-				SYSTEM.GET(queue, SYSTEM.VAL(LONGINT, qhtmp));
-				IF qhtmp = 1 THEN
-					AosOut.String("AosUsbUhci: Fatal error, DeleteQH cannot find qh entry in queue"); AosOut.Ln;
-					HALT(303)
-				END;
-				IF qhtmp = delthis THEN (* delete qh *)
-					SYSTEM.GET(qh, SYSTEM.VAL(LONGINT, qhtmp));
-					SYSTEM.PUT(queue, SYSTEM.VAL(LONGINT, qhtmp));
+			LOOP (* traverse list of queue heads *)
+				qhtmp := SYSTEM.GET32(queue);
+				IF qhtmp = 1 THEN (* end of list but not found ? *)
+					IF Debug.Level >= Debug.Errors THEN AosOut.String("AosUsbUhci: Fatal error, DeleteQH cannot find qh entry in queue"); AosOut.Ln; END;
 					EXIT;
 				END;
-				queue := SYSTEM.VAL(LONGINT, SYSTEM.VAL(SET, qhtmp) - {1} )
-			END
-		END DeleteQH;
-
-		PROCEDURE ScheduleInterrupt(req : AosUsbHcdi.UsbTReq) : SET;
-		VAR
-			qh, td, firsttd, lasttd : LONGINT;
-			status : SET; 
-			datatoggle : BOOLEAN;
-			spec : AosUsbHcdi.ConSpec; 
-			pid : INTEGER;
-		BEGIN 
-			IF Debug THEN AosOut.String("AosUsbUhci: got request for interrupt transfer"); AosOut.Ln; END;
-			(* the specs say that values  0 < x < 256 are ok, but since the controller supports it, we allow for higher values *)
-			(* perhaps needed for special usb driver test code *)
-			IF (req.irqInterval < 0) OR (req.irqInterval > 1000) THEN RETURN AosUsbHcdi.ResInternal; END;
-		
-			status := TDActive + TDIOC + TDERR3;
-			IF req.device.lowSpeed THEN status := status + TDLS; END;
-		
-			IF (SYSTEM.VAL(SET, req.endpoint) * {7}) = {} THEN
-				datatoggle := req.device.dataToggleOut[req.endpoint MOD 16];
-				IF req.bufferLen < req.device.maxPacketSizeOut[req.endpoint MOD 16] THEN
-					RETURN AosUsbHcdi.ResInternal;
+				IF qhtmp = delthis THEN (* delete qh *)
+					qhtmp := SYSTEM.GET32(pipe.qh);
+					SYSTEM.PUT32(queue, qhtmp);
+					EXIT;
 				END;
-				pid := PidOut;
-			ELSE
-				datatoggle := req.device.dataToggleIn[req.endpoint MOD 16];
-				IF req.bufferLen < req.device.maxPacketSizeIn[req.endpoint MOD 16] THEN
-					RETURN AosUsbHcdi.ResInternal;
-				END;
-				status := status + TDSPD;
-				pid := PidIn;
+				queue := SYSTEM.VAL(LONGINT, SYSTEM.VAL(SET, qhtmp) - {1})
 			END;
+			NEW(timer); timer.Sleep(10); (* > 1ms to be sure that HC is not operating on this QH *)
+		END RemoveQH;
 		
-			qh := AllocTD();
-			IF (qh = -1) THEN (* ERROR: Couldn't allocate a free TD *) RETURN AosUsbHcdi.ResInternal; END;
-		
-			td := AllocTD();
-			IF (td = -1) THEN (* ERROR: Couldn't allocate a free TD *) 
-				FreeTDX(qh);
-				RETURN AosUsbHcdi.ResInternal;
-			END;
-		
-			firsttd := td; lasttd := td;
-		
-			BuildTDLinkPointer(td, TDTerminate, 0);
-			BuildTDControlStatus(td, status);
-			BuildTDToken(td, pid, req.device.address, req.endpoint MOD 16, datatoggle, req.bufferLen);
-			SYSTEM.PUT(td + 12, SYSTEM.VAL(LONGINT, req.buffer));
-		
-			(* Build qh *)
-			BuildTD(qh, 1, firsttd, firsttd, lasttd);
-		
-			req.status := AosUsbHcdi.ResInProgress;
-		
-			IF req.timeout # 0 THEN
-				IF Debug THEN AosOut.String("AosUsbUhci: starting interrupt transfer"); AosOut.Ln; END;	
-				DoSchedule(req, qh);
-				FreeLiveQHChain(qh);
-				req.conSpec := NIL;
-			ELSE
-				IF Debug THEN AosOut.String("AosUsbUhci: starting nonblocking interrupt transfer"); AosOut.Ln; END;		
-				NEW(spec); spec.qh := qh; req.conSpec := spec;
-				spec.queue := InsertQH(req, qh);
-			END;
-			
-			RETURN req.status;
-		END ScheduleInterrupt;
-
-		PROCEDURE ScheduleControl(req : AosUsbHcdi.UsbTReq) : SET;
-		VAR
-			qh, td, tdnext, firsttd, lasttd, pretd : LONGINT;
-			pid : INTEGER;
-			curlen, restlen, databuff : LONGINT;
-			datatoggle : BOOLEAN;
-			status : SET;
-			spec : AosUsbHcdi.ConSpec;
-		BEGIN 
-			IF Debug THEN
-				AosOut.String("AosUsbUhci: request for control transfer for controller "); AosOut.String(name); AosOut.Ln;
-				AosOut.String("AosUsbUhci: details:");
-				AosOut.String(" address "); AosOut.Int(req.device.address, 0);
-				AosOut.String(" endpoint "); AosOut.Int(req.endpoint, 0);
-				AosOut.String(" len: "); AosOut.Int(req.bufferLen, 0); AosOut.Ln;
-			END;
-		
-			qh := AllocTD();
-			IF (qh = -1) THEN (* ERROR: Couldn't allocate a free TD *) RETURN AosUsbHcdi.ResInternal; END;
-		
-			td := AllocTD();
-			IF (td = -1) THEN (* ERROR: Couldn't allocate a free TD *)
-				FreeTDX(qh);
-				RETURN AosUsbHcdi.ResInternal;
-			END;
-		
-			firsttd := td;
-		
-			(* Build Setup td *)
-			tdnext := AllocTD();
-			IF (tdnext = -1) THEN (* ERROR: Couldn't allocate a free TD *) RETURN AosUsbHcdi.ResInternal; END;
-		
-			status := TDActive + TDERR3;
-			IF req.device.lowSpeed THEN status := status + TDLS; END;	
-		
-			BuildTDLinkPointer(td, TDDepthFirst, tdnext);
-			BuildTDControlStatus(td, status);
-			BuildTDToken(td, PidSetup, req.device.address, req.endpoint MOD 16, FALSE, 8);
-			SYSTEM.PUT(td + 12, SYSTEM.VAL(LONGINT, req.controlMessage));
-			
-			(* Build Data TD's, if any are needed *)	
-			IF req.bufferLen # 0 THEN (* need some TDs to transmit data *)
-		
-				datatoggle := TRUE;
-				restlen := req.bufferLen;
-				databuff := req.buffer;
-		
-				IF (SYSTEM.VAL(SET, req.endpoint) * {7}) = {} THEN pid := PidOut; ELSE pid := PidIn; status := status + TDSPD; END;
-		
-				WHILE restlen >  0 DO
-				
-					pretd := td;
-					td := tdnext;
-					tdnext := AllocTD();
-					IF (tdnext = -1) THEN (* ERROR: Couldn't allocate a free TD *)
-						BuildTDLinkPointer(pretd, TDTerminate, 0);
-						BuildTD(qh, 1, firsttd, firsttd, pretd);
-						FreeDeadQHChainX(qh);
-						RETURN AosUsbHcdi.ResInternal;
-					END;
-			
-					IF restlen > req.device.bMaxPacketSize0 THEN
-						curlen := req.device.bMaxPacketSize0
-					ELSE
-						curlen := restlen;
-					END; 
-		
-					BuildTDLinkPointer(td, TDDepthFirst, tdnext);
-					BuildTDControlStatus(td, status);
-					BuildTDToken(td, pid, req.device.address, req.endpoint MOD 16, datatoggle, curlen);
-					SYSTEM.PUT(td + 12, SYSTEM.VAL(LONGINT, databuff));
-				
-					datatoggle := ~ datatoggle;
-								
-					databuff := databuff + curlen;
-					restlen := restlen - curlen;
-				END;
-			END;
-		
-			td := tdnext;
-				
-			(* build the last TD in chain *)
-			IF ((SYSTEM.VAL(SET, req.endpoint) * {7}) = {} ) OR (req.bufferLen = 0) THEN pid := PidIn; ELSE pid := PidOut; END;
-			
-			status := (status - (TDSPD + TDERR3)); 
-			
-			BuildTDLinkPointer(td, TDTerminate, 0);
-			BuildTDControlStatus(td, status );	
-			BuildTDToken(td, pid, req.device.address, req.endpoint MOD 16, TRUE, 0);
-			SYSTEM.PUT(td + 12, SYSTEM.VAL(LONGINT, 0));
-		
-			lasttd := td;
-			
-			(* Build qh *)
-			BuildTD(qh, 1, firsttd, firsttd, lasttd);
-	
-			req.status := AosUsbHcdi.ResInProgress;
-			
-			IF req.timeout # 0 THEN
-				IF Debug THEN AosOut.String("AosUsbUhci: starting control transfer"); AosOut.Ln; END;
-				DoSchedule(req, qh);
-				FreeLiveQHChain(qh);
-				req.conSpec := NIL;
-			ELSE
-				IF Debug THEN AosOut.String("AosUsbUhci: starting nonblocking control transfer"); AosOut.Ln; END;
-				NEW(spec); spec.qh := qh; req.conSpec := spec;
-				spec.queue := InsertQH(req, qh);
-			END;
-		
-			RETURN req.status;
-		END ScheduleControl;
-
-		PROCEDURE ScheduleBulk(req : AosUsbHcdi.UsbTReq) : SET;
-		VAR
-			qh, td, tdnext, firsttd, lasttd, pretd : LONGINT;
-			pid, pipesize : INTEGER;
-			curlen, restlen, databuff : LONGINT;
-			datatoggle : BOOLEAN;
-			status : SET;
-			spec : AosUsbHcdi.ConSpec;
-		BEGIN
-			qh := AllocTD();
-			IF (qh = -1) THEN (* ERROR: Couldn't allocate a free TD *) RETURN AosUsbHcdi.ResInternal; END;
-		
-			td := AllocTD();
-			IF (td = -1) THEN (* ERROR: Couldn't allocate a free TD *)
-				FreeTDX(qh);
-				RETURN AosUsbHcdi.ResInternal;
-			END;
-		
-			firsttd := td;
-			tdnext := td;
-		
-			status := TDActive + TDERR3;
-			IF req.device.lowSpeed THEN status := status + TDLS; END;	
-		
-			restlen := req.bufferLen;
-			databuff := req.buffer;
-		
-			IF (SYSTEM.VAL(SET, req.endpoint) * {7}) = {} THEN
-				datatoggle := req.device.dataToggleOut[req.endpoint MOD 16];
-				pipesize := req.device.maxPacketSizeOut[req.endpoint MOD 16];
-				pid := PidOut;
-			ELSE
-				datatoggle := req.device.dataToggleIn[req.endpoint MOD 16];
-				pipesize := req.device.maxPacketSizeIn[req.endpoint MOD 16];	
-				pid := PidIn;
-				status := status + TDSPD;
-			END;
-			
-			LOOP
-					pretd := td;
-					td := tdnext;
-			
-					IF restlen > pipesize THEN
-						curlen := pipesize;
-						tdnext := AllocTD();
-						IF (tdnext = -1) THEN  (* ERROR: Couldn't allocate a free TD *)
-							BuildTDLinkPointer(pretd, TDTerminate, 0);
-							BuildTD(qh, 1, firsttd, firsttd, pretd);
-							FreeDeadQHChainX(qh);
-							RETURN AosUsbHcdi.ResInternal;
-						END;
-						BuildTDLinkPointer(td, TDDepthFirst, tdnext);
-					ELSE
-						curlen := restlen;
-						BuildTDLinkPointer(td, TDTerminate, 0);
-					END;
-			
-					BuildTDControlStatus(td, status);
-			
-					BuildTDToken(td, pid, req.device.address, req.endpoint MOD 16, datatoggle, curlen);
-					SYSTEM.PUT(td + 12, SYSTEM.VAL(LONGINT, databuff));
-					
-					datatoggle := ~datatoggle;
-						
-					databuff := databuff + curlen;
-					restlen := restlen - curlen;
-			
-					IF restlen = 0 THEN
-						BuildTDControlStatus(td, status); 
-						EXIT;
-					END;
-			END;
-		
-			lasttd := td;
-		
-			IF pid = PidOut THEN
-				req.device.dataToggleOut[req.endpoint MOD 16] := datatoggle;
-			ELSE
-				req.device.dataToggleIn[req.endpoint MOD 16] := datatoggle;
-			END;
-		
-			(* Build qh *)
-			BuildTD(qh, 1, firsttd, firsttd, lasttd);
-			
-			req.status := AosUsbHcdi.ResInProgress;
-		
-			IF req.timeout # 0 THEN
-				DoSchedule(req, qh);
-				FreeLiveQHChain(qh); 
-				req.conSpec := NIL;
-			ELSE
-				IF Debug THEN AosOut.String("AosUsbUhci: starting nonblocking bulk transfer"); AosOut.Ln; END;		
-				NEW(spec); spec.qh := qh; req.conSpec := spec;
-				spec.queue := InsertQH(req, qh);
-			END;
-		
-			RETURN req.status;
-		END ScheduleBulk;
-		
-		(** Add an interrupt handler. The handler is called, when a IOC interrupt occurs and the req.status field is changed *)
-		PROCEDURE AddIntHandler*(req: AosUsbHcdi.UsbTReq);
-		VAR
-			temp, handler: AosUsbHcdi.UsbTReq;
+		(** Checks whether TDs may be linked to the pipe's QH *)
+		PROCEDURE LinkTDsAllowed*(pipe : AosUsbHcdi.Pipe) : BOOLEAN;
 		BEGIN {EXCLUSIVE}
-			ASSERT((req#NIL) & (req.intHandler#NIL));
-			
-			IF intHandlers=NIL THEN
-				intHandlers:=req;	
-			ELSIF intHandlers = req THEN (* handler already installed *) 
-					AosOut.String("AosUsbUhci: warning: procedure was already registered as interrupt handler"); AosOut.Ln;
-					RETURN; 
-			ELSE
-				 temp:=intHandlers;
-				 WHILE(temp.next#NIL) & (temp.next#req) DO temp:=temp.next; END;
-				 IF temp.next=NIL THEN temp.next:=req;  END;
-			END;
-		END AddIntHandler;
+			RETURN TRUE;
+		END LinkTDsAllowed;		
 		
-		(** Remove an interrupt handler *)
-		PROCEDURE RemoveIntHandler*(req: AosUsbHcdi.UsbTReq);
-		VAR
-			temp : AosUsbHcdi.UsbTReq;	
-		BEGIN {EXCLUSIVE} 
-			ASSERT(req#NIL);
+		(* Insert the TD list <td> into the queue <queue> *)
+		PROCEDURE LinkTDs*(pipe : AosUsbHcdi.Pipe; td : LONGINT); 
+		BEGIN {EXCLUSIVE}		
+			ASSERT(SYSTEM.VAL(SET, td) * {0..3} = {}); (* 16byte alignment of TDs *)
+			SYSTEM.PUT32(pipe.qh + QhElementLinkPointer, td); (* queue element link pointer ::= pointer to td *)
+		END LinkTDs;
+
+		PROCEDURE ScheduleControl*(pipe : AosUsbHcdi.Pipe; direction : LONGINT; msg : AosUsbHcdi.ControlMessage;  bufferLen : LONGINT;  VAR buffer : AosUsbdi.Buffer);
+		VAR td, pid, databuffer, restlen, curlen : LONGINT; tdStatus : SET;
+		BEGIN
+		 	(* Control transfers use a three stage protocol:	*)
+			(*	stage1: control setup transaction				*)
+			(*	stage2: optional data stage					*)
+			(*	stage3: status transaction         				*)
+
+			(* stage1: setup stage *)					
+			pipe.firstTD := pipe.tdBase; td := pipe.tdBase;
+			IF Debug.StrongChecks THEN DoStrongChecks(pipe, bufferLen, 0, buffer); END;
+
+			tdStatus := TDActive + TDERR3;		
+			IF pipe.speed = AosUsbHcdi.LowSpeed THEN tdStatus := tdStatus + TDLS; END;	
+						
+			(* build the setup TD *)
+			BuildTDLinkPointer(td, TDDepthFirst, td + 16);
+			BuildTDControlStatus(td, tdStatus);
+			BuildTDToken(td, PidSetup, pipe.address, pipe.endpoint  MOD 16, FALSE, 8); (* dataToggle = FALSE *)
+			SYSTEM.PUT32(td + TDBufferPointer, SYSTEM.ADR(msg[0]));
 			
-			IF intHandlers#NIL THEN 
-				IF intHandlers=req THEN 
-					intHandlers:=intHandlers.next; 
-				ELSE
-					temp:=intHandlers;
-					WHILE(temp.next#NIL) & (temp.next#req) DO temp:=temp.next; END;
-					IF temp.next#NIL THEN temp.next:=temp.next.next; END;
+			(* setup phase always starts with dataToggle = FALSE, so now it must be TRUE *)
+			pipe.dataToggle := TRUE; 
+			
+			(* stage 2: (optional) data stage *)
+			IF bufferLen # 0 THEN
+				
+				IF direction = AosUsbHcdi.In THEN pid := PidIn; ELSE pid := PidOut; END;
+
+				databuffer := pipe.physBufferAdr; (* offset included *)
+				
+				restlen := bufferLen;
+
+				WHILE restlen > 0 DO (* build TD chain *) 
+				
+					td := td + 16;
+						
+					IF restlen > pipe.maxPacketSize THEN 
+						curlen := pipe.maxPacketSize;
+					ELSE
+						curlen := restlen;
+					END;	
+						
+					(* Build TD *)
+					BuildTDLinkPointer(td, TDDepthFirst, td + 16);
+					BuildTDControlStatus(td, tdStatus);
+					BuildTDToken(td, pid, pipe.address, pipe.endpoint  MOD 16, pipe.dataToggle, curlen);
+					SYSTEM.PUT32(td + TDBufferPointer, databuffer);
+					
+					pipe.dataToggle := ~pipe.dataToggle;			
+					databuffer := databuffer + curlen;
+					restlen := restlen - curlen;
 				END;
 			END;
-		END RemoveIntHandler;
-
-		PROCEDURE InterruptHandler;
-		VAR
-			s, prevStatus : SET;
-			temp : AosUsbHcdi.UsbTReq;
-		BEGIN (* should be EXCLUSIVE *)
+			
+			(* stage 3: status *)
+			tdStatus := tdStatus - TDSPD; 
+			IF pipe.ioc THEN tdStatus := tdStatus + TDIOC; END; (* enable interrupt on completion for this TD *)
+			IF (direction = AosUsbHcdi.Out) OR (bufferLen = 0) THEN 
+				pid := PidIn; 
+			ELSE
+				pid := PidOut;
+			END;
+			
+			td := td + 16;
+			
+			(* build status TD *)
+			BuildTDLinkPointer(td, TDTerminate, 0);
+			BuildTDControlStatus(td, tdStatus);
+			BuildTDToken(td, pid, pipe.address, pipe.endpoint MOD 16, TRUE, 0); (* dataToggle always TRUE in status stage *)
+			SYSTEM.PUT32(td + TDBufferPointer, 0);
+			pipe.lastTD := td;
+		END ScheduleControl;
 		
-			IF active THEN (* controller is active -> handle interrupts *)
-				INC(interruptCounter);
-				SYSTEM.PORTIN(iobase + UsbSts, SYSTEM.VAL(INTEGER, s));
-				status:=s;
+		PROCEDURE Schedule*(pipe : AosUsbHcdi.Pipe; bufferLen, offset: LONGINT; VAR buffer: AosUsbdi.Buffer);
+		VAR td, pid, restlen, curlen, databuffer : LONGINT; tdStatus : SET;
+		BEGIN					
+			pipe.firstTD :=  pipe.tdBase;
+			IF Debug.StrongChecks THEN DoStrongChecks(pipe, bufferLen, offset, buffer); END;
+			
+			(* enough TD's to support transfer of bufferLen bytes? *)
+			IF pipe.firstTD + 16*((pipe.transferLen DIV pipe.maxPacketSize) +1) > SYSTEM.ADR(pipe.tdBuffer[pipe.tdBufferLen-1]) THEN
+				AosOut.String("AosUsbUhci: TD buffer too small to support requested tranfer size."); AosOut.Ln;
+				pipe.status := AosUsbdi.Error; pipe.errors := AosUsbHcdi.OutOfTDs;
+				RETURN;
+			END;
+
+			tdStatus := TDActive + TDERR3;	
+			IF pipe.speed = AosUsbHcdi.LowSpeed THEN tdStatus := tdStatus + TDLS; END;	
+			IF pipe.direction = AosUsbHcdi.In THEN 
+				tdStatus := tdStatus + TDSPD; 
+				pid := PidIn;
+			ELSE
+				pid := PidOut;
+			END;
+		
+			restlen := bufferLen;
+			databuffer := pipe.physBufferAdr; (* offset already added *)
+			
+			td := pipe.firstTD - 16;  
+			
+			WHILE restlen > 0 DO (* build TD chain *) 
 				
+				td := td + 16; 	
+				
+				IF restlen > pipe.maxPacketSize THEN
+					curlen := pipe.maxPacketSize; 				
+					BuildTDLinkPointer(td, TDDepthFirst, td + 16);
+				ELSE (* last TD in chain *)
+					curlen := restlen;
+					IF restlen < pipe.maxPacketSize THEN tdStatus := tdStatus - TDSPD; ELSE tdStatus := tdStatus + TDSPD; END; (* disable shortPacket detection *)
+					IF pipe.ioc THEN tdStatus := tdStatus + TDIOC; ELSE tdStatus := tdStatus - TDIOC; END; (* enable interrupt on completion for this TD *)
+					BuildTDLinkPointer(td, TDTerminate, 0);
+				END;
+				
+				BuildTDControlStatus(td, tdStatus);
+				BuildTDToken(td, pid, pipe.address, pipe.endpoint  MOD 16, pipe.dataToggle, curlen);
+				SYSTEM.PUT32(td + TDBufferPointer, databuffer);
+	
+				pipe.dataToggle := ~ pipe.dataToggle;	
+				databuffer := databuffer + curlen;
+				restlen := restlen - curlen;
+			END;	
+			pipe.lastTD := td;
+		END Schedule;
+		
+		PROCEDURE InterruptHandler;
+		VAR s : SET;
+		BEGIN (* works without being exclusive *)
+			IF Debug.Stats THEN INC(NnofInterrupts); END;
+			IF state >= AosUsbHcdi.Initialized THEN (* controller is active -> handle interrupts *)				
+				SYSTEM.PORTIN(iobase + UsbSts, SYSTEM.VAL(INTEGER, s));							
 				IF s # {} THEN
-					IF (s * StatusHChalted) # {} THEN AosOut.String("AosUsbUhci: Error: Host Controller halted"); AosOut.Ln; running := FALSE; END;
-					IF (s * StatusProcessError) # {} THEN AosOut.String("AosUsbUhci: Host Controller process error"); AosOut.Ln; END;
-					IF (s * StatusSystemError) # {} THEN AosOut.String("AosUsbUhci: Host system error"); AosOut.Ln; END;
-					IF (s * StatusErrorInt) # {} THEN AosOut.String("AosUsbUhci: USB transaction failed"); AosOut.Ln; END; 
-					
-					IF (s * StatusInt) # {} THEN (* USB Interrupt occured: can be IOC or ShortPacketInt *)
-					
-						(* call installed interrupt handlers *)
-						temp:=intHandlers;
-						WHILE (temp#NIL) DO 
-							ProbeTransfer(temp);
-							IF temp.active & (temp.status*AosUsbHcdi.ResInProgress = {}) THEN temp.active := FALSE; temp.intHandler; END;
-  						  temp:=temp.next; 
-						END; 		
-					END;	
+					IF Debug.Stats THEN INC(NnofInterruptsHandled); END;
+					IF Debug.Trace & Debug.traceInterrupts THEN ShowInterrupts(s); END;
 					(* reset the USB status register *)
 					SYSTEM.PORTOUT(iobase + UsbSts, SYSTEM.VAL(INTEGER, s));
+					IF s * StatusHChalted # {} THEN AosOut.String("AosUsbUhci: Error: Host Controller halted"); AosOut.Ln; SetState(AosUsbHcdi.Halted); END;
+					IF s * StatusProcessError # {} THEN AosOut.String("AosUsbUhci: Host Controller process error"); AosOut.Ln; END;
+					IF s * StatusSystemError # {} THEN AosOut.String("AosUsbUhci: Host system error"); AosOut.Ln; END;
+					IF s * (StatusErrorInt + StatusInt) # {} THEN 
+						NotifyCompletionHandlers;
+					END;	
 				END;
-		
 			END;
 		END InterruptHandler;
 
 		(* the host controller writes the number of actually transfered bytes into the ActLen field of each executed TD.
-			The GetTransferredLen procedure builds the sum of all TD.ActLen fields of all executed TD's in the queue <qh> and then
-			writes this value into the req.bufferLen field *)
-		PROCEDURE GetTransferredLen(req : AosUsbHcdi.UsbTReq; qh : LONGINT);
-		VAR
-			td, addr, actlen, thislen, val : LONGINT;
-			s : SET;
+		 * The GetTransferredLen procedure builds the sum of all TD.ActLen fields of all executed TD's in the queue <qh> and then
+		 * writes this value into the req.bufferLen field *)
+		PROCEDURE GetTransferredLen(pipe : AosUsbHcdi.Pipe; VAR errors : SET); 
+		VAR td, addr, thislen, actlen, maxlen, val : LONGINT; s : SET;
 		BEGIN
-			actlen := 0;
-		
-			SYSTEM.GET(qh + 8, SYSTEM.VAL(LONGINT, td)); (* get first element of queue *)
-		
+			actlen := 0; addr := pipe.firstTD;
 			LOOP
-				IF (SYSTEM.VAL(SET, td) * {0}) # {} THEN (* TD link pointer not valid (last TD was the last TD in queue) *) EXIT; END;
-				addr := SYSTEM.VAL(LONGINT, SYSTEM.VAL(SET, td) * {4..31}); (* addr := physical addr of td *)
-		
-				SYSTEM.GET(addr+4, SYSTEM.VAL(LONGINT, val)); (* get 4 bytes - td control and status *)
-				s := SYSTEM.VAL(SET, val);
-		
-				IF (s * TDActive) # {} THEN (* this TD has not yet been executed *) EXIT; END;
-		
-				thislen := SYSTEM.VAL(LONGINT, SYSTEM.VAL(SET, val) * {0..10}); (* access the ActLen field of the TD *)
-				IF thislen = 7FFH THEN thislen := 0; ELSE thislen := thislen +1; END;
-				SYSTEM.GET(addr+8, SYSTEM.VAL(LONGINT, val)); (* get 4 bytes - td token*)
-				IF SYSTEM.VAL(LONGINT, SYSTEM.VAL(SET, val) * {0..7}) # PidSetup THEN actlen := actlen + thislen; END;
-		
-				IF (s * (TDCrcTimeout + TDDataBuffer + TDStalled + TDBitStuff + TDBabble + TDNak)) # {} THEN EXIT END;
-				SYSTEM.GET(addr, SYSTEM.VAL(LONGINT, td)); (* td := link pointer of td at addr *)
-			END;
-			req.bufferLen := actlen;
-		END GetTransferredLen;
+				val := SYSTEM.GET32(addr + TDControlStatus);
 
-		PROCEDURE GetQueueStatus(req : AosUsbHcdi.UsbTReq; qh : LONGINT) : SET;
+				s := SYSTEM.VAL(SET, val);
+				IF s * TDActive # {} THEN (* this TD has not yet been executed *) EXIT; END;
+				
+				thislen := SYSTEM.VAL(LONGINT, SYSTEM.VAL(SET, val+1) * {0..10}); (* access the ActLen field of the TD *)
+			
+				val := SYSTEM.GET32(addr + TDToken); 
+				IF SYSTEM.VAL(LONGINT, SYSTEM.VAL(SET, val) * {0..7}) # PidSetup THEN actlen := actlen + thislen; END;
+				
+				maxlen := SYSTEM.VAL(LONGINT, SYSTEM.VAL(SET, ASH(val, -21) + 1) * {0..10});
+				IF thislen < maxlen THEN 
+					errors := errors + AosUsbHcdi.ShortPacket;
+				END;
+	
+				IF s * (TDCrcTimeout + TDDataBuffer + TDStalled + TDBitStuff + TDBabble + TDNak) # {} THEN EXIT END;
+				
+				td := SYSTEM.GET32(addr + TDLinkPointer);
+				IF SYSTEM.VAL(SET, td) * {0} # {} THEN (* TD link pointer not valid (last TD was the last TD in queue) *) EXIT; END;
+				
+				addr := SYSTEM.VAL(LONGINT, SYSTEM.VAL(SET, td) * {4..31}); (* addr := physical addr of td *)
+			END;
+			pipe.actLen := actlen;
+		END GetTransferredLen;
+		
+		PROCEDURE UpdatePipeStatus*(pipe : AosUsbHcdi.Pipe);
 		VAR
-			val, td, addr, actlen, maxlen, pid : LONGINT;
-			status, s : SET; datatoggle : BOOLEAN;
+			val, td, addr, pid : LONGINT;
+			errors, s : SET; 
+			datatoggle : BOOLEAN;
 			last : BOOLEAN;
 		BEGIN
 			(* be aware of the fact the the USB host controller is concurrently accessing AND modifying this datastructure !! *)
-
 			(* test if the queue was finished *)
-			SYSTEM.GET(qh+4, SYSTEM.VAL(LONGINT, td)); (* get queue head element link pointer *)
+			td := SYSTEM.GET32(pipe.qh + QhElementLinkPointer); (* get queue head element link pointer *)
 	
 			IF td = 1 THEN (* yes, fetch status of last td in queue (queue head element link pointer is not valid) *)
-				SYSTEM.GET(qh + 12, SYSTEM.VAL(LONGINT, td)); last := TRUE;
+				td := pipe.lastTD;
 			ELSE
 				td := SYSTEM.VAL(LONGINT, SYSTEM.VAL(SET, td) * {4..31});
 			END;
+			
+			IF td = pipe.lastTD THEN last := TRUE; END;
 	
 			addr := SYSTEM.VAL(LONGINT, SYSTEM.VAL(SET, td) * {4..31}); (* addr := physical addr of td *)
 	
-			SYSTEM.GET(addr+4, SYSTEM.VAL(LONGINT, val)); (* get 4 bytes - TD control and status *)
+			val := SYSTEM.GET32(addr + TDControlStatus);
 			s := SYSTEM.VAL(SET, val);
 			(* the USB host controller could already have changed the status of the TD at this time *)	
 		
-			status := {}; 
-	
-			(* NAK occured? Set it, it is not an error - we can still be in progress *)
-			IF (s * TDNak) # {} THEN status := status + AosUsbHcdi.ResNAK END;
+			errors := AosUsbHcdi.NoErrors;
 			
-			IF (s * TDActive) # {} THEN RETURN status + AosUsbHcdi.ResInProgress; END;
+			IF s * TDActive # {} THEN RETURN; END;
+			IF s * TDNak # {} THEN errors := errors + AosUsbHcdi.Nak; END; (* Actually, this is not really an error -> flow control *)
 	
-			SYSTEM.GET(addr+8, SYSTEM.VAL(LONGINT, val)); (* get 4 bytes - td token*)
-			maxlen := SYSTEM.VAL(LONGINT, SYSTEM.VAL(SET, ASH(val, -21) + 1) * {0..10});
+			val := SYSTEM.GET32(addr + TDToken); 
+			
 			pid := SYSTEM.VAL(LONGINT, SYSTEM.VAL(SET, val) * {0..7});
-			IF (SYSTEM.VAL(SET, val) * TDDataToggle) # {} THEN datatoggle := TRUE ELSE datatoggle := FALSE END;
-	
+			IF SYSTEM.VAL(SET, val) * TDDataToggle # {} THEN datatoggle := TRUE ELSE datatoggle := FALSE END;
+			
 			IF (s * (TDCrcTimeout + TDDataBuffer + TDStalled + TDBitStuff + TDBabble)) # {} THEN (* marginal speed up *)
-				IF (s * TDCrcTimeout) # {} THEN status := status + AosUsbHcdi.ResCRCTimeout END;
-				IF (s * TDDataBuffer) # {} THEN status := status + AosUsbHcdi.ResDataBuffer END;
-				IF (s * TDStalled) # {} THEN status := status + AosUsbHcdi.ResStalled END;
-				IF (s * TDBitStuff) # {} THEN status := status + AosUsbHcdi.ResBitStuff END;
-				IF (s * TDBabble) # {} THEN status := status + AosUsbHcdi.ResBabble END;
+				IF s * TDCrcTimeout # {} THEN errors := errors + AosUsbHcdi.CrcTimeout; END;
+				IF s * TDDataBuffer # {} THEN errors := errors + AosUsbHcdi.Databuffer; END;
+				IF s * TDStalled # {} THEN errors := errors + AosUsbHcdi.Stalled; END;
+				IF s * TDBitStuff # {} THEN errors := errors + AosUsbHcdi.BitStuff; END;
+				IF s * TDBabble # {} THEN errors := errors + AosUsbHcdi.Babble; END;
 			END;
 			
-			IF ~last & (status={}) THEN RETURN AosUsbHcdi.ResInProgress; END;
-			
+			IF ~last & (errors - AosUsbHcdi.Nak = {}) THEN RETURN; END;
+						
+			td := SYSTEM.GET32(pipe.qh + QhElementLinkPointer); (* get queue head element link pointer *)
+	
 			(* Test for errors *)
-			actlen := req.bufferLen; GetTransferredLen(req, qh); 
+			GetTransferredLen(pipe, errors); 
 			
-			IF req.bufferLen < actlen THEN status := status + AosUsbHcdi.ResShortPacket END;
-
-			IF status = {} THEN status := AosUsbHcdi.ResOK; END;
-			
-			bytesTransfered := bytesTransfered + actlen; (* for performance monitoring *)
-	
-			IF (req.typ = AosUsbHcdi.TransferBulk) OR (req.typ = AosUsbHcdi.TransferInterrupt) THEN
-	
-				(* if we receive an ACK, do the toggle *)
-				IF (status = AosUsbHcdi.ResOK) OR (status = AosUsbHcdi.ResShortPacket) THEN
-					datatoggle := ~datatoggle;
-				END;
-	
-				(* write the toggle back *)
-				IF pid = PidOut THEN
-					req.device.dataToggleOut[req.endpoint MOD 16] := datatoggle;
-				ELSIF pid = PidIn THEN
-					req.device.dataToggleIn[req.endpoint MOD 16] := datatoggle;
+			pipe.errors := errors;
+				
+			IF errors = AosUsbHcdi.NoErrors THEN 
+				pipe.status := AosUsbdi.Ok; 
+			ELSIF errors = AosUsbHcdi.ShortPacket THEN
+				pipe.status := AosUsbdi.ShortPacket;
+			ELSE 
+				IF errors * AosUsbHcdi.Stalled # {} THEN
+					pipe.status := AosUsbdi.Stalled;
 				ELSE
-					AosOut.String("AosUsbUhci:GetQueueStatus: pid error"); AosOut.Ln;
-					HALT(303);
+					pipe.status := AosUsbdi.Error;
 				END;
 			END;
-			RETURN status;
-		END GetQueueStatus;
-		
-		(* UHCI Transfer Descriptor (TD) Format          
-                                                                              
-			Offset:         Value:                                                                                                                    
-			
-			00			  Link Pointer[31:4]                                                                                                   
-			04  		    Flags - Status - Actlen                                                                                           
-			08 			 MaxLen - D Toggle - EndPt - Device Address - PID                                             
-			12 			 Buffer Pointer                                                                                                         
-																																					
-			For more details see Intel UHCI Design Guide v1.1, p. 20-25      
-			
-		    UHCI queue head format                                                                                                   
-		
-			  Offset:	  Value:                                                                                                                
-		  	 00  	 	Queue Head Link Pointer                                                                                                 
-			   04  	 	Queue Element Link Pointer                                                                                            
-			   08   		[Oberon specific]  Original Queue Element Link Pointer  (= first TD in queue)              
-			   12   		[Oberon specific]  Pointer to last TD in queue                                                                 
-		*)
 
-		(* builds a TD. Is also used to build queue heads *)
+			IF (pipe.type = AosUsbHcdi.PipeBulk) OR (pipe.type = AosUsbHcdi.PipeInterrupt) THEN
+				(* if we receive an ACK, do the toggle *)
+				IF (pipe.status = AosUsbdi.Ok) OR (pipe.status = AosUsbdi.ShortPacket) THEN
+					pipe.dataToggle  := ~datatoggle;
+				END;	
+			END;
+		END UpdatePipeStatus; 
+
+			
+		(*	UHCI queue head format                                                                                                   
+		 *
+		 *	Offset:	Value:                                                                                                                
+		 *	00  	 	Queue Head Link Pointer                                                                                                 
+		 *	04  	 	Queue Element Link Pointer                                                                                            
+		 *	08   	[Oberon specific]  Pointer to PipePolicy
+		 *	12   	[Oberon specific]  Pointer to last TD in queue                                                                 
+		 *)
+		PROCEDURE BuildQH(td, f1, f2: LONGINT; f3 : ANY;  f4 : LONGINT);
+		BEGIN
+			SYSTEM.PUT32(td, f1);		(* QH queue head  link pointer field		*)
+			SYSTEM.PUT32(td + 4, f2);	(* QH queue element link pointer field	*)
+			SYSTEM.PUT32(td + 8, f3);	(* QH pointer to pipepolicy 				*)
+			SYSTEM.PUT32(td + 12, f4);  	(* QH pointer to last TD in queue		*)
+		END BuildQH;
+
+		(*	UHCI Transfer Descriptor (TD) Format          
+		 *                                                               
+		 *	Offset:	Value:                                                                                                                    
+		 *	00		Link Pointer[31:4]                                                                                                   
+		 *	04  		Flags - Status - Actlen                                                                                           
+		 *	08 		MaxLen - D Toggle - EndPt - Device Address - PID                                             
+		 *	12 		Buffer Pointer                                                                                                         
+		 *																																			
+		 * For more details see Intel UHCI Design Guide v1.1, p. 20-25      
+		 * builds a TD. Is also used to build queue heads *)
 		PROCEDURE BuildTD(td, f1, f2, f3, f4 : LONGINT);
 		BEGIN
-			SYSTEM.PUT(td, SYSTEM.VAL(LONGINT, f1));         (* TD link pointer field*)
-			SYSTEM.PUT(td+4, SYSTEM.VAL(LONGINT, f2));    (* TDcontrol & status field*)
-			SYSTEM.PUT(td+8, SYSTEM.VAL(LONGINT, f3));    (* TD token field *)
-			SYSTEM.PUT(td+12, SYSTEM.VAL(LONGINT, f4));  (* TD buffer pointer field *)
+			SYSTEM.PUT32(td + TDLinkPointer, f1);
+			SYSTEM.PUT32(td + TDControlStatus, f2);
+			SYSTEM.PUT32(td + TDToken, f3);
+			SYSTEM.PUT32(td + TDBufferPointer, f4);
 		END BuildTD;
 
-		PROCEDURE BuildTDLinkPointer (VAR td:LONGINT; flags : SET; LinkPointer : LONGINT);
+		PROCEDURE BuildTDLinkPointer (VAR td : LONGINT; flags : SET; LinkPointer : LONGINT);
 		BEGIN
-			ASSERT( SYSTEM.VAL( SET, LinkPointer) * {0..3} = {} );
-			SYSTEM.PUT(td, SYSTEM.VAL(LONGINT, SYSTEM.VAL(SET, LinkPointer) + flags));
+			ASSERT( SYSTEM.VAL( SET, LinkPointer) * {0..3} = {});
+			SYSTEM.PUT32(td, SYSTEM.VAL(LONGINT, SYSTEM.VAL(SET, LinkPointer) + flags));
 		END BuildTDLinkPointer;
 
-		PROCEDURE BuildTDControlStatus (VAR td:LONGINT; status : SET);
+		PROCEDURE BuildTDControlStatus (VAR td : LONGINT; status : SET);
 		BEGIN
-			status := status + {0..10};
-			SYSTEM.PUT(td+4, SYSTEM.VAL(LONGINT, status));
+			status := status + {0..10}; SYSTEM.PUT32(td + TDControlStatus, status);
 		END BuildTDControlStatus;
 
 		PROCEDURE BuildTDToken (VAR td:LONGINT; PID, DeviceAddress, EndPoint : LONGINT; DataToggle : BOOLEAN; maxLength : LONGINT);
-		VAR
-			s : SET;
+		VAR s : SET;
 		BEGIN
 			(* maxLength specifies the maximum number of data bytes allowed for the transfer,
-				allowed values: 0x000-0x4FF (1-1280 bytes) and 0x7FF (0 bytes)   *)
+			 * allowed values: 0x000-0x4FF (1-1280 bytes) and 0x7FF (0 bytes) *)
 			ASSERT(((maxLength>=0000H) & (maxLength<=04FFH)) OR (maxLength=07FFH));
-			
-			IF maxLength = 0 THEN maxLength := 07FFH;       (* 0 bytes = Null Data packet *)
-								ELSE maxLength := maxLength - 1;  (* maxLength==0 -> 1 Byte *)
-								END;
-			s := {};
-			IF DataToggle THEN s := s + TDDataToggle END;
-			SYSTEM.PUT(td + 8, SYSTEM.VAL(LONGINT, SYSTEM.VAL(SET,
-			PID + ASH(DeviceAddress, 8) + ASH(EndPoint, 15) + ASH(maxLength, 21)) + s));
+			IF maxLength = 0 THEN maxLength := 07FFH; (* 0 bytes = Null Data packet *)
+			ELSE maxLength := maxLength - 1;  (* maxLength==0 -> 1 Byte *)
+			END;
+			s := {}; IF DataToggle THEN s := s + TDDataToggle END;
+			SYSTEM.PUT32(td + TDToken, SYSTEM.VAL(SET, PID + ASH(DeviceAddress, 8) + ASH(EndPoint, 15) + ASH(maxLength, 21)) + s);
 		END BuildTDToken;
 		
 		(* Initializes the host controller and builds up the basics of the UHCI data structures *)
-		PROCEDURE Init(base: LONGINT; IRQ : INTEGER) : BOOLEAN;
-			VAR
-			i, k, j : LONGINT;
+		PROCEDURE Init(base: LONGINT; IRQ : LONGINT) : BOOLEAN;
+		VAR i, k, j : LONGINT; dword : SET;
 		BEGIN
-			iobase:=base;
-			irq := IRQ;
-
-			(* configure the ports;  no more documented in the specs, but 3-4 possible *)
-			portCount := 2; 
-			NEW(ports, portCount);
-
-			(* calculate offset from iobase of the port status/controll register for each port *)
-			FOR i := 0 TO portCount - 1 DO
-				ports[ i ] := iobase + PortSc1 + i*2;
-			END;
+			iobase := base; irq := IRQ; DMAchaining := FALSE;
+			(* Configure the ports;  no more documented in the specs, but 3-4 possible *)
+			portCount := NumberOfPorts; NEW(ports, portCount);
+			(* Calculate offset from iobase of the port status/controll register for each port *)
+			FOR i := 0 TO portCount - 1 DO ports[i] := iobase + PortSc1 + i*2; END;
+									
+			(* Build the emulated hub descriptor *)
+			NEW(hubDescriptor, 8);
+			hubDescriptor[0] := CHR(7);
+			hubDescriptor[1] := CHR(29H); (* Hub Descriptor *)
+			hubDescriptor[2] := CHR(portCount);
+			dword := dword + {1};  	(* UHCI root hubs don't implement port power switching *)
+			dword := dword + {4}; 	(* UHCI root hubs don't implement overcurrent detection *)
+			hubDescriptor[3] := CHR(SYSTEM.VAL(LONGINT, dword));
+			hubDescriptor[4] := CHR(0); (* Reserved *)
+			hubDescriptor[5] := CHR(10); (* 20ms Power on to power good *)
+			hubDescriptor[6] := CHR(0); (* Root hubs don't draw current from the USB *)
 	
-			NEW(timer);
-			NEW(framelist); NEW(tdlist);             
-	
-			(* setup the free td list, a little bit of own memory managment, since we don't like memory fragmentation *)
-			tdlist.tdlistbase := SYSTEM.VAL(LONGINT, SYSTEM.VAL(SET, SYSTEM.ADR(tdlist.field[0]) + 15) * {4..31});  (* TD's have to be 16-byte aligned *)
-		
-			FOR i:=0 TO MaxTDPerController - 1 DO
-				tdlist.freelist[ i ] := tdlist.tdlistbase + i*16
-			END;
-	
-			tdlist.first := 0;
-			tdlist.last := MaxTDPerController - 1;
-	
-			FOR i := 0 TO MaxGCEntries - 1 DO
-				gcQueueList[i] := 1; (* 1 = no entry *)
-			END;
-	
-			(* calculate the address of the 4K boundary contained in the 8K buffe (framelist base address has to be 4KB aligned) *)
+			NEW(framelist);
+			(* Calculate the address of the 4K boundary contained in the 8K buffe (framelist base address has to be 4KB aligned) *)
 			framelist.framelistbase := SYSTEM.VAL(LONGINT, SYSTEM.VAL(SET, SYSTEM.ADR(framelist.field[0]) + 1024*4 - 1) * {12..31});
-	
-			(* calculate the index which points to the element positioned at the 4K boundary *)
+			(* Calculate the index which points to the element positioned at the 4K boundary *)
 			framelist.index := ( framelist.framelistbase - SYSTEM.ADR(framelist.field[0]) ) DIV 4;
-		
-			(* set up the frame list pointer skeleton *)
-			controlTD := AllocTD();             
-			bulkTD := AllocTD();
-			isochronousTD := AllocTD();
-	
-			IF (controlTD = -1) OR (bulkTD = -1) OR (isochronousTD = -1) THEN (* ERROR: Couldn't allocate a free TD. This really should not happen. *) 
-				AosOut.String("AosUsbUhci: couldn't allocate TD when initializing host controller"); AosOut.Ln; RETURN FALSE;
-			END;
+			
+			(* Okay... now allocate the 16byte aligned Queue Heads ... *)	
+			NEW(tdlist, 16*TdListSize);  
+			tdlistbase := SYSTEM.VAL(LONGINT, SYSTEM.VAL(SET, SYSTEM.ADR(tdlist[0])+15) * {4..31});
+			ASSERT(SYSTEM.VAL(SET, tdlistbase) * {0..3} = {}); 
+			ASSERT((tdlistbase >= SYSTEM.ADR(tdlist[0])) & (tdlistbase < SYSTEM.ADR(tdlist[16*TdListSize-1])));
+			
+			(* Set up the frame list pointer skeleton *)
+			controlTD := tdlistbase;             
+			bulkTD := tdlistbase + 16;
+			isochronousTD := tdlistbase + 32;
 	
 			FOR i := 0 TO 10 DO
-				interruptTD[i] := AllocTD();     
-				IF interruptTD[i] = -1 THEN (* ERROR: Couldn't allocate a free TD. This really should not happen. *) 
-					AosOut.String("AosUsbUhci: couldn't allocate TD when initializing host controller"); AosOut.Ln; RETURN FALSE; 
-				END;
+				ASSERT(tdlistbase + 48 + i*16 <= SYSTEM.ADR(tdlist[16*TdListSize-1]));
+				interruptTD[i] := tdlistbase + 48 + i*16;
 			END;
-	
-			(* build queue heads for bulk-, control- and interupt transfers *)
+				
+			(* Build queue heads for bulk-, control- and interupt transfers *)
 			BuildTD(bulkTD, 1, 1, 0, 0);
 			BuildTD(controlTD, SYSTEM.VAL(LONGINT, SYSTEM.VAL(SET, bulkTD) + {1} ), 1, 0, 0);
-			BuildTD(interruptTD[0], SYSTEM.VAL(LONGINT, SYSTEM.VAL(SET, controlTD) + {1} ), 1, 0, 0);
-	
+			BuildTD(isochronousTD, SYSTEM.VAL(LONGINT, SYSTEM.VAL(SET, controlTD) + {1}), 1, 0, 0);
+			BuildTD(interruptTD[0], SYSTEM.VAL(LONGINT, SYSTEM.VAL(SET, isochronousTD) + {1} ), 1, 0, 0);
 			FOR i:=1 TO 10 DO
 				BuildTD(interruptTD[i], SYSTEM.VAL(LONGINT, SYSTEM.VAL(SET, interruptTD[i-1]) + {1} ), 1, 0, 0);
 			END;
@@ -1135,10 +760,7 @@ TYPE
 				END;
 				framelist.field[framelist.index + i] := SYSTEM.VAL(LONGINT, SYSTEM.VAL(SET, interruptTD[k]) + {1} );
 			END;
-	
-			status := {};
-			running := FALSE;
-	
+				
 			Reset; (* Reset the host controller *)
 	
 			(* try to start the host controller *)
@@ -1146,433 +768,340 @@ TYPE
 				Reset; AosOut.String("AosUsbUhci: Couldn't start controller."); AosOut.Ln; RETURN FALSE; 
 			END; 
 	
-			active := TRUE;	
-			AosActive.InstallHandler(InterruptHandler, AosInterrupts.IRQ0+irq);
-	
+			AosActive.InstallHandler(InterruptHandler, AosInterrupts.IRQ0+irq);			
+			
 			RETURN TRUE;
 		END Init;
 
-		(** The Host Controller sends the global reset signal on the USB and then resets all its logic, including the internal 
-		 hub registers. The hub registers are reset to their power on state. *)
-		PROCEDURE Reset;
-		BEGIN {EXCLUSIVE}
-			(* do a global reset for 50ms, disconnect all devices *)
-			SYSTEM.PORTOUT(iobase + UsbCmd, SYSTEM.VAL(INTEGER, CmdGlobalReset) ); Wait (50);
-			SYSTEM.PORTOUT(iobase + UsbCmd, SYSTEM.VAL(INTEGER, 0) ); Wait (10);
-		END Reset;
-		
-		PROCEDURE Wait(ms : LONGINT);
-			(* wait is not reentrant !!! *)
-		BEGIN
-			timer.Sleep(ms)
-		END Wait;								
-
 		(* Resets and then starts the host controller. As soon as the host controller is started, it processes the schedule *)
 		PROCEDURE Start():BOOLEAN;
-		VAR
-			t : LONGINT;
-			s : SET;
+		VAR t : LONGINT; s : SET;
 		BEGIN
-			(* do a Host Controller reset *)
+			(* Perform host controller reset *)
 			SYSTEM.PORTOUT(iobase + UsbCmd, SYSTEM.VAL(INTEGER, CmdHostControllerReset) );
 
-			(* the Host Controller will clear the CmdHostControllerReset Bit after about 64 bit times *)
+			(* The host controller will clear the CmdHostControllerReset Bit after about 64 bit times *)
 			t := 10000;
 			REPEAT
-				SYSTEM.PORTIN(iobase + UsbCmd, SYSTEM.VAL(INTEGER, s) );
+				SYSTEM.PORTIN(iobase + UsbCmd, SYSTEM.VAL(INTEGER, s));
 				DEC( t );
-			UNTIL ((t = 0) OR (  ~ ( 1 IN s)));
+			UNTIL ((t = 0) OR ( ~(1 IN s)));
 
 			IF t = 0 THEN (* ERROR: Host Controller should have cleared the Bit !! *) RETURN FALSE END;  
 
-			(* enable all interrupts, but remember: perhaps they are not being routed by the PIIX4 *)
+			(* Enable all interrupts, but remember: perhaps they are not being routed by the PIIX4 *)
 			SYSTEM.PORTOUT(iobase + UsbIntr, SYSTEM.VAL(INTEGER, IntShortPacket + IntIOC + IntResume + IntTimeoutCRC) );
 
-			(* we start at frame 0 and also set the framelistbase address *)
+			(* We start at frame 0 and also set the framelistbase address *)
 			SYSTEM.PORTOUT(iobase + FrNum, SYSTEM.VAL(INTEGER, 0) ); (* 16 bit! *)
 			SYSTEM.PORTOUT(iobase + FlBaseAdr, SYSTEM.VAL(LONGINT, framelist.framelistbase));
 
-			(* start the controller, set max-packet size (64byte) and set the pseudo-semaphore which we don't need *)
+			(* Start the controller, set max-packet size (64byte) and set the pseudo-semaphore which we don't need *)
 			SYSTEM.PORTOUT(iobase + UsbCmd, SYSTEM.VAL(INTEGER, CmdRunStop + CmdConfigureFlag + CmdMaxPacket) );
 			
-			running := TRUE;
+			SetState(AosUsbHcdi.Operational);
 			RETURN TRUE;
 		END Start;
 		
+		PROCEDURE Cleanup;
+		BEGIN
+			IF state >= AosUsbHcdi.Initialized THEN AosActive.RemoveHandler(InterruptHandler, AosInterrupts.IRQ0 + irq); END;
+			Cleanup^;
+			Reset;
+		END Cleanup;
+	
+		PROCEDURE ShowPipe*(pipe : AosUsbHcdi.Pipe);
+		BEGIN
+			HumanTD(pipe.firstTD);
+		END ShowPipe;
+						
+		(** Displays the host controller's data struture on KernelLog *)
+		PROCEDURE ShowSchedule*;
+		BEGIN
+			IF Debug.Trace THEN
+			AosOut.String("Host Controller Data Structures of "); 
+			AosOut.String(name); AosOut.String(" ("); AosOut.String(desc); AosOut.String("):"); AosOut.Ln;
+			HumanQH(controlTD, SELF);
+			HumanQH(interruptTD[10], SELF);
+			END;
+		END ShowSchedule;		
+		
+		PROCEDURE DoStrongChecks(pipe : AosUsbHcdi.Pipe; len, ofs : LONGINT; VAR buffer : AosUsbdi.Buffer);
+		VAR i : LONGINT;
+		BEGIN
+			IF len > 0 THEN 
+				i := AosMemory.PhysicalAdr(SYSTEM.ADR(buffer[0]), len);
+				IF i = -1 THEN 
+					AosOut.String("AosUsbUhci: Buffers must be physically contiguoues"); AosOut.Ln; 
+					HALT(99)
+				END;
+			END;		
+			IF pipe.type = AosUsbHcdi.PipeControl THEN
+				ASSERT((pipe.firstTD + 16*((pipe.transferLen DIV pipe.maxPacketSize) +3)) <= SYSTEM.ADR(pipe.tdBuffer[pipe.tdBufferLen-1])); (* enough TDs *)
+			ELSE
+				ASSERT((pipe.firstTD + 16*((pipe.transferLen DIV pipe.maxPacketSize) +1)) <= SYSTEM.ADR(pipe.tdBuffer[pipe.tdBufferLen-1])); (* enough TDs *)
+			END;
+		END DoStrongChecks;
+		
 		(* for debugging: display diagnostics of this host controller to KernelLog *)
 		PROCEDURE Diag;  
-		VAR
-			s: SET;
-			framenum : LONGINT;
-			i : INTEGER;
+		VAR s : SET; 	framenum : LONGINT;
 		BEGIN
+			IF Debug.Trace THEN
+			Diag^;
 			SYSTEM.PORTIN (iobase + FrNum, SYSTEM.VAL(INTEGER, framenum));
-			framenum := SYSTEM.VAL(LONGINT, SYSTEM.VAL(SET, framenum) * {0..10});
-			
-			AosOut.String("Diagnostics of ");
-			AosOut.String(name); AosOut.String(" ("); AosOut.String(desc); AosOut.String(")"); AosOut.Ln;
-
+			framenum := SYSTEM.VAL(LONGINT, SYSTEM.VAL(SET, framenum) * {0..10});			
+			AosOut.String("  Frame 0"); AosOut.Hex(framenum, 8);
+			AosOut.String("    LastStatus: ");
 			SYSTEM.PORTIN (iobase + UsbSts, SYSTEM.VAL(INTEGER, s));
-			AosOut.String ("    base 0"); PrintHex(iobase); AosOut.String("H, Irq ");
-			AosOut.Int (irq, 0); AosOut.String(", frame 0"); PrintHex(framenum); AosOut.String("H, Int Counter:");
-			AosOut.Int(interruptCounter,0);AosOut.Ln;
-
-			s := status;
-			AosOut.String("    LastStatus:");
-			IF (s # {}) THEN
-				IF (s * StatusHChalted) # {} THEN AosOut.String (" [HChalted]"); END;
-				IF (s * StatusProcessError) # {} THEN AosOut.String (" [Process Error]"); END;
-				IF (s * StatusSystemError) # {} THEN AosOut.String (" [System Error]"); END;
-				IF (s * StatusResumeDetect) # {} THEN AosOut.String (" [Resume Detect]"); END;
-				IF (s * StatusErrorInt) # {} THEN AosOut.String (" [ErrorInt]"); END;
-				IF (s * StatusInt) # {} THEN AosOut.String (" [Int]"); END;
+			IF s # {} THEN
+				IF s * StatusHChalted # {} THEN AosOut.String ("[HChalted]"); END;
+				IF s * StatusProcessError # {} THEN AosOut.String ("[Process Error]"); END;
+				IF s * StatusSystemError # {} THEN AosOut.String ("[System Error]"); END;
+				IF s * StatusResumeDetect # {} THEN AosOut.String ("[Resume Detect]"); END;
+				IF s * StatusErrorInt # {} THEN AosOut.String ("[ErrorInt]"); END;
+				IF s * StatusInt # {} THEN AosOut.String ("[Int]"); END;
 				AosOut.Ln;
 			ELSE
-				AosOut.String(" [ok]"); AosOut.Ln;
-			END;
-			
-			AosOut.String ("    IRQ enable status:");
+				AosOut.String("[ok]"); AosOut.Ln;
+			END;			
+			AosOut.String ("    IRQ enable status: ");
 			SYSTEM.PORTIN (iobase + UsbIntr, SYSTEM.VAL(INTEGER, s));
-			IF (s * IntShortPacket) # {} THEN AosOut.String(" [Short Packet]"); END;
-			IF (s * IntIOC) # {} THEN AosOut.String (" [IOC]"); END;
-			IF (s * IntResume) # {} THEN AosOut.String (" [Resume]"); END;
-			IF (s * IntTimeoutCRC) # {} THEN AosOut.String (" [Timeout/CRC]"); END;
+			IF s * IntShortPacket # {} THEN AosOut.String("[Short Packet]"); END;
+			IF s * IntIOC # {} THEN AosOut.String ("[IOC]"); END;
+			IF s * IntResume # {} THEN AosOut.String ("[Resume]"); END;
+			IF s * IntTimeoutCRC # {} THEN AosOut.String ("[Timeout/CRC]"); END;
 			AosOut.Ln;
-
-			(* List status of all ports of the root hub *)
-			FOR i:=0 TO portCount -1 DO
-				SYSTEM.PORTIN (iobase + PortSc1 + i*2, SYSTEM.VAL(INTEGER, s));
-				AosOut.String ("    Port "); AosOut.Int(i+1, 0); AosOut.String(" status:");
-				IF (s * PortEnabled) # {} THEN AosOut.String(" [enabled]"); ELSE AosOut.String(" [disabled]"); END;
-				IF (s * PortSuspend) # {} THEN AosOut.String (" [suspended]"); END;
-				IF (s * PortLowSpeed) # {} THEN AosOut.String (" [lowspeed]"); END;
-				IF (s * PortCurrentConnectStatus) # {} THEN AosOut.String (" [device present]"); END;
-				AosOut.Ln;
 			END;
 		END Diag;
 		
-		(* debug: gives you an idea of about how many TD's are free. Isn't exact. *)
-		PROCEDURE MemUsage;
-		VAR
-			i : LONGINT;
-			first, last : LONGINT;
-			nbrOfFreeTDs : LONGINT;
-		BEGIN
-			first := tdlist.first; last := tdlist.last;
-			IF first>last THEN 
-				nbrOfFreeTDs := (first - last) DIV 2; (* TD has 2 byte size *)
-			ELSE
-				nbrOfFreeTDs := (last - first) DIV 2; 
-			END;
-			AosOut.String("TD allocation statistics of "); AosOut.String(name); AosOut.String("("); AosOut.String(desc); AosOut.String(")"); AosOut.Ln;
-			AosOut.String("   Maximum number of TD's: "); AosOut.Int(MaxTDPerController,0); 
-			AosOut.String("("); AosOut.Int((MaxTDPerController*16) DIV (1024*1024), 0); AosOut.String(" MBytes)"); AosOut.Ln;
-			AosOut.String("   TD's in freelist: "); AosOut.Int(nbrOfFreeTDs,0);
-			AosOut.String("("); AosOut.Int((nbrOfFreeTDs*16) DIV (1024*1024), 0); AosOut.String(" Mbytes)"); AosOut.Ln;
-		END MemUsage;
 	END UhciController;
 
 VAR
-	controllerCount : LONGINT;  (* used for naming the host controllers *)
+	qhCounter : LONGINT; (* used by HumanQH; only for debug puposes *)
 	
-(* debug: displays the information in the queue head qh and all TD's in that queue 
-	the queue is traversed only horizontally *)
-PROCEDURE HumanQH(qh : LONGINT);
-VAR
-	val,addr : LONGINT;
-	s : SET;
+(* Debug: displays the information in the queue head qh and all TD's in that queue the queue is traversed only horizontally *)
+PROCEDURE HumanQH(qh : LONGINT; controller : UhciController);
+VAR val,addr : LONGINT; s : SET; pipe : AosUsbHcdi.Pipe; ptr : ANY;
 BEGIN
-	AosOut.String("QH at address: "); PrintHex(qh); AosOut.Ln;
+	IF Debug.Trace THEN
+	IF qhCounter > ShowScheduleMaxQH THEN 
+		AosOut.String("AosUsbUhci: HumanQH: AosUsbUhci.ShowScheduleMaxQH showed... aborting."); AosOut.Ln;
+		RETURN; 
+	ELSE
+		INC(qhCounter);
+	END;
+	AosOut.String("QH at address: "); AosOut.Hex(qh, 8); AosOut.String("H");
+	IF qh = controller.controlTD THEN  AosOut.String(" (Controller Control Queue)");
+	ELSIF qh = controller.bulkTD THEN AosOut.String(" (Controller Bulk Queue)");
+	ELSIF qh = controller. isochronousTD THEN AosOut.String(" (Controller Isochronous Queue)");
+	ELSIF qh = controller. interruptTD[0] THEN AosOut.String(" (Controller 1ms-Interrupt Queue)");
+	ELSIF qh = controller. interruptTD[1] THEN AosOut.String(" (Controller 2ms-Interrupt Queue)");
+	ELSIF qh = controller. interruptTD[2] THEN AosOut.String(" (Controller 4ms-Interrupt Queue)");
+	ELSIF qh = controller. interruptTD[3] THEN AosOut.String(" (Controller 8ms-Interrupt Queue)");
+	ELSIF qh = controller. interruptTD[4] THEN AosOut.String(" (Controller 16ms-Interrupt Queue)");
+	ELSIF qh = controller. interruptTD[5] THEN AosOut.String(" (Controller 32ms-Interrupt Queue)");
+	ELSIF qh = controller.interruptTD[6] THEN AosOut.String(" (Controller 64ms-Interrupt Queue)");
+	ELSIF qh = controller.interruptTD[7] THEN AosOut.String(" (Controller 128ms-Interrupt Queue)");
+	ELSIF qh = controller.interruptTD[8] THEN AosOut.String(" (Controller 256ms-Interrupt Queue)");
+	ELSIF qh = controller.interruptTD[9] THEN AosOut.String(" (Controller 512ms-Interrupt Queue)");
+	ELSIF qh = controller.interruptTD[10] THEN AosOut.String(" (Controller 1024ms-Interrupt Queue)");
+	ELSE
+		ptr := SYSTEM.VAL(ANY, SYSTEM.GET32(qh + 8)); (* should be a pointer to a pipe *)
+		IF ptr # NIL THEN 
+			pipe := ptr (AosUsbHcdi.Pipe);
+			CASE pipe.type OF
+				AosUsbHcdi.PipeBulk : AosOut.String(" (Bulk");
+				|AosUsbHcdi.PipeControl : AosOut.String(" (Control");
+				|AosUsbHcdi.PipeInterrupt : AosOut.String(" (Interrupt");
+				|AosUsbHcdi.PipeIsochronous : AosOut.String(" (Isochronous");
+			ELSE
+				AosOut.String(" (Unknown");
+			END;
+			AosOut.String(" Pipe Adr: "); AosOut.Int(pipe.address, 0);
+			AosOut.String(" Ep: "); AosOut.Int(pipe.endpoint, 0);
+			AosOut.String(")"); AosOut.Ln;
+		ELSE
+			AosOut.String("(unknown)");
+		END;
+	END;
+	AosOut.Ln;
 	
 	(* first show the information of the Queue Head Link pointer (QHLP) *)
-	SYSTEM.GET(qh, SYSTEM.VAL(LONGINT, val));
-	s:=SYSTEM.VAL(SET,val);
-	
 	AosOut.String("   QH link pointer: "); 
-	IF (s * TDQHSelect) # {} THEN AosOut.String(" [QH]"); ELSE AosOut.String(" [TD]"); END;
-	IF (s * TDTerminate) # {} THEN AosOut.String(" [Terminate]"); END;
-	
-	val:=SYSTEM.VAL(LONGINT, SYSTEM.VAL(SET, val) * {4..31});
+	val := SYSTEM.GET32(qh); s := SYSTEM.VAL(SET, val);	
+	IF s * TDQHSelect # {} THEN AosOut.String(" [QH]"); ELSE AosOut.String(" [TD]"); END;
+	IF s * TDTerminate # {} THEN AosOut.String(" [Terminate]"); END;
+	val := SYSTEM.VAL(LONGINT, SYSTEM.VAL(SET, val) * {4..31});
 	addr := val; (* addr := queue head link pointer *)
-
-	AosOut.String("[PTR val: "); PrintHex(val); AosOut.String("]");
-	AosOut.Ln;
+	AosOut.String("[PTR val: "); AosOut.Hex(val, 8); AosOut.String("H]"); AosOut.Ln;
 	
 	(* second show the information of the Queue Element Link Pointer (QELP) *)
-	SYSTEM.GET(qh+4, SYSTEM.VAL(LONGINT, val));
-	s:=SYSTEM.VAL(SET,val);
-	
 	AosOut.String("   QH Element Link Pointer: ");
-	IF (s * TDQHSelect) # {} THEN AosOut.String(" [QH]"); ELSE AosOut.String(" [TD]"); END;
-	IF (s * TDTerminate) # {} THEN AosOut.String(" [Terminate]"); END;
-	
-	val:=SYSTEM.VAL(LONGINT, SYSTEM.VAL(SET, val) * {4..31});
-	
-	AosOut.String("[PTR val: "); PrintHex(val); AosOut.String("]");
-	AosOut.Ln;
+	val := SYSTEM.GET32(qh + 4); s := SYSTEM.VAL(SET,val);	
+	IF s * TDQHSelect # {} THEN AosOut.String(" [QH]"); ELSE AosOut.String(" [TD]"); END;
+	IF s * TDTerminate # {} THEN AosOut.String(" [Terminate]"); END;	
+	val := SYSTEM.VAL(LONGINT, SYSTEM.VAL(SET, val) * {4..31});
+	AosOut.String("[PTR val: "); AosOut.Hex(val, 8); AosOut.String("G]"); AosOut.Ln;
 
 	(* third show the queued TDs in this queue *)
-	IF (s * TDTerminate) = {} THEN (* there are some queued TDs or QHs - show them *)
-
-		IF (s * TDQHSelect) # {} THEN (* is a Queue Head *)
-			HumanQH(val);
+	IF s * TDTerminate = {} THEN (* there are some queued TDs or QHs - show them *)
+		IF s * TDQHSelect # {} THEN (* is a Queue Head *)
+			HumanQH(val, controller);
 		ELSE (* it's a TD *)
 			HumanTD(val); 
 		END;
-		
 	END;
-	
-	IF addr#0 THEN (* there are other queue heads in the queue *)
+	IF addr # 0 THEN (* there are other queue heads in the queue *)
 		AosOut.String("next queue head in queue:"); AosOut.Ln; AosOut.Ln;
-		HumanQH(addr);
+		HumanQH(addr, controller);
 	END;
-
+	(* reset qhCounter *)
+	qhCounter := 0;
+	END;
 END HumanQH;
 
-(* debug: displays the information in the TD nexttd and displays it *)
+(* Debug: displays the information of the  Transfer Descriptor nexttd and all linked TD's and displays it *)
 PROCEDURE HumanTD(nexttd: LONGINT);
-VAR
-	addr, val : LONGINT;
-	s : SET;
+VAR addr, val : LONGINT; s : SET;
 BEGIN
+	IF Debug.Trace THEN
 	LOOP
-		addr := SYSTEM.VAL(LONGINT, SYSTEM.VAL(SET, nexttd) * {4..31});
-		
-		AosOut.String("TD at address: "); PrintHex(addr); AosOut.Ln;
-
-		SYSTEM.GET(addr, SYSTEM.VAL(LONGINT, val));
-		s := SYSTEM.VAL(SET, val);	
-		AosOut.String("   LInkPTR:");
-		IF (s * TDDepthFirst) # {} THEN AosOut.String(" [Depthfirst]"); END;
-		IF (s * TDQHSelect) # {} THEN AosOut.String(" [QH]"); ELSE AosOut.String(" [TD]"); END;
-		IF (s * TDTerminate) # {} THEN AosOut.String(" [Terminate]"); END;
-		AosOut.String(" [PTR Val: "); PrintHex((val DIV 16) * 16 ); AosOut.String(" ]");
+		addr := SYSTEM.VAL(LONGINT, SYSTEM.VAL(SET, nexttd) * {4..31}); (* TD's are 16byte aligned *)
+		AosOut.String("TD at address: "); AosOut.Hex(addr, 8); AosOut.Ln;
+		(* link pointer information *)
+		val := SYSTEM.GET32(addr); s := SYSTEM.VAL(SET, val);	
+		AosOut.String("   LinkPTR:");
+		IF s * TDDepthFirst # {} THEN AosOut.String(" [Depthfirst]"); ELSE AosOut.String("[BreathFirst]"); END;
+		IF s * TDQHSelect # {} THEN AosOut.String(" [QH]"); ELSE AosOut.String(" [TD]"); END;
+		IF s * TDTerminate # {} THEN AosOut.String(" [Terminate]"); END;
+		AosOut.String(" [PTR Val: "); AosOut.Hex((val DIV 16) * 16, 8); AosOut.String("H]");
 		AosOut.Ln;
-
-		SYSTEM.GET(addr+4, SYSTEM.VAL(LONGINT, val));
-		s := SYSTEM.VAL(SET, val);	
-		AosOut.String("   ControlStatus:");
-		IF (s * TDActive) # {} THEN AosOut.String(" [Active]"); END;
-		IF (s * TDIOC) # {} THEN AosOut.String(" [IOC]"); END;
-		IF (s * TDIOS) # {} THEN AosOut.String(" [IOS]"); END;
-		IF (s * TDLS) # {} THEN AosOut.String(" [LowSpeed]"); END;
-		IF (s * TDERR1) # {} THEN AosOut.String(" [Err1]"); END;
-		IF (s * TDERR2) # {} THEN AosOut.String(" [Err2]"); END;
-		IF (s * TDSPD) # {} THEN AosOut.String(" [SPD]"); END;
-		IF (s * TDCrcTimeout) # {} THEN AosOut.String(" [CRC/Timeout]"); END;
-		IF (s * TDNak) # {} THEN AosOut.String(" [NAK]"); END;
-		IF (s * TDDataBuffer) # {} THEN AosOut.String(" [DataBuffer]"); END;
-		IF (s * TDStalled) # {} THEN AosOut.String(" [Stalled]"); END;
-		IF (s * TDBitStuff) # {} THEN AosOut.String(" [BitStuff]"); END;
-		IF (s * TDBabble) # {} THEN AosOut.String(" [Babble]"); END;
-		AosOut.String (" [Actlen: ");
-		val := SYSTEM.VAL(LONGINT, s * {0..10});
-		IF val = 07FFH THEN val := 0; ELSE INC(val); END;
-		AosOut.Int(val, 0); AosOut.String(" ]"); 
-		AosOut.String(" [MaxLen: ");
-		SYSTEM.GET(addr+8, SYSTEM.VAL(LONGINT,val));
+		(* control & status field information *)
+		val := SYSTEM.GET32(addr + 4); s := SYSTEM.VAL(SET, val);	
+		AosOut.String("   Control&Status:");
+		IF s * TDActive # {} THEN AosOut.String(" [Active]"); END;
+		IF s * TDIOC # {} THEN AosOut.String(" [IOC]"); END;
+		IF s * TDIOS # {} THEN AosOut.String(" [IOS]"); END;
+		IF s * TDLS # {} THEN AosOut.String(" [LowSpeed]"); END;
+		IF s * TDERR1 # {} THEN AosOut.String(" [Err1]"); END;
+		IF s * TDERR2 # {} THEN AosOut.String(" [Err2]"); END;
+		IF s * TDSPD # {} THEN AosOut.String(" [SPD]"); END;
+		IF s * TDCrcTimeout # {} THEN AosOut.String(" [CRC/Timeout]"); END;
+		IF s * TDNak # {} THEN AosOut.String(" [NAK]"); END;
+		IF s * TDDataBuffer # {} THEN AosOut.String(" [DataBuffer]"); END;
+		IF s * TDStalled # {} THEN AosOut.String(" [Stalled]"); END;
+		IF s * TDBitStuff # {} THEN AosOut.String(" [BitStuff]"); END;
+		IF s * TDBabble # {} THEN AosOut.String(" [Babble]"); END;
+		AosOut.String (" [Actlen: "); val := SYSTEM.VAL(LONGINT, s * {0..10}); 
+		IF val = 07FFH THEN val := 0; ELSE INC(val); END; AosOut.Int(val, 0); AosOut.String(" ]"); 
+		AosOut.String(" [MaxLen: "); val := SYSTEM.GET32(addr + 8);
 		val := SYSTEM.LSH(val, -21); IF val = 7FFH THEN val := 0; ELSE INC(val); END;
-		AosOut.Int(val, 0);
-		AosOut.String(" ]"); AosOut.Ln;
+		AosOut.Int(val, 0); AosOut.String(" ]"); AosOut.Ln;
+		
 		AosOut.String("   PID: "); 
-		SYSTEM.GET(addr+8, SYSTEM.VAL(LONGINT,val)); val := val MOD 256;
+		val := SYSTEM.GET32(addr + 8); val := val MOD 256;
 		CASE val OF
 			PidOut : AosOut.String("OUT");
 			| PidIn : AosOut.String("IN");
 			| PidSetup : AosOut.String("SETUP");
 		ELSE
-			AosOut.String("Unkown ("); PrintHex(val); AosOut.String("H)");
+			AosOut.String("Unkown ("); AosOut.Hex(val, 8); AosOut.String("H)");
 		END;
 		AosOut.String(" DataToggle: "); 
-		SYSTEM.GET(addr+8, SYSTEM.VAL(LONGINT,val)); 
+		val := SYSTEM.GET32(addr + 8); 
 		s := SYSTEM.VAL(SET,val);
-		IF s*TDDataToggle # {} THEN AosOut.String("DATA1"); ELSE AosOut.String("DATA0"); END;
-		AosOut.Ln;
+		IF s * TDDataToggle # {} THEN AosOut.String("DATA1"); ELSE AosOut.String("DATA0"); END;
 		
+		AosOut.String(" Device Adr: "); AosOut.Int(SYSTEM.LSH(SYSTEM.VAL(LONGINT, s * {8..14}), -8),0);
+		AosOut.String(" Endpoint: "); AosOut.Int(SYSTEM.LSH(SYSTEM.VAL(LONGINT, s * {15..18}), -15),0);
+		AosOut.Ln;
 
-		SYSTEM.GET(addr, SYSTEM.VAL(LONGINT, nexttd));
-		IF (SYSTEM.VAL(SET, nexttd) * {0}) # {} THEN EXIT; END;
+		nexttd := SYSTEM.GET32(addr);
+		IF SYSTEM.VAL(SET, nexttd) * {0} # {} THEN EXIT; END;
+		IF nexttd = 0 THEN AosOut.String("ERROR! Terminate was not set but address is 0"); AosOut.Ln; EXIT; END;
+	END;
 	END;
 END HumanTD;
 
-(* called when this module is unloaded *)
-PROCEDURE Cleanup();
+PROCEDURE ShowInterrupts(s : SET);
+BEGIN
+	AosOut.String("AosUsbUhci: Interrupt: ");
+	IF s * StatusHChalted # {} THEN AosOut.String("[HcHalted]");  END;
+	IF s * StatusProcessError # {} THEN AosOut.String("[ProcessError]"); END;
+	IF s * StatusSystemError # {} THEN AosOut.String("[SystemError]"); END;
+	IF s * StatusErrorInt # {} THEN AosOut.String("[ErrorInt]"); END; 
+	IF s * StatusInt # {} THEN AosOut.String("[Int]"); END;
+	AosOut.Ln;
+END ShowInterrupts;  
+
+(* Scan all PCI busses for UHCI compliant host controllers *)
+PROCEDURE PCIFindUhci;
+CONST
+	UhciClassCode = 0C0300H;
 VAR
-	i: LONGINT;
-	controllers : AosPlugins.Table;
-	controller : UhciController;
-BEGIN
-	(* reset all UHCI USB host controllers and remove them from the AosUsbHcdi.controllers registry *)
-	AosUsbHcdi.controllers.GetAll(controllers);
-	
-	IF controllers#NIL THEN
-		i:=0;
-		WHILE i <= LEN(controllers^)-1 DO
-			IF controllers[i].desc="UHCI USB host controller" THEN 
-				controller:=controllers[i](UhciController);
-				IF controller.active THEN AosActive.RemoveHandler(controller.InterruptHandler, AosInterrupts.IRQ0 + controller.irq);END;
-				controller.Reset;
-				AosUsbHcdi.controllers.Remove(controller);
-			END;
-			INC(i);
-		END;
-	END;		
-	
-END Cleanup;
-
-(** Displays status of all registred UHCI USB host controllers (for debugging) *)
-PROCEDURE Diag*;
-VAR
-	i : INTEGER;
-	controllers : AosPlugins.Table;
-BEGIN
-	AosUsbHcdi.controllers.GetAll(controllers);
-
-	IF controllers#NIL THEN
-		i:=0;
-		WHILE i <= LEN(controllers^)-1 DO
-			IF controllers[i].desc="UHCI USB host controller" THEN 
-				controllers[i](UhciController).Diag; 
-			END;
-			INC(i);
-		END;
-	END;		
-END Diag;
-
-PROCEDURE PrintHex(was: LONGINT);
-VAR z,d,h,i:LONGINT;
-BEGIN
-	z := 0;
-	d := 16*16*16*16*16*16*16; (* what a quick hack, hopefully the compiler is intelligent enough *)
-	FOR i:=0 TO 7 DO
-		h := (was DIV d) MOD 16;
-		IF (z = 1) OR (h # 0) OR (i = 7) THEN
-			z := 1;
-			IF h < 10 THEN AosOut.Int(h,0); ELSE AosOut.Char(CHR(ORD("A")+h-10)); END;
-		END;
-		d:=d DIV 16;
-	END;
-END PrintHex;
-	
-(* Find UHCI controllers on the PCI bus, create correspondig UCHIcontroller object and register them in the UHCI USB host controllers registry; 
-	called by FindControllers *)
-PROCEDURE PCIFindUhci(id, vendor: LONGINT);
-VAR 
-	index, bus, dev, fkt, iobase, IrqRouting, res: LONGINT;
 	hostController : UhciController;
-	name : AosPlugins.Name;
-
-	PROCEDURE ReadDWord(adr: LONGINT;  VAR s: LONGINT);
-	VAR res: LONGINT;
-	BEGIN
-		res := PCI.ReadConfigDword(bus, dev, fkt, adr, s);
-		IF res # PCI.Done THEN s := 0 END
-	END ReadDWord;
-
-	PROCEDURE ReadByte(adr: LONGINT;  VAR s: LONGINT);
-	VAR res: LONGINT;
-	BEGIN
-		res := PCI.ReadConfigByte(bus, dev, fkt, adr, s);
-		IF res # PCI.Done THEN s := 0 END
-	END ReadByte;
-
-	PROCEDURE WriteWord(adr: LONGINT;  s: LONGINT);
-	VAR res: LONGINT;
-	BEGIN
-		res := PCI.WriteConfigWord(bus, dev, fkt, adr, s);
-		(* ignore res *)
-	END WriteWord;
-
+	bus, device, function : LONGINT;
+	iobase, irqline : LONGINT;
+	index : LONGINT;
+	res : LONGINT;
 BEGIN
-
 	index := 0;
-
-	WHILE (PCI.FindPCIDevice(id, vendor, index, bus, dev, fkt) = PCI.Done) DO 
-	
-		ReadByte(3CH, IrqRouting); (* Register set by PCI Bios *)
-
-		ReadDWord(20H, iobase);
+	WHILE PCI.FindPCIClassCode(UhciClassCode, index, bus, device, function) = PCI.Done DO
+		(* Get IRQ line - should be set by BIOS *)
+		res := PCI.ReadConfigByte(bus, device, function, PCI.IntlReg, irqline); ASSERT(res = PCI.Done);
+		res := PCI.ReadConfigDword(bus, device, function, PCI.Adr4Reg, iobase); ASSERT(res = PCI.Done);
 		iobase := SYSTEM.VAL(LONGINT, SYSTEM.VAL(SET, iobase) * {1..31});
-
-   	 IF (IrqRouting = 0) THEN
-			AosOut.String("AosUsbUhci: Please enable USB-IRQ in BIOS for UHCI Controller at base 0");
-			PrintHex(iobase); AosOut.Char("H"); AosOut.Ln;
-		ELSE
-			WriteWord(0C0H, 2000H); (* disable legacy emulation *)
-			
-			NEW(hostController);
-			
-			IF hostController.Init(iobase,SHORT(IrqRouting)) THEN (* host controller has been initialized and started successfully *)
-			
-				AosOut.String("AosUhci: Initialised USB UHCI controller at base 0"); PrintHex(iobase); 
-				AosOut.String("H, Irq: "); AosOut.Int(IrqRouting, 0); AosOut.Ln;
-				
-			   name:="USB";  
-			   name[3]:=CHR(controllerCount+48);
-			   name[4]:=0X;
-			   
-   			hostController.SetName(name);
-   			hostController.desc:="UHCI USB host controller";
-				
-				(* register the controller as AosPlugin *)
-				AosUsbHcdi.controllers.Add(hostController, res); 
-				IF (res#0) THEN (* ERROR: registering the host controller failed, should not happen *) hostController:=NIL; END; 
-				
-				INC(controllerCount);
-				
-			ELSE (* ERROR: host controller initialization failed *)
-				hostController:=NIL;
-				AosOut.String("AosUhci: ERROR: Cannot init USB UHCI controller at base 0"); PrintHex(iobase); 
-				AosOut.String("H, Irq: "); AosOut.Int(IrqRouting, 0); AosOut.Ln;
+		IF irqline # 0 THEN
+			res := PCI.WriteConfigWord(bus, device, function, 0C0H, 2000H); (* disable legacy emulation *)
+			IF res = PCI.Done THEN
+				NEW(hostController, bus, device, function);
+				IF hostController.Init(iobase, irqline) THEN (* host controller has been initialized and started successfully *)	
+					res := PCI.ReadConfigByte(bus, device, function, 60H, hostController.bcdUSB); (* ignore res *)
+					IF Debug.Verbose THEN 
+						AosOut.Enter;
+						AosOut.String("AosUsbUhci: Initialised USB UHCI controller at base 0"); AosOut.Hex(iobase, 8); 
+						AosOut.String("H, Irq: "); AosOut.Int(irqline, 0); 
+						AosOut.String("  USB version: "); AosOut.Hex(SYSTEM.LSH(hostController.bcdUSB, -4), -2); AosOut.Char("."); 
+						AosOut.Hex(hostController.bcdUSB MOD 10H, -2);
+						AosOut.Exit;
+					END;
+					AosUsbHcdi.RegisterHostController(hostController, Description);
+				ELSE
+					AosOut.Enter;
+					AosOut.String("AosUsbUhci: ERROR: Cannot init USB UHCI controller at base 0"); AosOut.Hex(iobase, 8); 
+					AosOut.String("H, Irq: "); AosOut.Int(irqline, 0);
+					AosOut.Exit;
+				END;
+			ELSE AosOut.String("AosUsbUhci: Error when accessing PCI configuration space (2)"); AosOut.Ln;
 			END;
-		END; 
-				
+		ELSE
+			AosOut.Enter;
+			AosOut.String("AosUsbUhci: Please enable USB-Interrupt in BIOS for UHCI host controller at base 0");
+			AosOut.Hex(iobase, 8); AosOut.Char("H"); AosOut.Ln;
+			AosOut.Exit;
+		END;
 		INC(index);
 	END;
 END PCIFindUhci;
 
-(* Find Intel UHCI compatible controllers and register them. *)
-PROCEDURE FindControllers;
-BEGIN
-	 (* FindControllers should only be called at module loading time *) 
-	 IF controllerCount # 0 THEN RETURN END;
-	 	 
-	PCIFindUhci(7020H, 8086H); (* Intel PIIX3 *)
-	PCIFindUhci(7112H, 8086H); (* Intel PIIX4 + PIIX4E *)
-	PCIFindUhci(2412H, 8086H); (* Intel 82801 AA *)
-	PCIFindUhci(2422H, 8086H); (* Intel 82901 AB *)
-	PCIFindUhci(2442H, 8086H); (* seems compatible *)
-	PCIFindUhci(2444H, 8086H); (* seems compatible *)
-	PCIFindUhci(2482H, 8086H); (* seems compatible *)
-	PCIFindUhci(2484H, 8086H); (* seems compatible *)
-	PCIFindUhci(2487H, 8086H); (* seems compatible *)
-	PCIFindUhci(3038H, 1106H); (* seems compatible *)
-	PCIFindUhci(24C2H, 8086H); (* seems compatible *)
-	PCIFindUhci(719AH, 8086H); (* 82440MX *)
-	PCIFindUhci(24D2H, 8086H); (* unsure *)
-	PCIFindUhci(24D4H, 8086H); (* unsure *)
-	PCIFindUhci(24D7H, 8086H); (* unsure *)
-	PCIFindUhci(24DEH, 8086H); (* unsure *)
-END FindControllers;
-
-PROCEDURE Init*(ptr : PTR): PTR;
-BEGIN
-	(* do nothing *)
+(** Scan the PCI bus(ses) for UHCI compliant USB host controllers and start them *)
+PROCEDURE Install*(ptr : PTR): PTR;
+BEGIN (* Load module *)
 	RETURN NIL;
-END Init;
+END Install;
+
+PROCEDURE Cleanup();
+BEGIN
+	AosUsbHcdi.UnRegisterHostControllers(Description); 
+END Cleanup;
 
 BEGIN
-	
-	controllerCount:=0;
-
 	AosModules.InstallTermHandler(Cleanup); 
- 
-	(* find, init and start all compatible UHCI USB host controllers and register them in the AosUsbHcdi.controllers registry *)
-	FindControllers; 
-	
+	(* Find, init and start all compatible UHCI USB host controllers and register them in the AosUsbHcdi.controllers registry *)
+	PCIFindUhci;
 END AosUsbUhci.
 
-(* Init: AosUsbUhci.Init  Diagnostics: AosUsbUhci.Diag *)
-AosUsb.Init AosUsb.Info
+AosUsbUhci.Install ~  S.Free AosUsbUhci ~
 
 

@@ -1,10 +1,9 @@
 (* ETH Oberon, Copyright 2001 ETH Zuerich Institut fuer Computersysteme, ETH Zentrum, CH-8092 Zuerich.
 Refer to the "General ETH Oberon System Source License" contract available at: http://www.oberon.ethz.ch/ *)
 
-MODULE TextFields; (** portable *) (* jm 16.11.95 *)
+MODULE TextFields; (** portable *)	(* jm 16.11.95 *)
 
-(** Module TextFields implements text captions and textfields.
-*)
+ (** Module TextFields implements text captions and textfields. *)
 
 (*
 	JM 4.2.93 - Textfields sends update message down
@@ -28,16 +27,23 @@ MODULE TextFields; (** portable *) (* jm 16.11.95 *)
 	16.11.95 - Fixed copy of selected caption in panel
 	12.12.95 - tk added underlined attribute
 	22.4.97 - ps added Font attribute
+	16.3.2005 - ph; captions are now automatically resizable when used with an organizer panel or button and given 
+					Constraints in relative notation (  -1.0 <= .. <= 1.0  see Organizer.Mod). 
+					Automatic resizing works only if  ~ ({Gagets.lockedsize} IN caption.state) .
+	19.3.05 - ph TextFields now
+							- can change their Font
+							- can change their Font Color
+							- can adapt their Font size on TextField resizing 					
 *)
 
 IMPORT
-	Objects, Gadgets, Display, Display3, Effects, Oberon, Texts, Files, Input, Printer, Printer3, Fonts, Attributes, Strings;
+	Objects, Gadgets, Display, Display3, Effects, Oberon, Texts, Files, Input, Printer, Printer3, Fonts, Attributes, Strings, Colors;
 
 CONST
-	MaxLen = 64; CarHeight = 14; CarWidth = 2; Yoffset = 5; Xoffset = 5;
+	MaxLen = 64; CarHeight = 14; CarWidth = 2; Yoffset = 2 (*5*); Xoffset = 5;
 	
 TYPE
-	(** Captions  for displaying a text. *)
+	(** Captions for displaying a text. *)
 	Caption* = POINTER TO CaptionDesc;
 	CaptionDesc* = RECORD (Gadgets.FrameDesc)
 		focused*,	(** Has the keyboard focus or not ? *)
@@ -52,9 +58,12 @@ TYPE
 		time*: LONGINT;	(** Selection time. *)
 		carpos*, carx*, cary*: INTEGER;	(** Caret position and relative coordinates. *)
 		val*: ARRAY MaxLen OF CHAR;	(** Current value. *)
+		font*:Fonts.Font; 
+		textcol*:INTEGER;
 		consistent*: BOOLEAN;	(** Is the textfield consistent with its model value ? *)
 		col*: INTEGER;	(** Background color. *)
 		start: INTEGER;
+		topC,bottomC:INTEGER;
 	END;
 	
 	TextFieldUpdateMsg = RECORD (Gadgets.UpdateMsg)
@@ -71,7 +80,7 @@ VAR
 	invTF: INTEGER; (* focus & selection color for text fields *)
 	linebuf: ARRAY 32 OF INTEGER;
 	lastfont, lastlib: Fonts.Font;
-	    
+
 PROCEDURE ForceString(F: Display.Frame; VAR M: Objects.AttrMsg);
 BEGIN Gadgets.framehandle(F, M);
 	IF M.res < 0 THEN M.class := Objects.String; M.s := ""; M.res := 0 END
@@ -122,6 +131,56 @@ BEGIN
 	ELSE COPY(lib.name, font)
 	END
 END GetFont;
+
+		(*Following 5 procedures are Copy/Paste from EditTools Mod; to keep current module load order*)
+		
+	PROCEDURE IsFont(lib: Objects.Library): BOOLEAN;
+	BEGIN RETURN (lib # NIL) & (lib IS Fonts.Font)
+	END IsFont;
+		
+	PROCEDURE ThisFont(name: ARRAY OF CHAR): Fonts.Font;
+		VAR fnt: Fonts.Font;
+	BEGIN
+		fnt := Fonts.This(name);
+		IF (fnt = Fonts.Default) & (fnt.name # name) THEN RETURN NIL
+		ELSE RETURN fnt
+		END
+	END ThisFont;
+
+		PROCEDURE SplitFontName (fn: ARRAY OF CHAR; VAR i, j, size: INTEGER);	
+		(*Copy/Paste from EditTools Mod; to keep current module load order*)
+		VAR k: INTEGER;
+	BEGIN i := 0; size := 0;
+		WHILE (fn[i] # 0X) & ((fn[i] < "0") OR ("9" < fn[i])) DO INC(i) END;
+		j := i; WHILE ("0" <= fn[j]) & (fn[j] <= "9") DO INC(j) END;
+		k := i; WHILE k < j DO size := size * 10 + ORD(fn[k]) - 30H; INC(k) END
+	END SplitFontName;
+
+	PROCEDURE CombineFontName (prefix, suffix: ARRAY OF CHAR; i, j, size: INTEGER; VAR fn: ARRAY OF CHAR);
+		VAR k: INTEGER; ch: CHAR; dig: ARRAY 10 OF CHAR;
+	BEGIN COPY(prefix, fn); k := 0;
+		IF size < 6 THEN size := 6 ELSIF size > 128 THEN size := 128 END;
+		REPEAT dig[k] := CHR(size MOD 10 + 30H); size := size DIV 10; INC(k) UNTIL size = 0;
+		REPEAT DEC(k); fn[i] := dig[k]; INC(i) UNTIL k = 0;
+		REPEAT ch := suffix[j]; fn[i] := ch; INC(i); INC(j) UNTIL ch = 0X
+	END CombineFontName;
+
+PROCEDURE IncFontSize (T: Texts.Text; beg, end: LONGINT; delta: INTEGER);
+		CONST MinSize = 6; MaxSize = 96;
+		VAR R: Texts.Reader; fnt: Objects.Library; fn: Objects.Name; org: LONGINT; i, j, size: INTEGER; ch: CHAR;
+	BEGIN Texts.OpenReader(R, T, beg); Texts.Read(R, ch);
+		WHILE ~R.eot & (beg < end) DO org := beg;
+			fnt := R.lib;
+			WHILE ~R.eot & (beg < end) & (R.lib = fnt) DO INC(beg); Texts.Read(R, ch) END;
+			IF IsFont(fnt) THEN SplitFontName(fnt.name, i, j, size);
+				IF (i < j) & ((size+delta) >= MinSize) & ((size+delta) <= MaxSize) THEN
+					CombineFontName(fnt.name, fnt.name, i, j, size + delta, fn); fnt := ThisFont(fn);
+					IF fnt # NIL THEN Texts.ChangeLooks(T, org, beg, {0}, fnt, 0, 0) END
+				END
+			END
+		END
+	END IncFontSize;
+
 
 (** Calculate the size and # of lines of caption. If displayspace then the size on the display is returned (adjusted according to the size on the printer) and if not, the size in printer pixels is returned. *)
 PROCEDURE CalcSize*(F: Caption; VAR W, H, nolines: INTEGER; displayspace: BOOLEAN);
@@ -203,7 +262,7 @@ BEGIN
 END Update;
 	
 PROCEDURE RestoreCaption(F: Caption; M: Display3.Mask; x, y, w, h: INTEGER);
-VAR X, X0, Y, W, H, nolines, i: INTEGER; R: Texts.Reader; ch: CHAR; obj: Objects.Object; fnt: Fonts.Font;
+VAR X, X0, Y, W, H, nolines, i: INTEGER; R: Texts.Reader; ch: CHAR; obj: Objects.Object; fnt: Fonts.Font; 
 BEGIN
 	IF F.text.len = 0 THEN
 		IF F.focused THEN
@@ -289,15 +348,15 @@ BEGIN
 			END
 		ELSIF M.name = "Font" THEN
 			IF M.class = Objects.String THEN
-				IF M.s # "mixed"  THEN Texts.ChangeLooks(F.text, 0, F.text.len, {0}, Fonts.This(M.s), 0, 0) END;
+				IF M.s # "mixed" THEN Texts.ChangeLooks(F.text, 0, F.text.len, {0}, Fonts.This(M.s), 0, 0) END;
 				M.res :=0
 			END
 		ELSE
-			Gadgets.framehandle(F, M)
+			Gadgets.framehandle(F, M);
 		END
 	ELSIF M.id = Objects.enum THEN
 		M.Enum("Value"); M.Enum("Font"); M.Enum("Cmd"); M.Enum("Underlined"); Gadgets.framehandle(F, M)
-	END
+	END;
 END CaptionAttributes;
 
 PROCEDURE PrintCaption(F: Caption; VAR M: Display.DisplayMsg);
@@ -380,6 +439,39 @@ BEGIN
 	END;
 END CopyCaption;
 
+PROCEDURE ResizeCaptionToFit* (VAR caption:Caption;newW,newH:INTEGER);
+VAR new:Caption; w,h,nolines,oldw,oldh:INTEGER; A:Objects.AttrMsg;
+		t:Texts.Text; 
+BEGIN
+	IF caption=NIL THEN RETURN END;
+	A.id:=Objects.get; COPY("Constraints",A.name); A.res:=-1; A.class:=Objects.String; Gadgets.framehandle(caption,A);
+	IF A.res<0 THEN RETURN END;
+	CalcSize(caption,oldw,oldh,nolines,TRUE);
+	t:=caption.text;
+	IF (newH=oldh) THEN RETURN
+	ELSIF (newH<oldh) OR (newW<oldw)  THEN (*not yet fully handled: grow in X/ shrink in Y ... *)
+		REPEAT
+			oldw:=w; oldh:=h;
+				(*temporarily remove caption text from display space because 
+					IncFontSize->Text.ChangeLooks destroys as side effect the correct Gadgets.link list order 
+					and sends unnessesary update messages*)
+			caption.text:=NIL; IncFontSize(t,0,t.len,-1); caption.text:=t;
+			CalcSize(caption,w,h,nolines,TRUE);
+		UNTIL  ((h<newH) & (w<newW)) OR ((w=oldw)&(h=oldh)); 	(*overshooting a little or no progress (no more fonts...) *)
+		IF ~ ((w=oldw)&(h=oldh)) THEN caption.text:=NIL; IncFontSize(t,0,t.len,1); caption.text:=t; (*step back*)
+		END; 
+	ELSE 
+		REPEAT
+			oldw:=w; oldh:=h;
+			caption.text:=NIL; IncFontSize(t,0,t.len, 1); caption.text:=t;
+			CalcSize(caption,w,h,nolines,TRUE);
+		UNTIL (h >newH)  OR (w >newW) OR ((w=oldw)&(h=oldh));  (*overshooting a little or no progress (no more fonts...) *)
+		IF ~ ((w=oldw)&(h=oldh)) THEN  caption.text:=NIL; IncFontSize(t,0,t.len,-1); caption.text:=t; (*step back*)
+		END 
+	END;
+	caption.W:=newW; caption.H:=newH;
+END ResizeCaptionToFit;
+
 PROCEDURE ConsumeCh(F: Caption; ch: CHAR; fnt: Objects.Library; col, voff: SHORTINT);
 VAR R: Texts.Reader; chr: CHAR;
 BEGIN
@@ -410,7 +502,7 @@ BEGIN
 		Gadgets.framehandle(F, M);
 	ELSIF (ver = 2) OR (ver = 3) THEN
 		Files.Read(M.R, chr); (* read TextBlockId *)
-		IF (chr = 01X) OR (chr  = Texts.TextBlockId) THEN
+		IF (chr = 01X) OR (chr = Texts.TextBlockId) THEN
 			Texts.Load(F.text, Files.Base(M.R), Files.Pos(M.R), len);
 			Files.Set(M.R, Files.Base(M.R), Files.Pos(M.R)+len);
 			Gadgets.framehandle(F, M);
@@ -447,9 +539,11 @@ BEGIN
 						WITH M: Display.DisplayMsg DO
 							IF M.device = Display.screen THEN
 								IF (M.id = Display.full) OR (M.F = NIL) THEN
+									ResizeCaptionToFit(F,F.W,F.H);
 									Gadgets.MakeMask(F, x, y, M.dlink, Q);
 									RestoreCaption(F, Q, x, y, w, h)
 								ELSIF M.id = Display.area THEN
+									ResizeCaptionToFit(F,F.W,F.H);
 									Gadgets.MakeMask(F, x, y, M.dlink, Q);
 									Display3.AdjustMask(Q, x + M.u, y + h - 1 + M.v, M.w, M.h);
 									RestoreCaption(F, Q, x, y, w, h)
@@ -503,13 +597,13 @@ BEGIN
 							END
 						END
 					ELSIF M IS Oberon.ControlMsg THEN
-						WITH  M: Oberon.ControlMsg DO
+						WITH M: Oberon.ControlMsg DO
 							IF F.focused & ((M.id = Oberon.defocus) OR (M.id = Oberon.neutralize)) THEN
 								F.focused := FALSE; Gadgets.Update(F)
 							END
 						END
 					ELSIF M IS Display.SelectMsg THEN
-						WITH M:  Display.SelectMsg DO
+						WITH M: Display.SelectMsg DO
 							IF M.id = Display.set THEN F.time := Oberon.Time()-1 ELSE F.time := -1 END;
 							Gadgets.framehandle(F, M);
 						END
@@ -519,11 +613,17 @@ BEGIN
 								lastfont := NIL; lastlib := NIL
 							END
 						END
+					ELSIF M IS Display.ModifyMsg THEN
+						WITH M:Display.ModifyMsg DO
+							IF M.F=F THEN ResizeCaptionToFit(F,M.W,M.H); END;
+							Gadgets.framehandle(F,M);
+						END;
 					ELSE Gadgets.framehandle(F, M)
 					END
 				END
 			END
-		ELSIF M IS Objects.AttrMsg THEN CaptionAttributes(F, M(Objects.AttrMsg))
+		ELSIF M IS Objects.AttrMsg THEN 
+			CaptionAttributes(F, M(Objects.AttrMsg));
 		ELSIF M IS Objects.LinkMsg THEN
 			WITH M: Objects.LinkMsg DO
 				IF M.id = Objects.get THEN
@@ -531,7 +631,7 @@ BEGIN
 					ELSE Gadgets.framehandle(F, M)
 					END
 				ELSIF M.id = Objects.set THEN
-					IF (M.name = "Model")  & (M.obj IS Texts.Text) THEN F.text := M.obj(Texts.Text); M.res := 0;
+					IF (M.name = "Model") & (M.obj IS Texts.Text) THEN F.text := M.obj(Texts.Text); M.res := 0;
 						Update(F);
 					ELSE Gadgets.framehandle(F, M)
 					END
@@ -565,7 +665,7 @@ END CaptionHandler;
 (** initialize caption F with text T. *)
 PROCEDURE InitCaption* (F: Caption; T: Texts.Text);
 VAR nolines: INTEGER;
-BEGIN F.state := {Gadgets.transparent, Gadgets.lockedsize};
+BEGIN F.state := {Gadgets.transparent (*, Gadgets.lockedsize*)};
 	F.text := T;
 	IF T.len = 0 THEN F.W := 5; F.H := 5
 	ELSE CalcSize(F, F.W, F.H, nolines, TRUE)
@@ -710,7 +810,7 @@ BEGIN
 			IF F.start > F.carpos THEN DEC(F.start); beg := -1 END;
 			UpdateTextField(F, beg)
 		END
-	ELSIF ch = 0A1X  THEN (* Delete right *)
+	ELSIF ch = 0A1X THEN (* Delete right *)
 		IF F.val[F.carpos] # 0X THEN
 			DeleteChar(F.val, F.carpos); beg := F.carpos;
 			IF F.selbeg >= 0 THEN F.selbeg := -1; beg := -1 END; Inval(F, beg);
@@ -779,7 +879,8 @@ VAR p: INTEGER; r: Objects.Object; X: INTEGER;
 BEGIN
 	p := F.start; X := x + Xoffset;
 	WHILE (F.val[p] # 0X) DO
-		Fonts.Default.GetObj(Fonts.Default, ORD(F.val[p]), r);
+		(*Fonts.Default.GetObj(Fonts.Default, ORD(F.val[p]), r);*)
+		F.font.GetObj(F.font, ORD(F.val[p]), r);
 		IF mx < X + r(Fonts.Char).dx THEN pos := p; RETURN; END;
 		INC(X, r(Fonts.Char).dx); INC(p);
 	END;
@@ -789,22 +890,23 @@ END LocateChar;
 PROCEDURE LocatePos(F: TextField; pos: INTEGER; VAR x, y: INTEGER);
 VAR r: Objects.Object; p: INTEGER;
 BEGIN
-	x := Xoffset; y := Yoffset; p := F.start;
+	x := Xoffset; (*y := Yoffset*) y:= Yoffset - F.font.minY ; p := F.start;
 	WHILE (F.val[p] # 0X) & (p < pos) DO
-		Fonts.Default.GetObj(Fonts.Default, ORD(F.val[p]), r);
+		(*Fonts.Default.GetObj(Fonts.Default, ORD(F.val[p]), r);*)
+		F.font.GetObj(F.font, ORD(F.val[p]), r);
 		INC(x, r(Fonts.Char).dx); INC(p);
 	END;
 END LocatePos;
 
 PROCEDURE FlipCaret(R: Display3.Mask; F: TextField; x, y: INTEGER);
 BEGIN
-	IF F.carpos >= 0 THEN Display3.ReplConst(R, invTF, x + F.carx, y + F.cary-3, CarWidth, CarHeight, Display.invert); END;
+	IF F.carpos >= 0 THEN Display3.ReplConst(R, invTF, x + F.carx, y + F.cary-3, CarWidth, F.font.maxY+3+2 (*CarHeight*), Display.invert); END;
 END FlipCaret;
 
 PROCEDURE SetCaret(R: Display3.Mask; F: TextField; x, y, pos: INTEGER);
 BEGIN
 	LocatePos(F, pos, F.carx, F.cary);
-	Display3.ReplConst(R, invTF, x + F.carx, y + F.cary-3, CarWidth, CarHeight, Display.invert);
+	Display3.ReplConst(R, invTF, x + F.carx, y + F.cary-3, CarWidth, F.font.maxY+3+2 (*CarHeight*), Display.invert);
 END SetCaret;
 
 PROCEDURE RemoveCaret(R: Display3.Mask; F: TextField; x, y: INTEGER);
@@ -854,7 +956,7 @@ PROCEDURE FlipSelection(R: Display3.Mask; F: TextField; x, y: INTEGER; spos, epo
 VAR sx, sy, ex, ey: INTEGER;
 BEGIN
 	LocatePos(F, spos, sx, sy); LocatePos(F, epos, ex, ey);
-	Display3.ReplConst(R, invTF, x + sx, y + sy - 3, (ex - sx), Min(CarHeight, F.H - 4), Display.invert);
+	Display3.ReplConst(R, invTF, x + sx, y + sy - 3, (ex - sx), Min(F.font.maxY+3+2 (*CarHeight*), F.H - 4), Display.invert);
 END FlipSelection;
 
 PROCEDURE RemoveSelection(R: Display3.Mask; F: TextField; x, y: INTEGER);
@@ -888,15 +990,15 @@ BEGIN
 		IF (pos >= spos) & (pos # epos) THEN
 			Oberon.FadeCursor(Oberon.Mouse);
 			IF (pos < epos) THEN
-				FlipSelection(R, F, x, y,  pos+1, epos+1);
+				FlipSelection(R, F, x, y, pos+1, epos+1);
 			ELSE
-				FlipSelection(R, F, x, y,  epos+1, pos+1);
+				FlipSelection(R, F, x, y, epos+1, pos+1);
 			END;
 			epos := pos;
 		END;
 		Oberon.DrawCursor(Oberon.Mouse, Effects.Arrow, mx, my);
 	END;
-	FlipSelection(R, F, x, y,  spos, epos+1);
+	FlipSelection(R, F, x, y, spos, epos+1);
 	F.selbeg := -1;
 	IF (keysum = {0}) & (spos # -1) THEN
 		F.time := Oberon.Time();
@@ -941,20 +1043,26 @@ BEGIN
 		IF M.name = "Gen" THEN M.class := Objects.String; COPY("TextFields.NewTextField", M.s); M.res := 0
 		ELSIF M.name = "Value" THEN M.class := Objects.String; COPY(F.val, M.s); M.res := 0
 		ELSIF M.name = "Color" THEN M.class := Objects.Int; M.i := F.col; M.res := 0
-		ELSIF M.name = "LineupHY" THEN M.class := Objects.Int; M.i := Yoffset; M.res := 0
+		ELSIF M.name= "TextCol" THEN M.class :=Objects.Int; M.i := F.textcol; M.res:=0
+		ELSIF M.name = "LineupHY" THEN M.class := Objects.Int; M.i := Yoffset-F.font.minY; M.res := 0
 		ELSIF M.name = "Field" THEN ForceString(F, M)
 		ELSIF M.name = "Cmd" THEN ForceString(F, M)
+		ELSIF M.name= "Font" THEN M.class := Objects.String; COPY(F.font.name, M.s); M.res := 0
 		ELSE Gadgets.framehandle(F, M)
 		END;
 	ELSIF M.id = Objects.set THEN
 		IF M.name = "Value" THEN
 			IF M.class = Objects.String THEN COPY(M.s, F.val); M.res := 0 END
 		ELSIF M.name = "Color" THEN
-			IF M.class = Objects.Int THEN F.col := SHORT(M.i); M.res := 0 END
+			IF M.class = Objects.Int THEN F.col := SHORT(M.i); ComputeColors(F,F.col); M.res := 0 END
+		ELSIF M.name = "TextCol" THEN
+			IF M.class = Objects.Int THEN F.textcol := SHORT(M.i); M.res := 0 END
+		ELSIF M.name="Font" THEN
+			IF M.class = Objects.String THEN F.font:=ThisFont(M.s); IF F.font=NIL THEN F.font:=Fonts.Default END; M.res := 0 END
 		ELSE Gadgets.framehandle(F, M);
 		END;
 	ELSIF M.id = Objects.enum THEN
-		M.Enum("Value"); M.Enum("Color"); M.Enum("Field"); M.Enum("Cmd"); Gadgets.framehandle(F, M); 
+		M.Enum("Value"); M.Enum("Color"); M.Enum("TextCol"); M.Enum("Font"); M.Enum("Field"); M.Enum("Cmd"); Gadgets.framehandle(F, M); 
 	END;
 END TextFieldAttr;
 
@@ -977,29 +1085,60 @@ BEGIN
 	UpdateTextField(F, beg);
 END ConsumeText;
 
+PROCEDURE AdaptFontSizeProportional*(F:TextField);
+VAR i,j,size,newsize:INTEGER; oldfont:Fonts.Font; oldfn,newfn:ARRAY 64 OF CHAR; 
+BEGIN
+	IF F=NIL THEN RETURN END;
+	oldfont:=F.font;
+	COPY(oldfont.name,oldfn);
+	SplitFontName(oldfn,i,j,size);
+	newsize:=( (F.H - Yoffset -3 (*upper border*)) * 10 DIV 12)   ;	
+		(* *10 DIV 12 because font size 10 goes from -3 to 9 (range 12) pixels*)
+	CombineFontName(oldfn,oldfn,i,j,newsize,newfn);
+	F.font:=ThisFont(newfn);
+	IF F.font=NIL THEN F.font:=oldfont END;
+END AdaptFontSizeProportional;
+
+PROCEDURE ComputeColors(F:TextField; col:LONGINT);
+VAR r,g,b:REAL; 
+BEGIN
+	IF col=Display3.textbackC THEN F.topC:=Display3.textbackC; F.bottomC:=Display3.bottomC;
+	ELSE
+		Colors.DisplayToRGB(col, r,g,b); 
+		col:=Colors.Match(Colors.DisplayIndex,Colors.DisplayBits,SHORT(ENTIER(255*r/1.5)),
+																			SHORT(ENTIER( 255*g/1.5)), SHORT(ENTIER(255*b/1.5)));
+		IF Display3.bottomC=Display.FG (*hardlook*) THEN F.bottomC:=Display.FG ELSE F.bottomC:=SHORT(col) END;
+		col:=Colors.Match(Colors.DisplayIndex,Colors.DisplayBits, SHORT(ENTIER(255*(1-(1-r)/1.5))), 
+																				SHORT(ENTIER(255*(1-(1-g)/1.5))), SHORT(ENTIER(255*(1-(1-b)/1.5)))); 
+		F.topC:=SHORT(col);
+	END;
+END ComputeColors;
+
 PROCEDURE RestoreTextField(R: Display3.Mask; F: TextField; x, y, w, h: INTEGER; beg: LONGINT);
 VAR p, X, Y, cx, cy, cw, ch: INTEGER; r: Objects.Object;
 BEGIN
 	Oberon.RemoveMarks(x, y, w, h);
-	
+	AdaptFontSizeProportional(F);
+	ComputeColors(F,F.col);
 	IF beg < 0 THEN
 		IF F.consistent THEN
-			Display3.Rect3D(R, Display3.bottomC, Display3.topC, x, y, w, h, 1, Display.replace)
+			Display3.Rect3D(R, F.bottomC, F.topC, x, y, w, h, 1, Display.replace)
 		ELSE
-			Display3.Rect3D(R, Display3.topC, Display3.bottomC, x, y, w, h, 1, Display.replace)
+			Display3.Rect3D(R, F.topC, F.bottomC, x, y, w, h, 1, Display.replace)
 		END;
 		Display3.ReplConst(R, F.col, x+1, y+1, Xoffset, h-2, Display.replace);
 	END;
 	
-	p := F.start; X := x + Xoffset; Y := y + Yoffset;
+	p := F.start; X := x + Xoffset; Y := y + Yoffset-F.font.minY;
 	cx := R.X; cy := R.Y; cw := R.W; ch := R.H;
 	Display3.AdjustMask(R, x + 1, y + 1, w - 2, h - 2);
 	WHILE F.val[p] # 0X DO
-		Fonts.Default.GetObj(Fonts.Default, ORD(F.val[p]), r);
+		(*Fonts.Default.GetObj(Fonts.Default, ORD(F.val[p]), r);*)
+		F.font.GetObj(F.font, ORD(F.val[p]), r);
 		WITH r: Fonts.Char DO
 			IF p >= beg THEN
 				Display3.ReplConst(R, F.col, X, y+1, r.dx, h-2, Display.replace);
-				Display3.CopyPattern(R, Display3.textC, r.pat, X + r.x, Y + r.y, Display3.textmode)
+				Display3.CopyPattern(R, F.textcol (*Display3.textC*), r.pat, X + r.x, Y + r.y, Display3.textmode)
 			END;
 			INC(X, r.dx); INC(p); 
 		END
@@ -1032,10 +1171,10 @@ VAR R: Display3.Mask; x, y, w, h: INTEGER;
 BEGIN
 	Gadgets.MakePrinterMask(F, M.x, M.y, M.dlink, R);
 	x := M.x; y := M.y; w := P(F.W); h := P(F.H);
-	Printer3.Rect3D(R, Display3.bottomC, Display3.topC, x, y, w, h, P(1), Display.replace); 
+	Printer3.Rect3D(R, F.bottomC, F.topC, x, y, w, h, P(1), Display.replace); 
 	Printer3.ReplConst(R, F.col, x+P(1), y+P(1), w - P(2), h-P(2), Display.replace);
 	Display3.AdjustMask(R, x+P(1), y+P(1), w-P(2), h-P(2));
-	Printer3.String(R, Display3.textC, x + P(Xoffset), y + P(Yoffset), Fonts.Default, F.val, Display.replace)
+	Printer3.String(R, F.textcol (*Display3.textC*), x + P(Xoffset), y + P(Yoffset-F.font.minY), F.font (*Fonts.Default*), F.val, Display.replace)
 END PrintTextField;
 
 (* --- Model view consistency --- *)
@@ -1078,8 +1217,9 @@ PROCEDURE CopyTextField*(VAR M: Objects.CopyMsg; from, to: TextField);
 VAR field: ARRAY 64 OF CHAR;
 BEGIN
 	Gadgets.CopyFrame(M, from, to);
-	COPY(from.val, to.val); to.carpos := -1; to.selbeg := -1; to.col := from.col;
-	
+	COPY(from.val, to.val); to.carpos := -1; to.selbeg := -1; 
+	to.col := from.col; to.font:=from.font; to.textcol:=from.textcol;
+	to.topC:=from.topC; to.bottomC:=from.bottomC;
 	Field(to, field);
 	IF to.obj # NIL THEN GetValue(to.obj, field, to.val) END;
 	to.consistent := TRUE;
@@ -1141,25 +1281,34 @@ BEGIN
 END MakeConsistent;
 
 PROCEDURE TextFieldHandler*(F: Objects.Object; VAR M: Objects.ObjMsg);
-VAR F2: TextField; x, y, w, h: INTEGER; R: Display3.Mask; ver: LONGINT; field: ARRAY 64 OF CHAR;
+VAR F2: TextField; x, y, w, h: INTEGER; R: Display3.Mask; ver: LONGINT; field,fontname: ARRAY 64 OF CHAR;
 BEGIN
 	WITH F: TextField DO
-		IF M IS  Objects.AttrMsg THEN
+		IF M IS Objects.AttrMsg THEN
 			WITH M: Objects.AttrMsg DO TextFieldAttr(F, M) END;
-		ELSIF M IS  Objects.FileMsg THEN
+		ELSIF M IS Objects.FileMsg THEN
 			WITH M: Objects.FileMsg DO
 				IF M.id = Objects.load THEN
-					Files.ReadNum(M.R, ver); IF (ver < 2) OR (ver > 4) THEN HALT(99) END;
+					Files.ReadNum(M.R, ver); IF (ver < 2) OR (ver > 5) THEN HALT(99) END;
 					Files.ReadString(M.R, F.val);
 					IF ver >= 3 THEN
 						Files.ReadInt(M.R, F.col);
 						IF (ver = 3) & (F.col = 0) THEN F.col := Display3.textbackC END;
+						IF ver>=5 THEN 
+							Files.ReadString(M.R, fontname); F.font:=ThisFont(fontname);
+							Files.ReadInt(M.R, F.textcol);
+							IF F.font=NIL THEN F.font:=Fonts.Default END;
+						ELSE F.font:=Fonts.Default; F.textcol:=Display3.textC
+						END;
 					ELSE F.col := Display3.textbackC
 					END;
+					ComputeColors(F,F.col);
 					Gadgets.framehandle(F, M)
 				ELSIF M.id = Objects.store THEN
-					Files.WriteNum(M.R, 4);
+					Files.WriteNum(M.R, 5);
 					Files.WriteString(M.R, F.val); Files.WriteInt(M.R, F.col);
+					Files.WriteString(M.R, F.font.name);
+					Files.WriteInt(M.R, F.textcol);
 					Gadgets.framehandle(F, M)
 				END
 			END
@@ -1187,6 +1336,13 @@ BEGIN
 						ELSIF M.device = Display.printer THEN PrintTextField(F, M)
 						END
 					END
+				ELSIF M IS Display.ModifyMsg THEN
+					WITH M:Display.ModifyMsg DO
+						Gadgets.framehandle(F, M);
+						IF M.F=F THEN 
+							AdaptFontSizeProportional(F);
+						END;
+					END;
 				ELSIF M IS Oberon.ControlMsg THEN
 					WITH M: Oberon.ControlMsg DO
 						IF (M.id = Oberon.defocus) & (F.carpos >= 0) THEN F.carpos := -1; F.start := 0;
@@ -1266,7 +1422,8 @@ END TextFieldHandler;
 
 PROCEDURE InitTextField*(F: TextField);
 BEGIN F.handle := TextFieldHandler; COPY("", F.val); F.W := 100; F.H := 20;
-	F.selbeg := -1; F.carpos := -1; F.consistent := TRUE; F.col := Display3.textbackC
+	F.selbeg := -1; F.carpos := -1; F.consistent := TRUE; 
+	F.font:=Fonts.Default; F.textcol:=Display3.textC; F.col := Display3.textbackC; ComputeColors(F,F.col);
 END InitTextField;
 
 PROCEDURE NewTextField*;
@@ -1278,3 +1435,8 @@ END NewTextField;
 BEGIN Texts.OpenWriter(W);
 	invTF := 15 - 14
 END TextFields.
+
+
+System.Free TextFields
+
+Gadgets.Insert TextFields.NewCaption ~

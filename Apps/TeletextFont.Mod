@@ -1,10 +1,10 @@
-MODULE TeletextFont;	(** TF **)
+MODULE TeletextFont;	(** TF, modified by OJ **)
 
 IMPORT
 	AosOut, AosCommands, 
 	Graphics := WMGraphics, Raster, AosIO, 
-	XML, Parser := XMLParser, Scanner := XMLScanner, DynamicStrings, Objects := XMLObjects, 
-	Utilities, 
+	XML, Parser := XMLParser, Scanner := XMLScanner, Objects := XMLObjects, 
+	Utilities, WMRectangles, 
 	AosFS;
 
 TYPE
@@ -27,20 +27,22 @@ TYPE
 	VAR
 		nofGlyphRanges : LONGINT;
 		glyphRanges : GlyphRangeArray;
+		grc : LONGINT;
 		placeholderimg : Graphics.Image;
 		fontFile : AosFS.File;
+		empty : WMRectangles.Rectangle;
 		
 		PROCEDURE &Init;
 		VAR mode : Raster.Mode; pix : Raster.Pixel;
 		BEGIN
 			Init^;
-			nofGlyphRanges := 0;
+			nofGlyphRanges := 0; grc := 0;
+			empty := WMRectangles.MakeRect(0, 0, 0, 0); (* save the proc call *)
 			NEW(placeholderimg); Raster.Create(placeholderimg, 16, 16, Raster.A1);
 			Raster.InitMode(mode, Raster.srcCopy);
 			Raster.SetRGBA(pix, 255, 0, 0, 0);
 			Raster.Fill(placeholderimg, 0, 0, 15, 15, pix, mode);
-			ascent := 16; descent := 5;
-			ascent := 10; descent := 8;	(* OJ *)
+			ascent := 10; descent := 8;
 		END Init;
 		
 		PROCEDURE GetGlyphMap*(code : LONGINT; VAR map : Graphics.Image);
@@ -53,29 +55,43 @@ TYPE
 			END
 		END GetGlyphMap;
 		
+		PROCEDURE HasChar(char : LONGINT) : BOOLEAN;
+		VAR dummy : LONGINT;
+		BEGIN
+			RETURN FindGlyphRange(char, dummy)
+		END HasChar;
+		
+		
 		PROCEDURE GetGlyphSpacings*(code : LONGINT; VAR glyphSpacings : Graphics.GlyphSpacings);
 		VAR g : Glyph;
 		BEGIN
 			IF FindGlyph(code, g) THEN 
 				IF ~g.loaded THEN LoadGlyph(code, g) END;
-				glyphSpacings.width := g.img.width; glyphSpacings.height := g.img.height; glyphSpacings.dy := 0; (* <- OJ *)	(* -5;  <- TF !!! *)
-			ELSE glyphSpacings.width := 15; glyphSpacings.height := 15; 
+				glyphSpacings.width := g.img.width; glyphSpacings.height := g.img.height; glyphSpacings.dy := 0; 
+				glyphSpacings.bearing := empty;
+				glyphSpacings.ascent := 10; glyphSpacings.descent := 8;
+
+			ELSE glyphSpacings.width := 13; glyphSpacings.height := 10; 
 			END
 		END GetGlyphSpacings;
 		
 		PROCEDURE LoadGlyph(code : LONGINT; VAR g : Glyph);
-		VAR gr : GlyphRange;
+		VAR gri : LONGINT;
 		BEGIN
 			IF FindGlyph(code, g) & ~g.loaded THEN 
 				ReadGlyph(fontFile, g); g.loaded := TRUE;
-				IF FindGlyphRange(code, gr) THEN gr.glyphs[code - gr.firstCode] := g END;
+				IF FindGlyphRange(code, gri) THEN glyphRanges[gri].glyphs[code - glyphRanges[gri].firstCode] := g END;
 			END
 		END LoadGlyph;
 		
-		PROCEDURE FindGlyphRange(code : Char32; VAR glyphRange : GlyphRange) : BOOLEAN;
+		PROCEDURE FindGlyphRange(code : Char32; VAR gri : LONGINT) : BOOLEAN;
 		VAR a, b, m : LONGINT;
 		BEGIN
 			IF nofGlyphRanges = 0 THEN RETURN FALSE END;
+			(* check cached clyph range *)
+			IF (glyphRanges[grc].firstCode <= code) & (glyphRanges[grc].lastCode >= code) THEN 
+				gri := grc; RETURN TRUE
+			END;		
 			a := 0; b := nofGlyphRanges - 1;
 			WHILE (a < b) DO m := (a + b) DIV 2; 
 				IF glyphRanges[m].lastCode < code THEN a := m + 1 
@@ -83,15 +99,15 @@ TYPE
 				END 
 			END;
 			IF (glyphRanges[a].firstCode <= code) & (glyphRanges[a].lastCode >= code) THEN 
-				glyphRange := glyphRanges[a]; RETURN TRUE 
+				gri := a; grc := a; RETURN TRUE 
 			ELSE RETURN FALSE 
 			END
 		END FindGlyphRange;
 		
 		PROCEDURE FindGlyph(code : Char32; VAR glyph : Glyph) : BOOLEAN;
-		VAR gr : GlyphRange;
+		VAR gri : LONGINT;
 		BEGIN
-			IF FindGlyphRange(code, gr) THEN glyph := gr.glyphs[code - gr.firstCode]; RETURN TRUE
+			IF FindGlyphRange(code, gri) THEN glyph := glyphRanges[gri].glyphs[code - glyphRanges[gri].firstCode]; RETURN TRUE
 			ELSE RETURN FALSE
 			END
 		END FindGlyph;
@@ -109,11 +125,12 @@ TYPE
 		VAR f : AosFS.File;
 			scanner : Scanner.Scanner;
 			parser : Parser.Parser;
+			reader : AosFS.Reader;
 			doc : XML.Document;
 			p : PTR;
 			root : XML.Element;
 			el : XML.Content;
-			s : DynamicStrings.String;
+			s : Utilities.String;
 			cont : Objects.Enumerator;
 			nofGlyphs : LONGINT;
 			glyphs : GlyphArray;
@@ -123,7 +140,7 @@ TYPE
 			PROCEDURE CountRanges(): LONGINT;
 			VAR i : LONGINT; c, t, r : LONGINT;
 			BEGIN
-				c := glyphs[0].code + 1; r := 1;
+				c := glyphs[0].code; r := 1;
 				FOR i := 1 TO nofGlyphs - 1 DO
 					IF (glyphs[i].code # c) THEN INC(r); c := glyphs[i].code END;
 					INC(c);
@@ -215,8 +232,9 @@ TYPE
 			
 		BEGIN
 			f := AosFS.Old(filename);
-			IF f # NIL THEN 
-				NEW(scanner, f); NEW(parser, scanner); doc := parser.Parse()
+			IF f # NIL THEN
+				NEW(reader, f, 0);
+				NEW(scanner, reader); NEW(parser, scanner); doc := parser.Parse()
 			END;
 			
 			root := doc.GetRoot();
@@ -243,6 +261,7 @@ TYPE
 				p : Raster.Pixel;
 				pix, curpix : BOOLEAN; mode : Raster.Mode;
 		BEGIN
+			AosOut.String("Entering Raster... "); 
 			buf[pos] := CHR(img.width); INC(pos);
 			buf[pos] := CHR(img.height); INC(pos);
 			IF (img.width = 0) OR (img.height = 0) THEN HALT(12345) END;
@@ -262,12 +281,13 @@ TYPE
 			IF count > 0 THEN
 				WHILE count > 255 DO buf[pos] := CHR(255); INC(pos); buf[pos] := CHR(0); INC(pos); DEC(count, 255) END;
 				buf[pos] := CHR(count); INC(pos)
-			END	
+			END
+;			AosOut.String("Leaving Raster"); AosOut.Ln; 
 		END RasterToBWRLBytes;
 		
 		PROCEDURE Save(filename : ARRAY OF CHAR);
 		VAR w : AosFS.Rider; i, j, c: LONGINT; f : AosFS.File;
-				buf : ARRAY 1024 OF CHAR; fixup, pos : LONGINT;
+				buf : ARRAY 2024 OF CHAR; fixup, pos : LONGINT;
 		BEGIN
 			f := AosFS.New(filename);f.Set(w, 0);
 			(* write number of ranges *)
@@ -276,7 +296,6 @@ TYPE
 			FOR i := 0 TO nofGlyphRanges - 1 DO
 				AosFS.WriteLInt(w, glyphRanges[i].firstCode);
 				AosFS.WriteLInt(w, glyphRanges[i].lastCode);
-				AosOut.String("Range : "); AosOut.Int(glyphRanges[i].firstCode, 5); AosOut.String("..");AosOut.Int(glyphRanges[i].lastCode, 5); AosOut.Ln;
 			END;
 			fixup := f.Pos(w);
 			
@@ -291,17 +310,23 @@ TYPE
 				FOR j := 0 TO glyphRanges[i].lastCode - glyphRanges[i].firstCode DO
 					INC(c);
 					pos := 0;
-					IF glyphRanges[i].glyphs = NIL THEN AosOut.String("WhatHappened ? Info :"); AosOut.Int(j, 4);  AosOut.Ln END;
-					RasterToBWRLBytes(glyphRanges[i].glyphs[j].img, buf, pos);
-					glyphRanges[i].glyphs[j].fpos := f.Pos(w);
-					AosOut.Int(pos, 5); AosOut.Ln;
-					f.WriteBytes(w, buf, 0, pos)
+					AosOut.String("Calling Raster... ");
+					IF c < 319 THEN
+						RasterToBWRLBytes(glyphRanges[i].glyphs[j].img, buf, pos);
+						glyphRanges[i].glyphs[j].fpos := f.Pos(w);
+						AosOut.Int(pos, 5); AosOut.Ln;
+						f.WriteBytes(w, buf, 0, pos)
+					END
 				END
 			END;
 			f.Set(w, fixup);
+			c := 0;
 			FOR i := 0 TO nofGlyphRanges - 1 DO
 				FOR j := 0 TO glyphRanges[i].lastCode - glyphRanges[i].firstCode DO
-					AosFS.WriteLInt(w, glyphRanges[i].glyphs[j].fpos)
+					INC(c);
+					IF c < 319 THEN
+						AosFS.WriteLInt(w, glyphRanges[i].glyphs[j].fpos)
+					END
 				END
 			END;
 			f.Update;
@@ -391,24 +416,13 @@ BEGIN
 	RETURN NIL
 END Load;
 
-(** convert a xml coded bitmap font to bfnt *)
 PROCEDURE Import*(par : PTR) : PTR;
-VAR temp : Font;
-	 s : AosCommands.Parameters;
-	filename, name, ext : ARRAY 128 OF CHAR;
-	sr : AosIO.StringReader;
 BEGIN
-	s := par(AosCommands.Parameters);
-	NEW(sr, LEN(s.str^)); sr.Set(s.str^);
-	sr.String(filename); 
-	NEW(temp);
-	
-	temp.Import(filename);
-	AosOut.String(filename); AosOut.String(" imported."); AosOut.Ln;
-	AosFS.SplitExtension(filename, name, ext);
-	AosFS.JoinExtension(name, "bfnt", filename);
-	temp.Save(filename);
-	AosOut.String(filename); AosOut.String(" saved."); AosOut.Ln;
+	NEW(bimbofont);
+	bimbofont.Import("teletext.XML");
+	AosOut.String("Imported."); AosOut.Ln;
+	bimbofont.Save("teletext.bfnt");
+	AosOut.String("Saved."); AosOut.Ln;
 	RETURN NIL
 END Import;
 	
@@ -426,7 +440,6 @@ END ShowCode;
 BEGIN
 	IF Load(NIL) = NIL THEN END
 END TeletextFont.
- 
-System.Free TeletextFont ~
 
-Aos.Call WMBitmapFont.Import teletext.xml ~
+
+TeletextFont.Import ~

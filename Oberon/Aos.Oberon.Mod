@@ -627,11 +627,31 @@ the garbage collector, if no mouse or keyboard events are arriving. *)
           Input.Mouse(keys, X, Y)
         ELSIF keys # {} THEN M.F := NIL; M.id := track;
           REPEAT
-            M.keys := keys; M.X := X; M.Y := Y;
+          
+          
+    	   IF 31 IN keys THEN (*fof*)  
+                	 M.ch := 0C1X; 
+			ELSIF 30 IN keys THEN 
+				keys := keys - {30}+{31}; 
+				 M.ch := 0C2X; 
+			ELSE M.ch := 0X; 
+			END; 
+             M.keys := keys; M.X := X; M.Y := Y;
             M.dlink := NIL; M.x := 0; M.y := 0;
             M.res := MIN(INTEGER); Objects.Stamp(M);
+
             V := Viewers.This(M.X, M.Y); V.handle(V, M);
-            Input.Mouse(keys, X, Y)
+           
+           (*
+             IF M.res # 0 THEN (*fof*)
+                M.F := NIL; M.id := consume; 
+				M.fnt := CurFnt; M.col := CurCol; M.voff := CurOff; 
+				IF M.ch # 0X THEN Display.Broadcast(M) END 
+			END; 
+			*) 
+			
+            Input.Mouse(keys, X, Y); 
+            
           UNTIL (keys = {}) OR (Input.Available() # 0);
           DEC(GCTask.time, ActVal)
         ELSE (*keys = {}*)

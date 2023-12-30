@@ -42,11 +42,11 @@ CONST
 	AIC7770 = 1; AIC7850 = 2; AIC7860 = 3; AIC7870 = 4; AIC7880 = 5; AIC7890 = 6; 
 	AIC7895 = 7; AIC7896 = 8; 
 
-		(*Bus.feature   *)
+		(*Bus.feature   *)
 	FeatUltra = 1; FeatUltra2 = 2; FeatWide = 3; FeatTwin = 4; FeatMoreSRAM = 5; FeatCmdChan = 6; 
 	FeatQueueRegs = 7; FeatSGPreload = 8; FeatSpioCap = 9; 
 	
-		(*Bus.flag  *)
+		(*Bus.flag  *)
 	FlagPageSCB = 1; FlagNewEepromFMT = 2; FlagBiosEnabled = 3; FlagMultiChannel = 4; FlagChnlB = 5; FlagChnlC = 6; 
 	FlagSeepromFound = 7; FlagChannelBPrimary = 8; FlagExtendTransA = 9; FlagExternalSRam = 10; FlagAbortPending = 11; 
 	FlagHandlingReqInits = 12; 
@@ -55,7 +55,7 @@ CONST
 	HwScbTypeMask = 03X; HwScbMsgMask = 0F6X;
 	HwScbDisconnected = 3; HwScbDiscEnable = 6; HwScbMessage = 7;
 
-	(*SCSI Register Block *)
+(*SCSI Register Block *)
 	(* 00H	SCSI Sequencer Control *)	SCSISEQ = 00H;
 		(* Bit 0	SCSI Reset Out *)		SCSIRSTO = 0;
 		(* Bit 1	Enable Auto ATN on parity *)		ENAUTOATNP = 1;

@@ -1,6 +1,6 @@
 (* Aos, Copyright 2001, Pieter Muller, ETH Zurich *)
 
- MODULE AosProcessors; (** AUTHOR "pjm"; PURPOSE "Multiple processor handling"; *)
+MODULE AosProcessors; (** AUTHOR "pjm"; PURPOSE "Multiple processor handling"; *)
 
 (* Set MaxProcs to maximum number of processors for testing. *)
 
@@ -252,7 +252,7 @@ END KernelCallHLT;
 PROCEDURE HandleGC(id: LONGINT; VAR state: AosInterrupts.State; msg: Message);
 BEGIN
 	AosMemory.UpdateState;
-	AosActive.UpdateState(state.EIP);
+	AosActive.UpdateState(state); (* ug *)
 	AosBoot.Excl(gcBarrier, id);
 	WHILE gcBarrier # {} DO AosBoot.SpinHint END;	(* wait for all *)
 	IF id = 0 THEN	(* only boot processor performs GC *)
@@ -270,7 +270,7 @@ BEGIN
 	AosLocks.Acquire(AosLocks.AosProcessors);
 	gcBarrier := allProcessors;
 	LocalBroadcast(HandleGC, NIL, {Self, BackBarrier});
-	AosLocks.Release(AosLocks.AosProcessors)
+	AosLocks.Release(AosLocks.AosProcessors);
 END GlobalGC;
 
 PROCEDURE HandleGetTimestamp(id: LONGINT; VAR state: AosInterrupts.State; msg: Message);

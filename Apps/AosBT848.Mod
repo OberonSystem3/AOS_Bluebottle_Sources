@@ -1,8 +1,8 @@
-MODULE AosBT848; (** AUTHOR "fr@felix.shacknet.nu"; PURPOSE "BT848 video chip driver"; *)
-								(** added Code for VBI Processing by Olivier Jeger, oljeger@student.ethz.ch *)
+MODULE AosBT848;	(** AUTHOR "fr@felix.shacknet.nu"; PURPOSE "BT848 video chip driver"; *)
+									(** added code for VBI processing by Olivier Jeger, oljeger@student.ethz.ch *)
 
 IMPORT AosActive, AosDisplays, AosInterrupts, AosKernel, AosMemory, AosModules, AosOut, AosPlugins, PCI, SYSTEM,
-AosCommands, AosIO, WM := WMWindowManager, AosTVDriver;
+AosCommands, AosIO, WM := WMWindowManager, AosTVDriver, Utilities;
 
 CONST
 	DebugOff = 0;
@@ -10,6 +10,9 @@ CONST
 	DebugMed = 2;
 	DebugHigh = 3;
 	DEBUG = DebugLow;
+	
+	PluginName = "";
+	PluginDesc = "Hauppauge BT848/878 compatible TV-card";
 	
 	Brooktree848 = 1;
 	Brooktree848A = 2;
@@ -318,7 +321,6 @@ CONST
 	(* VBI lines are held in a circular buffer before being read by a user program. *)
 	VbiMaxLines = AosTVDriver.VbiMaxLines;	(* maximum for all video formats *)
 	VbiLineSize = AosTVDriver.VbiLineSize;	(* store up to 2048 bytes per line *)
-(*	VbiBufferItems = AosTVDriver.VbiBufferItems;	(* number of frames we buffer *)*)
 	VbiDataSize = AosTVDriver.VbiDataSize;
 	VbiBufferSize = AosTVDriver.VbiBufferSize;
 	
@@ -494,7 +496,6 @@ TYPE
 	TVTuner* = OBJECT (AosTVDriver.TVTuner)
 	VAR
 		vcd: VideoCaptureDevice;
-(*		frequency-: LONGINT; *)
 		chnlSet: LONGINT;
 		chnl: LONGINT;
 		band: LONGINT;
@@ -515,7 +516,7 @@ TYPE
 	PROCEDURE OpenVbi*(): LONGINT;
 	BEGIN
 		IF vcd.vbiFlags * VbiOpen # {} THEN
-			IF DEBUG # DebugOff THEN AosOut.String("{BT848} vbi device already open."); AosOut.Ln; END;
+			IF DEBUG # DebugOff THEN AosOut.String("{AosBT848} vbi device already open."); AosOut.Ln; END;
 			RETURN -1;
 		END;
 		vcd.vbiFlags := vcd.vbiFlags + VbiOpen;
@@ -523,7 +524,6 @@ TYPE
 			vcd.vbiBuffer.insertPos := 0;
 			vcd.vbiBuffer.readPos := 0;
 			vcd.vbiBuffer.vbiSize := 0;
-			(* OJ: there are 2 more instructions in the BSD driver I don't understand *)
 			RETURN 0
 		END
 	END OpenVbi;
@@ -531,8 +531,10 @@ TYPE
 	(** Close the VBI device. *)
 	PROCEDURE CloseVbi*;
 	BEGIN
+		IF VbiOpen * vcd.vbiFlags # {} THEN
+			IF DEBUG # DebugOff THEN AosOut.String("{AosBT848} vbi device ."); AosOut.Ln; END;
+		END;
 		vcd.vbiFlags := vcd.vbiFlags - VbiOpen;
-		IF DEBUG # DebugOff THEN AosOut.String("{BT848} vbi device ."); AosOut.Ln; END;
 	END CloseVbi;
 
 	(** Open the tuner. *)
@@ -588,8 +590,8 @@ TYPE
 			IF chnl >= freqTable[chnlSet].chnls[i].baseChnl THEN
 				freq := freqTable[chnlSet].chnls[i].baseChnlFreq +
 					((chnl - freqTable[chnlSet].chnls[i].baseChnl) * freqTable[chnlSet].chnls[i].offsetFreq);
-				IF DEBUG # DebugOff THEN
-					AosOut.String("{BT848} baseChnl = "); AosOut.Int(freqTable[chnlSet].chnls[i].baseChnl, 0); AosOut.Ln
+				IF DEBUG = DebugHigh THEN
+					AosOut.String("{AosBT848} baseChnl = "); AosOut.Int(freqTable[chnlSet].chnls[i].baseChnl, 0); AosOut.Ln
 				END;
 			END;
 		END;
@@ -629,18 +631,18 @@ TYPE
 		addr, control, band: LONGINT;
 		isMute: BOOLEAN;
 	BEGIN {EXCLUSIVE}
-		IF DEBUG >= DebugLow THEN AosOut.String("{BT848} setting frequency to "); AosOut.Int(freq, 0); AosOut.Ln; END;
+		IF DEBUG >= DebugLow THEN AosOut.String("{AosBT848} setting frequency to "); AosOut.Int(freq, 0); AosOut.Ln; END;
 		isMute := vcd.audio.IsAudioMute();
 		vcd.audio.SetAudioMute;
 		IF (freq < (vcd.card.tuner.bandLimits[0])) THEN
 			bandSelect := LowBand;
-			IF DEBUG >= DebugLow THEN AosOut.String("{BT848} low band"); AosOut.Ln; END;
+			IF DEBUG >= DebugMed THEN AosOut.String("{AosBT848} low band"); AosOut.Ln; END;
 		ELSIF (freq < (vcd.card.tuner.bandLimits[1])) THEN
 			bandSelect := MidBand;
-			IF DEBUG >= DebugLow THEN AosOut.String("{BT848} mid band"); AosOut.Ln; END;
+			IF DEBUG >= DebugMed THEN AosOut.String("{AosBT848} mid band"); AosOut.Ln; END;
 		ELSE
 			bandSelect := HighBand;
-			IF DEBUG >= DebugLow THEN AosOut.String("{BT848} high band"); AosOut.Ln; END;
+			IF DEBUG >= DebugMed THEN AosOut.String("{AosBT848} high band"); AosOut.Ln; END;
 		END;
 		n := freq + freqTable[chnlSet].ifFreq;
 		addr := vcd.card.tunerPLLAddr;
@@ -664,18 +666,7 @@ TYPE
 		ELSE
 			vcd.audio.SetAudioUnmute;
 		END;
-		
-		(* get rid of teletxt data from the last channel (NOT NEEDED ANYMORE?!!!) *)
-		vcd.vbiBuffer.readPos := vcd.vbiBuffer.insertPos;
-		vcd.vbiBuffer.vbiSize := 0
 	END SetTVFrequencyImpl;
-	
-	(** Get tuner frequency. *)
-	(** return value:	tuner frequency *)
-	PROCEDURE GetFrequency*(): LONGINT;
-	BEGIN
-		RETURN frequency;
-	END GetFrequency;
 	
 	(** Set radio frequency. *)
 	(** freq:	frequency expressed as frequency * 100. *)
@@ -685,8 +676,8 @@ TYPE
 		addr, control, band: LONGINT;
 		isMute: BOOLEAN;
 	BEGIN {EXCLUSIVE}
-		IF TRUE THEN
-			AosOut.String("{BT848} setting radio freqency to: ");
+		IF DEBUG # DebugOff THEN
+			AosOut.String("{AosBT848} setting radio freqency to: ");
 			AosOut.Int(freq, 0); AosOut.Ln;
 		END;
 		ASSERT((freq >= RadioMinFreq) & (freq <= RadioMaxFreq));
@@ -1135,9 +1126,10 @@ TYPE
 	(* Finalizes the VideoCaptureDevice object for garbage collection. *)
 	PROCEDURE Finalize;
 	BEGIN {EXCLUSIVE}
+		vbiBuffer.Finalize;
 		AosActive.RemoveHandler(SELF.HandleInterrupt, AosInterrupts.IRQ0 + irq);
 		tuner := NIL;
-		audio := NIL;
+		audio := NIL
 	END Finalize;
 	
 	(* Handles interrupt requests by the RISC program or any other irq requests for the device. *)
@@ -1158,7 +1150,7 @@ TYPE
 			RETURN;
 		END;
 
-		IF DEBUG >= DebugHigh THEN AosOut.String("{BT848} IRQ handler: "); END;
+		IF DEBUG >= DebugHigh THEN AosOut.String("{AosBT848} IRQ handler: "); END;
 
 		IF flags * AosOpen = {} THEN
 			IF DEBUG >= DebugHigh THEN AosOut.String("(device not open) "); END;
@@ -1173,8 +1165,8 @@ TYPE
 		SYSTEM.PUT8(base + BktrDStatus, 0000H);
 		IF DEBUG >= DebugHigh THEN
 			AosOut.Ln;
-			AosOut.String("{BT848} IRQ status: "); AosOut.Bits(intStatus, 0, 32); AosOut.Ln;
-			AosOut.String("{BT848} Device status: "); AosOut.Bits(devStatus, 0, 8); AosOut.Ln;
+			AosOut.String("{AosBT848} IRQ status: "); AosOut.Bits(intStatus, 0, 32); AosOut.Ln;
+			AosOut.String("{AosBT848} Device status: "); AosOut.Bits(devStatus, 0, 8); AosOut.Ln;
 		END;
 		(* if RISC was disabled, restart process again *)
 		(* if there was one of the following errors, restart again *)
@@ -1242,19 +1234,8 @@ TYPE
 			IF DEBUG >= DebugHigh THEN AosOut.String("(odd field) "); END;
 		END;
 		
-(*	 from old version:
-
-		NOT NEEDED ANYMORE ?! *)
-
-		IF ~ ((vbiFlags * VbiCapture # {}) & (vbiFlags * VbiOpen # {})) THEN
-			AosOut.String("VbiDevice Closed. Opening...");
-			AosOut.Ln;
-			vbiFlags := vbiFlags + VbiCapture + VbiOpen;
-		END;
-		
 		IF (vbiFlags * VbiCapture # {}) & (vbiFlags * VbiOpen # {}) & (field = EvenField) THEN
 			IF DEBUG >= DebugHigh THEN AosOut.String("(VBI open) "); END;
-			(* TO BE DONE *)
 			(* check if there is room in the buffer to insert the data *)
 			IF vbiBuffer.vbiSize + VbiDataSize > VbiBufferSize THEN
 				IF DEBUG >= DebugHigh THEN AosOut.String("(No Space Left in Vbi Buffer) "); AosOut.Ln END
@@ -1266,11 +1247,7 @@ TYPE
 						vbiBuffer.data[insPos + i] := vbiData[i]
 					END;
 					
-					(* NEEDED? Sequence number??? ==> TODO *)
-					
 					vbiBuffer.insertPos := (vbiBuffer.insertPos + VbiDataSize) MOD VbiBufferSize;
-					(* AosOut.String("new InsertPos = "); AosOut.Int(vbiBuffer.InsertPos, 0); AosOut.Ln;*)
-					(* Out.String("new InsertPos = "); Out.Int(vbiBuffer.InsertPos, 0); Out.Ln;*)
 					vbiBuffer.vbiSize := vbiBuffer.vbiSize + VbiDataSize
 				END
 			END
@@ -1350,13 +1327,11 @@ TYPE
 		IF DEBUG >= DebugHigh THEN AosOut.String("(end)"); AosOut.Ln; END;
 	END HandleInterrupt;
 	
-	PROCEDURE GetVbiData* () : AosTVDriver.VbiBuffer;
+	(** Get Ringbuffer for Vbi (Teletext) data *)
+	PROCEDURE GetVbiBuffer* () : AosTVDriver.VbiBuffer;
 	BEGIN
-(*		IF vbiBuffer.vbiSize = 0 THEN
-			IF DEBUG >= DebugHigh THEN AosOut.String("(Currently no Vbi Data available)"); END;
-		END;*)
 		RETURN vbiBuffer;
-	END GetVbiData;
+	END GetVbiBuffer;
 	
 	(** Get the TVTuner object of this VideoCaptureDevice object. *)
 	(** return value:	TVTuner object of this card *)
@@ -1396,12 +1371,12 @@ TYPE
 		SYSTEM.PUT32(base + BktrGPIOOutEn, 0);
 		IF (id = Brooktree878) OR (id = Brooktree879) THEN
 			IF DEBUG # DebugOff THEN
-				AosOut.String("{BT848} Probing a Brooktree 878/879 card."); AosOut.Ln;
+				AosOut.String("{AosBT848} Probing a Brooktree 878/879 card."); AosOut.Ln;
 			END;
 			eepromI2CAddr := LocateEEPROMAddress();
 			IF eepromI2CAddr # -1 THEN
 				IF DEBUG # DebugOff THEN
-					AosOut.String("{BT848} EEProm address found: "); AosOut.Hex(eepromI2CAddr, 0); AosOut.Ln;
+					AosOut.String("{AosBT848} EEProm address found: "); AosOut.Hex(eepromI2CAddr, 0); AosOut.Ln;
 				END;
 				cardID := CardUnknown;
 				card := cards[CardUnknown];
@@ -1418,8 +1393,8 @@ TYPE
 				subsystemVendorID := SYSTEM.VAL(LONGINT,
 					SYSTEM.VAL(SET, ASH(byte254, 8)) + SYSTEM.VAL(SET, byte255));
 				IF DEBUG # DebugOff THEN
-					AosOut.String("{BT848} Subsystem ID: "); AosOut.Hex(subsystemID, 0); AosOut.Ln;
-					AosOut.String("{BT848} Subsystem vendor ID: "); AosOut.Hex(subsystemVendorID, 0); AosOut.Ln;
+					AosOut.String("{AosBT848} Subsystem ID: "); AosOut.Hex(subsystemID, 0); AosOut.Ln;
+					AosOut.String("{AosBT848} Subsystem vendor ID: "); AosOut.Hex(subsystemVendorID, 0); AosOut.Ln;
 				END;
 				IF subsystemVendorID = PCIVendorHauppauge THEN
 					cardID := CardHauppauge;
@@ -1430,13 +1405,13 @@ TYPE
 			END;
 		ELSIF (id = Brooktree848) OR (id = Brooktree848A) OR (id = Brooktree849A) THEN
 			IF DEBUG # DebugOff THEN
-				AosOut.String("{BT848} Probing a Brooktree 848/848A/849A card."); AosOut.Ln;
+				AosOut.String("{AosBT848} Probing a Brooktree 848/848A/849A card."); AosOut.Ln;
 			END;
 			(* at i2c address 0xa0, look for Hauppauge *)
 			i2cData := i2cBus.I2CRead(PFC8582RAddr);
 			IF i2cData # Absent THEN
 				IF DEBUG # DebugOff THEN
-					AosOut.String("{BT848} EEProm address found: "); AosOut.Hex(PFC8582RAddr, 0); AosOut.Ln;
+					AosOut.String("{AosBT848} EEProm address found: "); AosOut.Hex(PFC8582RAddr, 0); AosOut.Ln;
 				END;
 				(* read the eeprom contents *)
 				card := cards[CardUnknown];
@@ -1450,7 +1425,7 @@ TYPE
 					card.eepromAddr := PFC8582WAddr;
 					card.eepromSize := 256 DIV EEPromBlockSize;
 				ELSE
-					AosOut.String("{BT848} Warning: Unknown card type. EEProm data not recognised."); AosOut.Ln;
+					AosOut.String("{AosBT848} Warning: Unknown card type. EEProm data not recognised."); AosOut.Ln;
 				END;
 			END;
 		END;
@@ -1459,7 +1434,7 @@ TYPE
 		IF tunerI2CAddr = Absent THEN
 			SelectTuner(NoTuner);
 			IF DEBUG # DebugOff THEN
-				AosOut.String("{BT848} No tuner detected.");  AosOut.Ln;
+				AosOut.String("{AosBT848} No tuner detected.");  AosOut.Ln;
 			END;
 		ELSIF cardID = CardHauppauge THEN
 			IF card.eepromAddr # 0 THEN
@@ -1487,12 +1462,12 @@ TYPE
 				tunerCode := ORD(eeprom[startBlock1 + 9]);
 				audioMUXPresent := SYSTEM.VAL(SET, ORD(eeprom[startBlock3 + 3])) * {7} # {};
 				IF DEBUG # DebugOff THEN
-					AosOut.String("{BT848} Tuner detected @"); AosOut.Hex(tunerI2CAddr, 0); AosOut.Ln;
-					AosOut.String("{BT848} Tuner model: "); AosOut.Hex(model, 0); AosOut.Ln;
-					AosOut.String("{BT848} Tuner revision: "); AosOut.Hex(revision, 0); AosOut.Ln;
-					AosOut.String("{BT848} Tuner code: "); AosOut.Hex(tunerCode, 0); AosOut.Ln;
-					IF (audioMUXPresent) THEN AosOut.String("{BT848} Audio MUX found.");
-					ELSE AosOut.String("{BT848} No audio MUX found."); END; AosOut.Ln;
+					AosOut.String("{AosBT848} Tuner detected @"); AosOut.Hex(tunerI2CAddr, 0); AosOut.Ln;
+					AosOut.String("{AosBT848} Tuner model: "); AosOut.Hex(model, 0); AosOut.Ln;
+					AosOut.String("{AosBT848} Tuner revision: "); AosOut.Hex(revision, 0); AosOut.Ln;
+					AosOut.String("{AosBT848} Tuner code: "); AosOut.Hex(tunerCode, 0); AosOut.Ln;
+					IF (audioMUXPresent) THEN AosOut.String("{AosBT848} Audio MUX found.");
+					ELSE AosOut.String("{AosBT848} No audio MUX found."); END; AosOut.Ln;
 				END;
 				CASE tunerCode OF
 						0005H,
@@ -1517,7 +1492,7 @@ TYPE
 										SelectTuner(PhilipsFR1216PAL);
 					|  0030H:	SelectTuner(LGPALBG);
 					ELSE
-						AosOut.String("{BT848} Warning: unknown Hauppage tuner ");
+						AosOut.String("{AosBT848} Warning: unknown Hauppage tuner ");
 						AosOut.Hex(tunerCode, 0); AosOut.Ln;
 				END;
 			END;
@@ -1525,7 +1500,7 @@ TYPE
 		(* check DBX *)
 		IF i2cBus.I2CRead(TDA9850RAddr) # Absent THEN
 			card.dbx := TRUE;
-			IF DEBUG # DebugOff THEN AosOut.String("{BT848} DBX found."); AosOut.Ln; END;
+			IF DEBUG # DebugOff THEN AosOut.String("{AosBT848} DBX found."); AosOut.Ln; END;
 		END;
 		(* check MSP *)
 		IF (cardID = CardHauppauge) THEN
@@ -1542,7 +1517,7 @@ TYPE
 			mspAddr := MSP3400CWAddr;
 			audio.MspReadId;
 			IF DEBUG # DebugOff THEN
-				AosOut.String("{BT848} MSP3400C found. ["); AosOut.String(mspVersionString);
+				AosOut.String("{AosBT848} MSP3400C found. ["); AosOut.String(mspVersionString);
 				AosOut.String("]"); AosOut.Ln;
 			END;
 		END;
@@ -1552,7 +1527,7 @@ TYPE
 			dplAddr := DPL3518AWAddr;
 			audio.DplReadId;
 			IF DEBUG # DebugOff THEN
-				AosOut.String("{BT848} Dolby Surround Sound DPL3518A sound chip found. [");
+				AosOut.String("{AosBT848} Dolby Surround Sound DPL3518A sound chip found. [");
 				AosOut.String(dplVersionString); AosOut.String("]"); AosOut.Ln;
 			END;
 		END;
@@ -1561,12 +1536,12 @@ TYPE
 		IF i2cBus.I2CRead(HaupRemoteExtRAddr) # Absent THEN
 			remoteControl := TRUE;
 			remoteControlAddr := HaupRemoteExtRAddr;
-			IF DEBUG # DebugOff THEN AosOut.String("{BT848} External remote control found."); AosOut.Ln; END;
+			IF DEBUG # DebugOff THEN AosOut.String("{AosBT848} External remote control found."); AosOut.Ln; END;
 		END;
 		IF i2cBus.I2CRead(HaupRemoteIntRAddr) # Absent THEN
 			remoteControl := TRUE;
 			remoteControlAddr := HaupRemoteIntRAddr;
-			IF DEBUG # DebugOff THEN AosOut.String("{BT848} Internal remote control found."); AosOut.Ln; END;
+			IF DEBUG # DebugOff THEN AosOut.String("{AosBT848} Internal remote control found."); AosOut.Ln; END;
 		END;
 		(* poll remote control 5 times to turn off the LED *)
 		IF remoteControl THEN
@@ -1588,7 +1563,7 @@ TYPE
 	BEGIN
 		card.tuner := tuners[tunerType];
 		IF DEBUG # DebugOff THEN
-			AosOut.String("{BT848} Tuner selected: "); AosOut.String(card.tuner.name); AosOut.Ln;
+			AosOut.String("{AosBT848} Tuner selected: "); AosOut.String(card.tuner.name); AosOut.Ln;
 		END;
 	END SelectTuner;
 	
@@ -1601,15 +1576,15 @@ TYPE
 	BEGIN
 		fp := formatParams[formatParameters];
 		IF flags * AosOnlyFieldsMask = AosOnlyEvenFields THEN
-			IF DEBUG # DebugOff THEN AosOut.String("{BT848} SetFPS: even fields"); AosOut.Ln; END;
+			IF DEBUG # DebugOff THEN AosOut.String("{AosBT848} SetFPS: even fields"); AosOut.Ln; END;
 			flags := flags + AosWantEven;
 			iFlag := 1;
 		ELSIF flags * AosOnlyFieldsMask = AosOnlyOddFields THEN
-			IF DEBUG # DebugOff THEN AosOut.String("{BT848} SetFPS: odd fields"); AosOut.Ln; END;
+			IF DEBUG # DebugOff THEN AosOut.String("{AosBT848} SetFPS: odd fields"); AosOut.Ln; END;
 			flags := flags + AosWantOdd;
 			iFlag := 1;
 		ELSE
-			IF DEBUG # DebugOff THEN AosOut.String("{BT848} SetFPS: odd + even fields"); AosOut.Ln; END;
+			IF DEBUG # DebugOff THEN AosOut.String("{AosBT848} SetFPS: odd + even fields"); AosOut.Ln; END;
 			flags := flags + AosWantMask;
 			iFlag := 2;
 		END;
@@ -1781,8 +1756,6 @@ TYPE
 				AosMemory.PhysicalAdr(SYSTEM.ADR(vbiData), 4) + (q * VbiLineSize)); INC(dmaIndex);
 		END;
 		
-		(* AosOut.String("DMA (odd) built!"); AosOut.Ln; *)
-		
 		IF (mode = AosOddField) OR (mode = AosInterlaced) THEN
 			(* store the odd field video image *)
 			(* look for sync with packed data *)
@@ -1813,8 +1786,6 @@ TYPE
 			dmaProg[dmaIndex] := SYSTEM.VAL(LONGINT,
 				AosMemory.PhysicalAdr(SYSTEM.ADR(vbiData), 4) + ((q+VbiMaxLines)*VbiLineSize)); INC(dmaIndex);
 		END;
-		
-		(* AosOut.String("DMA (even) built!"); AosOut.Ln; *)
 		
 		(* store the video image *)
 		IF mode = AosEvenField THEN
@@ -2116,12 +2087,12 @@ TYPE
 		
 		IF (xtalPLLMode = Bt848UsePLL) & (fp.iformXTSel = SYSTEM.VAL(LONGINT, Bt848IFormXXT1)) THEN
 			IF DEBUG >= DebugMed THEN
-				AosOut.String("{BT848} BuildDmaProg: PLL mode selected"); AosOut.Ln;
+				AosOut.String("{AosBT848} BuildDmaProg: PLL mode selected"); AosOut.Ln;
 			END;
 			SYSTEM.PUT8(base + BktrTGCtrl, SYSTEM.VAL(LONGINT, Bt848TGCtrlTGCKIPLL));	(* select PLL mode *)
 		ELSE
 			IF DEBUG >= DebugMed THEN
-				AosOut.String("{BT848} BuildDmaProg: normal xtal0/xtal1 mode selected"); AosOut.Ln;
+				AosOut.String("{AosBT848} BuildDmaProg: normal xtal0/xtal1 mode selected"); AosOut.Ln;
 			END;
 			SYSTEM.PUT8(base + BktrTGCtrl, SYSTEM.VAL(LONGINT, Bt848TGCtrlTGCKIXTAL));	(* select normal xtal 0/xtal 1 mode *)
 		END;
@@ -2130,7 +2101,7 @@ TYPE
 		CASE mode OF
 				AosEvenField:
 					IF DEBUG >= DebugMed THEN
-						AosOut.String("{BT848} BuildDmaProg: capture control, even field"); AosOut.Ln;
+						AosOut.String("{AosBT848} BuildDmaProg: capture control, even field"); AosOut.Ln;
 					END;
 					bktrCapCtl := Bt848CapCtlDithFrame + Bt848CapCtlEven;
 					temp1 := SYSTEM.GET8(base + BktrEVScaleHi);
@@ -2140,7 +2111,7 @@ TYPE
 					interlace := 1;
 			|   AosOddField:
 					IF DEBUG >= DebugMed THEN
-						AosOut.String("{BT848} BuildDmaProg: capture control, odd field"); AosOut.Ln;
+						AosOut.String("{AosBT848} BuildDmaProg: capture control, odd field"); AosOut.Ln;
 					END;
 					bktrCapCtl := Bt848CapCtlDithFrame + Bt848CapCtlOdd;
 					temp1 := SYSTEM.GET8(base + BktrEVScaleHi);
@@ -2150,7 +2121,7 @@ TYPE
 					interlace := 1;
 			ELSE
 					IF DEBUG >= DebugMed THEN
-						AosOut.String("{BT848} BuildDmaProg: capture control, interlaced"); AosOut.Ln;
+						AosOut.String("{AosBT848} BuildDmaProg: capture control, interlaced"); AosOut.Ln;
 					END;
 					bktrCapCtl := Bt848CapCtlDithFrame + Bt848CapCtlEven + Bt848CapCtlOdd;
 					temp1 := SYSTEM.GET8(base + BktrEVScaleHi);
@@ -2163,8 +2134,6 @@ TYPE
 		SYSTEM.PUT32(base + BktrRISCStrtAdd, AosMemory.PhysicalAdr(SYSTEM.ADR(dmaProg), 4));
 		
 		vbiFlags := vbiFlags * (-VbiCapture);	(* default - no VBI capture *)
-		(* OJ: Open vbi Device *)
-		vbiFlags := vbiFlags + VbiOpen;
 
 		IF pixelFormat.type = AosPixTypeRGB THEN
 			IF (vbiFlags * VbiOpen # {}) OR (formatParameters = Bt848IFormFPalBDGHI) OR
@@ -2203,137 +2172,137 @@ TYPE
 		ASSERT(ipc # AosMemory.NilAdr);
 		spc := ipc;
 		data := SYSTEM.GET32(ipc);
-		AosOut.String("{BT848} *** RISC DUMP START ***"); AosOut.Ln;
-		AosOut.String("{BT848} BktrRISCStrtAddr: "); AosOut.Hex(pc, 0); AosOut.Ln;
-		AosOut.String("{BT848} error address: "); AosOut.Hex(errPC, 0); AosOut.Ln;
-		AosOut.String("{BT848} risc jump addr: "); AosOut.Hex(AosMemory.PhysicalAdr(SYSTEM.ADR(dmaProg), 0), 0);
+		AosOut.String("{AosBT848} *** RISC DUMP START ***"); AosOut.Ln;
+		AosOut.String("{AosBT848} BktrRISCStrtAddr: "); AosOut.Hex(pc, 0); AosOut.Ln;
+		AosOut.String("{AosBT848} error address: "); AosOut.Hex(errPC, 0); AosOut.Ln;
+		AosOut.String("{AosBT848} risc jump addr: "); AosOut.Hex(AosMemory.PhysicalAdr(SYSTEM.ADR(dmaProg), 0), 0);
 			AosOut.Ln;
 		i := 0;
 		REPEAT
 			CASE SYSTEM.VAL(LONGINT, SYSTEM.VAL(SET, ASH(data, -28)) * {0..3}) OF
 					01H:
-						AosOut.String("{BT848} "); AosOut.Hex(AosMemory.PhysicalAdr(ipc, 4), 0);
+						AosOut.String("{AosBT848} "); AosOut.Hex(AosMemory.PhysicalAdr(ipc, 4), 0);
 							AosOut.String(" write:"); AosOut.Ln;
-						AosOut.String("{BT848}    bytes: "); AosOut.Int(SYSTEM.VAL(LONGINT, SYSTEM.VAL(SET, data) * {0..11}), 0);
+						AosOut.String("{AosBT848}    bytes: "); AosOut.Int(SYSTEM.VAL(LONGINT, SYSTEM.VAL(SET, data) * {0..11}), 0);
 							AosOut.Ln;
-						AosOut.String("{BT848}    enables: "); AosOut.Bits(SYSTEM.VAL(SET, data), 12, 4); AosOut.Ln;
-						AosOut.String("{BT848}    risc status set: "); AosOut.Bits(SYSTEM.VAL(SET, data), 16, 4); AosOut.Ln;
-						AosOut.String("{BT848}    risc status reset: "); AosOut.Bits(SYSTEM.VAL(SET, data), 20, 4); AosOut.Ln;
-						AosOut.String("{BT848}    irq: "); AosOut.Bits(SYSTEM.VAL(SET, data), 24, 1); AosOut.Ln;
-						AosOut.String("{BT848}    reserved: "); AosOut.Bits(SYSTEM.VAL(SET, data), 25, 1); AosOut.Ln;
-						AosOut.String("{BT848}    eol: "); AosOut.Bits(SYSTEM.VAL(SET, data), 26, 1); AosOut.Ln;
-						AosOut.String("{BT848}    sol: "); AosOut.Bits(SYSTEM.VAL(SET, data), 27, 1); AosOut.Ln;
+						AosOut.String("{AosBT848}    enables: "); AosOut.Bits(SYSTEM.VAL(SET, data), 12, 4); AosOut.Ln;
+						AosOut.String("{AosBT848}    risc status set: "); AosOut.Bits(SYSTEM.VAL(SET, data), 16, 4); AosOut.Ln;
+						AosOut.String("{AosBT848}    risc status reset: "); AosOut.Bits(SYSTEM.VAL(SET, data), 20, 4); AosOut.Ln;
+						AosOut.String("{AosBT848}    irq: "); AosOut.Bits(SYSTEM.VAL(SET, data), 24, 1); AosOut.Ln;
+						AosOut.String("{AosBT848}    reserved: "); AosOut.Bits(SYSTEM.VAL(SET, data), 25, 1); AosOut.Ln;
+						AosOut.String("{AosBT848}    eol: "); AosOut.Bits(SYSTEM.VAL(SET, data), 26, 1); AosOut.Ln;
+						AosOut.String("{AosBT848}    sol: "); AosOut.Bits(SYSTEM.VAL(SET, data), 27, 1); AosOut.Ln;
 						INC(ipc, 4); data := SYSTEM.GET32(ipc);
-						AosOut.String("{BT848}    target: "); AosOut.Hex(data, 0); AosOut.Ln;
+						AosOut.String("{AosBT848}    target: "); AosOut.Hex(data, 0); AosOut.Ln;
 						INC(ipc, 4); data := SYSTEM.GET32(ipc);
 				|  09H:
-						AosOut.String("{BT848} "); AosOut.Hex(AosMemory.PhysicalAdr(ipc, 4), 0);
+						AosOut.String("{AosBT848} "); AosOut.Hex(AosMemory.PhysicalAdr(ipc, 4), 0);
 							AosOut.String(" write123:"); AosOut.Ln;
-						AosOut.String("{BT848}    bytes FIFO 1: ");
+						AosOut.String("{AosBT848}    bytes FIFO 1: ");
 							AosOut.Int(SYSTEM.VAL(LONGINT, SYSTEM.VAL(SET, data) * {0..11}), 0); AosOut.Ln;
-						AosOut.String("{BT848}    enables: "); AosOut.Bits(SYSTEM.VAL(SET, data), 12, 4); AosOut.Ln;
-						AosOut.String("{BT848}    risc status set: "); AosOut.Bits(SYSTEM.VAL(SET, data), 16, 4); AosOut.Ln;
-						AosOut.String("{BT848}    risc status reset: "); AosOut.Bits(SYSTEM.VAL(SET, data), 20, 4); AosOut.Ln;
-						AosOut.String("{BT848}    irq: "); AosOut.Bits(SYSTEM.VAL(SET, data), 24, 1); AosOut.Ln;
-						AosOut.String("{BT848}    reserved: "); AosOut.Bits(SYSTEM.VAL(SET, data), 25, 1); AosOut.Ln;
-						AosOut.String("{BT848}    eol: "); AosOut.Bits(SYSTEM.VAL(SET, data), 26, 1); AosOut.Ln;
-						AosOut.String("{BT848}    sol: "); AosOut.Bits(SYSTEM.VAL(SET, data), 27, 1); AosOut.Ln;
+						AosOut.String("{AosBT848}    enables: "); AosOut.Bits(SYSTEM.VAL(SET, data), 12, 4); AosOut.Ln;
+						AosOut.String("{AosBT848}    risc status set: "); AosOut.Bits(SYSTEM.VAL(SET, data), 16, 4); AosOut.Ln;
+						AosOut.String("{AosBT848}    risc status reset: "); AosOut.Bits(SYSTEM.VAL(SET, data), 20, 4); AosOut.Ln;
+						AosOut.String("{AosBT848}    irq: "); AosOut.Bits(SYSTEM.VAL(SET, data), 24, 1); AosOut.Ln;
+						AosOut.String("{AosBT848}    reserved: "); AosOut.Bits(SYSTEM.VAL(SET, data), 25, 1); AosOut.Ln;
+						AosOut.String("{AosBT848}    eol: "); AosOut.Bits(SYSTEM.VAL(SET, data), 26, 1); AosOut.Ln;
+						AosOut.String("{AosBT848}    sol: "); AosOut.Bits(SYSTEM.VAL(SET, data), 27, 1); AosOut.Ln;
 						INC(ipc, 4); data := SYSTEM.GET32(ipc);
-						AosOut.String("{BT848}    bytes FIFO 2: ");
+						AosOut.String("{AosBT848}    bytes FIFO 2: ");
 							AosOut.Int(SYSTEM.VAL(LONGINT, SYSTEM.VAL(SET, data) * {0..11}), 0); AosOut.Ln;
 						INC(ipc, 4); data := SYSTEM.GET32(ipc);
-						AosOut.String("{BT848}    bytes FIFO 3: ");
+						AosOut.String("{AosBT848}    bytes FIFO 3: ");
 							AosOut.Int(SYSTEM.VAL(LONGINT, SYSTEM.VAL(SET, ASH(data, 16)) * {0..11}), 0); AosOut.Ln;
 						INC(ipc, 4); data := SYSTEM.GET32(ipc);
-						AosOut.String("{BT848}    target 1: "); AosOut.Hex(data, 0); AosOut.Ln;
+						AosOut.String("{AosBT848}    target 1: "); AosOut.Hex(data, 0); AosOut.Ln;
 						INC(ipc, 4); data := SYSTEM.GET32(ipc);
-						AosOut.String("{BT848}    target 2: "); AosOut.Hex(data, 0); AosOut.Ln;
+						AosOut.String("{AosBT848}    target 2: "); AosOut.Hex(data, 0); AosOut.Ln;
 						INC(ipc, 4); data := SYSTEM.GET32(ipc);
-						AosOut.String("{BT848}    target 3: "); AosOut.Hex(data, 0); AosOut.Ln;
+						AosOut.String("{AosBT848}    target 3: "); AosOut.Hex(data, 0); AosOut.Ln;
 						INC(ipc, 4); data := SYSTEM.GET32(ipc);
 				|  0BH:
-						AosOut.String("{BT848} "); AosOut.Hex(AosMemory.PhysicalAdr(ipc, 4), 0);
+						AosOut.String("{AosBT848} "); AosOut.Hex(AosMemory.PhysicalAdr(ipc, 4), 0);
 							AosOut.String(" write1s23:"); AosOut.Ln;
-						AosOut.String("{BT848}    bytes FIFO 1: ");
+						AosOut.String("{AosBT848}    bytes FIFO 1: ");
 							AosOut.Int(SYSTEM.VAL(LONGINT, SYSTEM.VAL(SET, data) * {0..11}), 0); AosOut.Ln;
-						AosOut.String("{BT848}    enables: "); AosOut.Bits(SYSTEM.VAL(SET, data), 12, 4); AosOut.Ln;
-						AosOut.String("{BT848}    risc status set: "); AosOut.Bits(SYSTEM.VAL(SET, data), 16, 4); AosOut.Ln;
-						AosOut.String("{BT848}    risc status reset: "); AosOut.Bits(SYSTEM.VAL(SET, data), 20, 4); AosOut.Ln;
-						AosOut.String("{BT848}    irq: "); AosOut.Bits(SYSTEM.VAL(SET, data), 24, 1); AosOut.Ln;
-						AosOut.String("{BT848}    reserved: "); AosOut.Bits(SYSTEM.VAL(SET, data), 25, 1); AosOut.Ln;
-						AosOut.String("{BT848}    eol: "); AosOut.Bits(SYSTEM.VAL(SET, data), 26, 1); AosOut.Ln;
-						AosOut.String("{BT848}    sol: "); AosOut.Bits(SYSTEM.VAL(SET, data), 27, 1); AosOut.Ln;
+						AosOut.String("{AosBT848}    enables: "); AosOut.Bits(SYSTEM.VAL(SET, data), 12, 4); AosOut.Ln;
+						AosOut.String("{AosBT848}    risc status set: "); AosOut.Bits(SYSTEM.VAL(SET, data), 16, 4); AosOut.Ln;
+						AosOut.String("{AosBT848}    risc status reset: "); AosOut.Bits(SYSTEM.VAL(SET, data), 20, 4); AosOut.Ln;
+						AosOut.String("{AosBT848}    irq: "); AosOut.Bits(SYSTEM.VAL(SET, data), 24, 1); AosOut.Ln;
+						AosOut.String("{AosBT848}    reserved: "); AosOut.Bits(SYSTEM.VAL(SET, data), 25, 1); AosOut.Ln;
+						AosOut.String("{AosBT848}    eol: "); AosOut.Bits(SYSTEM.VAL(SET, data), 26, 1); AosOut.Ln;
+						AosOut.String("{AosBT848}    sol: "); AosOut.Bits(SYSTEM.VAL(SET, data), 27, 1); AosOut.Ln;
 						INC(ipc, 4); data := SYSTEM.GET32(ipc);
-						AosOut.String("{BT848}    bytes FIFO 2: ");
+						AosOut.String("{AosBT848}    bytes FIFO 2: ");
 							AosOut.Int(SYSTEM.VAL(LONGINT, SYSTEM.VAL(SET, data) * {0..11}), 0); AosOut.Ln;
 						INC(ipc, 4); data := SYSTEM.GET32(ipc);
-						AosOut.String("{BT848}    bytes FIFO 3: ");
+						AosOut.String("{AosBT848}    bytes FIFO 3: ");
 							AosOut.Int(SYSTEM.VAL(LONGINT, SYSTEM.VAL(SET, ASH(data, 16)) * {0..11}), 0); AosOut.Ln;
 						INC(ipc, 4); data := SYSTEM.GET32(ipc);
-						AosOut.String("{BT848}    target 1: "); AosOut.Hex(data, 0); AosOut.Ln;
+						AosOut.String("{AosBT848}    target 1: "); AosOut.Hex(data, 0); AosOut.Ln;
 						INC(ipc, 4); data := SYSTEM.GET32(ipc);
 				| 05H:
-						AosOut.String("{BT848} "); AosOut.Hex(AosMemory.PhysicalAdr(ipc, 4), 0);
+						AosOut.String("{AosBT848} "); AosOut.Hex(AosMemory.PhysicalAdr(ipc, 4), 0);
 							AosOut.String(" writec:"); AosOut.Ln;
-						AosOut.String("{BT848}    bytes FIFO 1: ");
+						AosOut.String("{AosBT848}    bytes FIFO 1: ");
 							AosOut.Int(SYSTEM.VAL(LONGINT, SYSTEM.VAL(SET, data) * {0..11}), 0); AosOut.Ln;
-						AosOut.String("{BT848}    enables: "); AosOut.Bits(SYSTEM.VAL(SET, data), 12, 4); AosOut.Ln;
-						AosOut.String("{BT848}    risc status set: "); AosOut.Bits(SYSTEM.VAL(SET, data), 16, 4); AosOut.Ln;
-						AosOut.String("{BT848}    risc status reset: "); AosOut.Bits(SYSTEM.VAL(SET, data), 20, 4); AosOut.Ln;
-						AosOut.String("{BT848}    irq: "); AosOut.Bits(SYSTEM.VAL(SET, data), 24, 1); AosOut.Ln;
-						AosOut.String("{BT848}    reserved: "); AosOut.Bits(SYSTEM.VAL(SET, data), 25, 1); AosOut.Ln;
-						AosOut.String("{BT848}    eol: "); AosOut.Bits(SYSTEM.VAL(SET, data), 26, 1); AosOut.Ln;
-						AosOut.String("{BT848}    sol: "); AosOut.Bits(SYSTEM.VAL(SET, data), 27, 1); AosOut.Ln;
+						AosOut.String("{AosBT848}    enables: "); AosOut.Bits(SYSTEM.VAL(SET, data), 12, 4); AosOut.Ln;
+						AosOut.String("{AosBT848}    risc status set: "); AosOut.Bits(SYSTEM.VAL(SET, data), 16, 4); AosOut.Ln;
+						AosOut.String("{AosBT848}    risc status reset: "); AosOut.Bits(SYSTEM.VAL(SET, data), 20, 4); AosOut.Ln;
+						AosOut.String("{AosBT848}    irq: "); AosOut.Bits(SYSTEM.VAL(SET, data), 24, 1); AosOut.Ln;
+						AosOut.String("{AosBT848}    reserved: "); AosOut.Bits(SYSTEM.VAL(SET, data), 25, 1); AosOut.Ln;
+						AosOut.String("{AosBT848}    eol: "); AosOut.Bits(SYSTEM.VAL(SET, data), 26, 1); AosOut.Ln;
+						AosOut.String("{AosBT848}    sol: "); AosOut.Bits(SYSTEM.VAL(SET, data), 27, 1); AosOut.Ln;
 						INC(ipc, 4); data := SYSTEM.GET32(ipc);
 				| 02H:
-						AosOut.String("{BT848} "); AosOut.Hex(AosMemory.PhysicalAdr(ipc, 4), 0);
+						AosOut.String("{AosBT848} "); AosOut.Hex(AosMemory.PhysicalAdr(ipc, 4), 0);
 							AosOut.String(" skip:"); AosOut.Ln;
-						AosOut.String("{BT848}    bytes FIFO 1: ");
+						AosOut.String("{AosBT848}    bytes FIFO 1: ");
 							AosOut.Int(SYSTEM.VAL(LONGINT, SYSTEM.VAL(SET, data) * {0..11}), 0); AosOut.Ln;
-						AosOut.String("{BT848}    enables: "); AosOut.Bits(SYSTEM.VAL(SET, data), 12, 4); AosOut.Ln;
-						AosOut.String("{BT848}    risc status set: "); AosOut.Bits(SYSTEM.VAL(SET, data), 16, 4); AosOut.Ln;
-						AosOut.String("{BT848}    risc status reset: "); AosOut.Bits(SYSTEM.VAL(SET, data), 20, 4); AosOut.Ln;
-						AosOut.String("{BT848}    irq: "); AosOut.Bits(SYSTEM.VAL(SET, data), 24, 1); AosOut.Ln;
-						AosOut.String("{BT848}    reserved: "); AosOut.Bits(SYSTEM.VAL(SET, data), 25, 1); AosOut.Ln;
-						AosOut.String("{BT848}    eol: "); AosOut.Bits(SYSTEM.VAL(SET, data), 26, 1); AosOut.Ln;
-						AosOut.String("{BT848}    sol: "); AosOut.Bits(SYSTEM.VAL(SET, data), 27, 1); AosOut.Ln;
+						AosOut.String("{AosBT848}    enables: "); AosOut.Bits(SYSTEM.VAL(SET, data), 12, 4); AosOut.Ln;
+						AosOut.String("{AosBT848}    risc status set: "); AosOut.Bits(SYSTEM.VAL(SET, data), 16, 4); AosOut.Ln;
+						AosOut.String("{AosBT848}    risc status reset: "); AosOut.Bits(SYSTEM.VAL(SET, data), 20, 4); AosOut.Ln;
+						AosOut.String("{AosBT848}    irq: "); AosOut.Bits(SYSTEM.VAL(SET, data), 24, 1); AosOut.Ln;
+						AosOut.String("{AosBT848}    reserved: "); AosOut.Bits(SYSTEM.VAL(SET, data), 25, 1); AosOut.Ln;
+						AosOut.String("{AosBT848}    eol: "); AosOut.Bits(SYSTEM.VAL(SET, data), 26, 1); AosOut.Ln;
+						AosOut.String("{AosBT848}    sol: "); AosOut.Bits(SYSTEM.VAL(SET, data), 27, 1); AosOut.Ln;
 						INC(ipc, 4); data := SYSTEM.GET32(ipc);
 				| 0AH:
-						AosOut.String("{BT848} "); AosOut.Hex(AosMemory.PhysicalAdr(ipc, 4), 0);
+						AosOut.String("{AosBT848} "); AosOut.Hex(AosMemory.PhysicalAdr(ipc, 4), 0);
 							AosOut.String(" skip123:"); AosOut.Ln;
-						AosOut.String("{BT848}    bytes FIFO 1: ");
+						AosOut.String("{AosBT848}    bytes FIFO 1: ");
 							AosOut.Int(SYSTEM.VAL(LONGINT, SYSTEM.VAL(SET, data) * {0..11}), 0); AosOut.Ln;
-						AosOut.String("{BT848}    enables: "); AosOut.Bits(SYSTEM.VAL(SET, data), 12, 4); AosOut.Ln;
-						AosOut.String("{BT848}    risc status set: "); AosOut.Bits(SYSTEM.VAL(SET, data), 16, 4); AosOut.Ln;
-						AosOut.String("{BT848}    risc status reset: "); AosOut.Bits(SYSTEM.VAL(SET, data), 20, 4); AosOut.Ln;
-						AosOut.String("{BT848}    irq: "); AosOut.Bits(SYSTEM.VAL(SET, data), 24, 1); AosOut.Ln;
-						AosOut.String("{BT848}    reserved: "); AosOut.Bits(SYSTEM.VAL(SET, data), 25, 1); AosOut.Ln;
-						AosOut.String("{BT848}    eol: "); AosOut.Bits(SYSTEM.VAL(SET, data), 26, 1); AosOut.Ln;
-						AosOut.String("{BT848}    sol: "); AosOut.Bits(SYSTEM.VAL(SET, data), 27, 1); AosOut.Ln;
+						AosOut.String("{AosBT848}    enables: "); AosOut.Bits(SYSTEM.VAL(SET, data), 12, 4); AosOut.Ln;
+						AosOut.String("{AosBT848}    risc status set: "); AosOut.Bits(SYSTEM.VAL(SET, data), 16, 4); AosOut.Ln;
+						AosOut.String("{AosBT848}    risc status reset: "); AosOut.Bits(SYSTEM.VAL(SET, data), 20, 4); AosOut.Ln;
+						AosOut.String("{AosBT848}    irq: "); AosOut.Bits(SYSTEM.VAL(SET, data), 24, 1); AosOut.Ln;
+						AosOut.String("{AosBT848}    reserved: "); AosOut.Bits(SYSTEM.VAL(SET, data), 25, 1); AosOut.Ln;
+						AosOut.String("{AosBT848}    eol: "); AosOut.Bits(SYSTEM.VAL(SET, data), 26, 1); AosOut.Ln;
+						AosOut.String("{AosBT848}    sol: "); AosOut.Bits(SYSTEM.VAL(SET, data), 27, 1); AosOut.Ln;
 						INC(ipc, 4); data := SYSTEM.GET32(ipc);
-						AosOut.String("{BT848}    bytes FIFO 2: ");
+						AosOut.String("{AosBT848}    bytes FIFO 2: ");
 							AosOut.Int(SYSTEM.VAL(LONGINT, SYSTEM.VAL(SET, data) * {0..11}), 0); AosOut.Ln;
 						INC(ipc, 4); data := SYSTEM.GET32(ipc);
-						AosOut.String("{BT848}    bytes FIFO 3: ");
+						AosOut.String("{AosBT848}    bytes FIFO 3: ");
 							AosOut.Int(SYSTEM.VAL(LONGINT, SYSTEM.VAL(SET, ASH(data, 16)) * {0..11}), 0); AosOut.Ln;
 						INC(ipc, 4); data := SYSTEM.GET32(ipc);
 				|  07H:
-						AosOut.String("{BT848} "); AosOut.Hex(AosMemory.PhysicalAdr(ipc, 4), 0);
+						AosOut.String("{AosBT848} "); AosOut.Hex(AosMemory.PhysicalAdr(ipc, 4), 0);
 							AosOut.String(" jump:"); AosOut.Ln;
-						AosOut.String("{BT848}    reserved: ");
+						AosOut.String("{AosBT848}    reserved: ");
 							AosOut.Int(SYSTEM.VAL(LONGINT, SYSTEM.VAL(SET, data) * {0..15}), 0); AosOut.Ln;
-						AosOut.String("{BT848}    risc status set: "); AosOut.Bits(SYSTEM.VAL(SET, data), 16, 4); AosOut.Ln;
-						AosOut.String("{BT848}    risc status reset: "); AosOut.Bits(SYSTEM.VAL(SET, data), 20, 4); AosOut.Ln;
-						AosOut.String("{BT848}    irq: "); AosOut.Bits(SYSTEM.VAL(SET, data), 24, 1); AosOut.Ln;
-						AosOut.String("{BT848}    reserved: "); AosOut.Bits(SYSTEM.VAL(SET, data), 25, 1); AosOut.Ln;
+						AosOut.String("{AosBT848}    risc status set: "); AosOut.Bits(SYSTEM.VAL(SET, data), 16, 4); AosOut.Ln;
+						AosOut.String("{AosBT848}    risc status reset: "); AosOut.Bits(SYSTEM.VAL(SET, data), 20, 4); AosOut.Ln;
+						AosOut.String("{AosBT848}    irq: "); AosOut.Bits(SYSTEM.VAL(SET, data), 24, 1); AosOut.Ln;
+						AosOut.String("{AosBT848}    reserved: "); AosOut.Bits(SYSTEM.VAL(SET, data), 25, 1); AosOut.Ln;
 						INC(ipc, 4); data := SYSTEM.GET32(ipc);
-						AosOut.String("{BT848}    target: ");
+						AosOut.String("{AosBT848}    target: ");
 							AosOut.Hex(data, 0); AosOut.Ln;
 						INC(ipc, 4); data := SYSTEM.GET32(ipc);
 				|  08H:
-						AosOut.String("{BT848} "); AosOut.Hex(AosMemory.PhysicalAdr(ipc, 4), 0);
+						AosOut.String("{AosBT848} "); AosOut.Hex(AosMemory.PhysicalAdr(ipc, 4), 0);
 							AosOut.String(" sync:"); AosOut.Ln;
-						AosOut.String("{BT848}    status: ");
+						AosOut.String("{AosBT848}    status: ");
 						CASE SYSTEM.VAL(LONGINT, SYSTEM.VAL(SET, data) * {0..3}) OF
 							   06H:	AosOut.String("FM1");
 							| 0EH:	AosOut.String("FM3");
@@ -2348,25 +2317,25 @@ TYPE
 							| ELSE	AosOut.String("*** UNKNOWN ***");
 						END;
 						AosOut.Ln;
-						AosOut.String("{BT848}    reserved: ");
+						AosOut.String("{AosBT848}    reserved: ");
 							AosOut.Bits(SYSTEM.VAL(SET, data), 4, 11); AosOut.Ln;
-						AosOut.String("{BT848}    resync: "); AosOut.Bits(SYSTEM.VAL(SET, data), 15, 1); AosOut.Ln;
-						AosOut.String("{BT848}    risc status set: "); AosOut.Bits(SYSTEM.VAL(SET, data), 16, 4); AosOut.Ln;
-						AosOut.String("{BT848}    risc status reset: "); AosOut.Bits(SYSTEM.VAL(SET, data), 20, 4); AosOut.Ln;
-						AosOut.String("{BT848}    irq: "); AosOut.Bits(SYSTEM.VAL(SET, data), 24, 1); AosOut.Ln;
-						AosOut.String("{BT848}    reserved: "); AosOut.Bits(SYSTEM.VAL(SET, data), 25, 3); AosOut.Ln;
+						AosOut.String("{AosBT848}    resync: "); AosOut.Bits(SYSTEM.VAL(SET, data), 15, 1); AosOut.Ln;
+						AosOut.String("{AosBT848}    risc status set: "); AosOut.Bits(SYSTEM.VAL(SET, data), 16, 4); AosOut.Ln;
+						AosOut.String("{AosBT848}    risc status reset: "); AosOut.Bits(SYSTEM.VAL(SET, data), 20, 4); AosOut.Ln;
+						AosOut.String("{AosBT848}    irq: "); AosOut.Bits(SYSTEM.VAL(SET, data), 24, 1); AosOut.Ln;
+						AosOut.String("{AosBT848}    reserved: "); AosOut.Bits(SYSTEM.VAL(SET, data), 25, 3); AosOut.Ln;
 						INC(ipc, 4); data := SYSTEM.GET32(ipc);
-						AosOut.String("{BT848}    reserved: ");
+						AosOut.String("{AosBT848}    reserved: ");
 							AosOut.Bits(SYSTEM.VAL(SET, data), 0, 32); AosOut.Ln;
 						INC(ipc, 4); data := SYSTEM.GET32(ipc);
 				| ELSE
-						AosOut.String("{BT848} INVALID RISC INSN: "); AosOut.Bits(SYSTEM.VAL(SET, data), 0, 32);
+						AosOut.String("{AosBT848} INVALID RISC INSN: "); AosOut.Bits(SYSTEM.VAL(SET, data), 0, 32);
 							AosOut.String(" @ ");
 							AosOut.Hex(AosMemory.PhysicalAdr(ipc, 4), 0); AosOut.Ln;
 						RETURN;
 			END;
 		UNTIL ((ipc - spc) DIV 4) > dmaProgLength;
-		AosOut.String("{BT848} risc: risc_jmp: dump completed"); AosOut.Ln;
+		AosOut.String("{AosBT848} risc: risc_jmp: dump completed"); AosOut.Ln;
 	END DumpRisc;
 	
 	(** Opens the VideoCaptureDevice object. *)
@@ -2375,7 +2344,7 @@ TYPE
 		temp1: LONGINT;
 	BEGIN
 		IF flags * AosOpen # {} THEN
-			IF DEBUG # DebugOff THEN AosOut.String("{BT848} VideoOpen: device already in use"); AosOut.Ln; END;
+			IF DEBUG # DebugOff THEN AosOut.String("{AosBT848} VideoOpen: device already in use"); AosOut.Ln; END;
 			RETURN;
 		END;
 		flags := flags + AosOpen;
@@ -2457,6 +2426,12 @@ TYPE
 	BEGIN
 		RETURN (flags * AosOpen) # {}
 	END IsVideoOpen;
+	
+	(** Is the Vbi signal (Teletext) being captured? *)
+	PROCEDURE IsVbiOpen* (): BOOLEAN;
+	BEGIN
+		RETURN (vbiFlags * VbiOpen) # {}
+	END IsVbiOpen;
 	
 	(** Set a list of clipping region. *)
 	PROCEDURE SetClipRegion*;
@@ -2645,15 +2620,15 @@ TYPE
 		flags := flags + AosSingle;
 		flags := flags * (-AosWantMask);
 		IF flags * AosOnlyFieldsMask = AosOnlyEvenFields THEN
-			IF DEBUG >= DebugLow THEN AosOut.String("{BT848} CaptureSingle: even fields"); AosOut.Ln; END;
+			IF DEBUG >= DebugMed THEN AosOut.String("{AosBT848} CaptureSingle: even fields"); AosOut.Ln; END;
 			flags := flags + AosWantEven;
 			iFlag := AosEvenField;
 		ELSIF flags * AosOnlyFieldsMask = AosOnlyOddFields THEN
-			IF DEBUG >= DebugLow THEN AosOut.String("{BT848} CaptureSingle: odd fields"); AosOut.Ln; END;
+			IF DEBUG >= DebugMed THEN AosOut.String("{AosBT848} CaptureSingle: odd fields"); AosOut.Ln; END;
 			flags := flags + AosWantOdd;
 			iFlag := AosOddField;
 		ELSE
-			IF DEBUG >= DebugLow THEN AosOut.String("{BT848} CaptureSingle: interlaced"); AosOut.Ln; END;
+			IF DEBUG >= DebugMed THEN AosOut.String("{AosBT848} CaptureSingle: interlaced"); AosOut.Ln; END;
 			flags := flags + AosWantMask;
 			iFlag := AosInterlaced;
 		END;
@@ -3048,7 +3023,7 @@ TYPE
 	(* Initialize the Audio object. *)
 	PROCEDURE &Init(vcd: AosTVDriver.VideoCaptureDevice);
 	BEGIN
-		ASSERT (vcd IS VideoCaptureDevice);	(* inserted by OJ because of AosTVDriver module... *)
+		ASSERT (vcd IS VideoCaptureDevice);
 		SELF.vcd := vcd(VideoCaptureDevice);
 		InitAudioDevices;
 	END Init;
@@ -3214,7 +3189,7 @@ TYPE
 		MspDplWrite(vcd.dplAddr, CHR(0012H), 0043H, 0000H);	(* automatic surround input balance *)
 		MspDplWrite(vcd.dplAddr, CHR(0012H), 0044H, 4000H);	(* surround spatial effect 50% recommended *)
 		MspDplWrite(vcd.dplAddr, CHR(0012H), 0045H, 5400H);	(* surround panorama effect 66% recommended *)
-																											(* with PANORAMA mode in 0x0040 set to panorama *)
+																										(* with PANORAMA mode in 0x0040 set to panorama *)
 	END DplAutoDetect;
 
 	(* Write to the sound chip. *)
@@ -3397,7 +3372,7 @@ VAR
 	t: LONGINT;
 BEGIN
 	IF DEBUG # DebugOff THEN
-		AosOut.String("{BT848} Scanning PCI bus for vendor: "); AosOut.Hex(vendor, 0);
+		AosOut.String("{AosBT848} Scanning PCI bus for vendor: "); AosOut.Hex(vendor, 0);
 		AosOut.String("; device: "); AosOut.Hex(device, 0); AosOut.Ln();
 	END;
 	index := 0;
@@ -3407,7 +3382,7 @@ BEGIN
 		ASSERT(PCI.ReadConfigByte(bus, dev, fct, PCI.IntlReg, irq) = PCI.Done);
 		ASSERT(PCI.ReadConfigByte(bus, dev, fct, PCI.RevIdReg, rev) = PCI.Done);
 		IF DEBUG # DebugOff THEN
-			AosOut.String("{BT848} PCI device found! irq: ");
+			AosOut.String("{AosBT848} PCI device found! irq: ");
 			AosOut.Int(irq, 0); AosOut.String("; base: "); AosOut.Hex(base, 0);
 			AosOut.String("; rev: "); AosOut.Hex(rev, 0); AosOut.Ln();
 		END;
@@ -3429,7 +3404,7 @@ BEGIN
 		latency := SYSTEM.VAL(LONGINT, SYSTEM.VAL(SET, ASH(latency, -8)) * {0..7});
 		IF latency = 0 THEN
 			IF DEBUG # DebugOff THEN
-				AosOut.String("{BT848} PCI latency 0, setting latency to ");
+				AosOut.String("{AosBT848} PCI latency 0, setting latency to ");
 				AosOut.Int(BtDefaultLatencyValue, 0); AosOut.Ln;
 			END;
 			ASSERT(PCI.WriteConfigDword(bus, dev, fct, PCILatencyTimer, ASH(BtDefaultLatencyValue, 8)) = PCI.Done);
@@ -3446,21 +3421,38 @@ END ScanPCI;
 PROCEDURE InstallDevices;
 VAR
 	res: LONGINT;
+	dev: VideoCaptureDevice;
 BEGIN {EXCLUSIVE}
 	IF nOfInstalledDevices = 0 THEN
 		IF DEBUG # DebugOff THEN
-			AosOut.String("{BT848} Installing device driver ..."); AosOut.Ln();
-			AosOut.String("{BT848} Looking for Bt848 ..."); AosOut.Ln;
+			AosOut.String("{AosBT848} Installing device driver ..."); AosOut.Ln();
+			AosOut.String("{AosBT848} Looking for Bt848 ..."); AosOut.Ln;
 		END;
 		ScanPCI(PCIVendorBrooktree, PCIProductBrooktreeBt848);
-		IF DEBUG # DebugOff THEN AosOut.String("{BT848} Looking for Bt849 ..."); AosOut.Ln; END;
+		IF DEBUG # DebugOff THEN AosOut.String("{AosBT848} Looking for Bt849 ..."); AosOut.Ln; END;
 		ScanPCI(PCIVendorBrooktree, PCIProductBrooktreeBt849);
-		IF DEBUG # DebugOff THEN AosOut.String("{BT848} Looking for Bt878 ..."); AosOut.Ln; END;
+		IF DEBUG # DebugOff THEN AosOut.String("{AosBT848} Looking for Bt878 ..."); AosOut.Ln; END;
 		ScanPCI(PCIVendorBrooktree, PCIProductBrooktreeBt878);
-		IF DEBUG # DebugOff THEN AosOut.String("{BT848} Looking for Bt879 ..."); AosOut.Ln; END;
+		IF DEBUG # DebugOff THEN AosOut.String("{AosBT848} Looking for Bt879 ..."); AosOut.Ln; END;
 		ScanPCI(PCIVendorBrooktree, PCIProductBrooktreeBt879);
-		AosTVDriver.devices.Add (vcdDevices, res);
-		ASSERT (res = AosPlugins.Ok);
+		IF vcdDevices = NIL THEN
+			AosOut.String("{AosBT848} ERROR: No BT848-compatible TV card detected.");
+			AosOut.Ln;
+		ELSE
+			dev := vcdDevices;
+			WHILE dev # NIL DO
+				dev.SetName(PluginName);
+				dev.desc := PluginDesc;
+				AosTVDriver.devices.Add (dev, res);
+				ASSERT (res = AosPlugins.Ok);
+				dev := dev.next
+			END;
+			IF DEBUG # DebugOff THEN
+				AosOut.String("{AosBT848} Device driver successfully installed.");
+				AosOut.String(" Found "); AosOut.Int(nOfInstalledDevices, 0);
+				AosOut.String(" devices."); AosOut.Ln
+			END;
+		END;
 	END;
 END InstallDevices;
 
@@ -3471,27 +3463,25 @@ BEGIN
 END Install;
 
 PROCEDURE UnInstallDevices;
+VAR
+	dev: VideoCaptureDevice;
 BEGIN
-	AosTVDriver.devices.Remove (vcdDevices);
+	dev := vcdDevices;
+	WHILE dev # NIL DO
+		AosTVDriver.devices.Remove (dev);
+		dev := dev.next
+	END;
+	IF vcdDevices # NIL THEN
+		AosOut.String("{AosBT848} Devices unloaded."); AosOut.Ln
+	END
 END UnInstallDevices;
 
 PROCEDURE UnInstall* (par: PTR): PTR;
 BEGIN
-	UnInstallDevices;
+	Cleanup;
 	RETURN NIL
 END UnInstall;
 
-(** Get a video device. *)
-(** idx:	index of video card. *)
-(** return value:	a VideoCaptureDevice object *)
-PROCEDURE GetVideoDevice*(idx: LONGINT): VideoCaptureDevice;
-BEGIN
-	IF idx > nOfInstalledDevices THEN
-		RETURN NIL;
-	ELSE
-		RETURN vcdDevices; (* TO BE DONE: n-th device *)
-	END;
-END GetVideoDevice;
 
 (* Cleanup procedure if module is released. *)
 PROCEDURE Cleanup;
@@ -3501,9 +3491,9 @@ BEGIN
 	WHILE next # NIL DO
 		vcd := next;
 		next := vcd.next;
-		vcd.Finalize;
+		vcd.Finalize
 	END;
-	UnInstallDevices;
+	UnInstallDevices
 END Cleanup;
 
 

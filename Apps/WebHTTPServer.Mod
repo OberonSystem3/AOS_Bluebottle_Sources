@@ -7,7 +7,7 @@ CONST
 	FileBufSize = 4096;
 	URLLen = 1024;
 	Major* = 1; Minor* = 1;
-	ServerVersion* = "Aos HTTP Server/0.3";
+	ServerVersion* = "Aos HTTP Server/0.3a";
 	DocType = '<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">';
 	Tab = 09X;
 	
@@ -30,13 +30,15 @@ TYPE
 		END Init;
 		
 		(** if CanHandle returns TRUE, the Handler procedure will be called *)
-		PROCEDURE CanHandle* (host: Host; VAR header : WebHTTP.RequestHeader) : BOOLEAN;
-		BEGIN HALT(301)
+		PROCEDURE CanHandle* (host: Host; VAR header : WebHTTP.RequestHeader; secure: BOOLEAN) : BOOLEAN;
+		BEGIN HALT(301);
+			RETURN FALSE
 		END CanHandle;
 
 		(** default LocateResource method *)
 		PROCEDURE LocateResource*(host: Host; VAR header: WebHTTP.RequestHeader; VAR reply: WebHTTP.ResponseHeader; VAR f: AosFS.File);
 		VAR name, ext: AosFS.FileName; i, d, t: LONGINT; modsince: ARRAY 32 OF CHAR;
+			path : ARRAY 1024 OF CHAR;
 		
 			PROCEDURE Add(VAR s: ARRAY OF CHAR);
 			VAR j, k: LONGINT; ch: CHAR;
@@ -54,7 +56,7 @@ TYPE
 		
 		BEGIN
 			i := 0; reply.statuscode := WebHTTP.OK;
-			Add(host.prefix); Add(header.uri);
+			Add(host.prefix); WebHTTP.GetPath(header.uri, path); Add(path);
 			IF (reply.statuscode = WebHTTP.OK) THEN
 				f := AosFS.Old(name);
 				IF (f # NIL) & (AosFS.Directory IN f.flags) THEN (* do not send directory offals *)
@@ -82,12 +84,14 @@ TYPE
 								f := NIL
 							ELSE
 								(* TODO: move to AosConfig.XML / separate plugins *)
-								IF ext = ".html" THEN COPY("text/html", reply.contenttype)
+								IF ext = ".html" THEN COPY("text/html; charset=utf-8", reply.contenttype)
 								ELSIF ext = ".txt" THEN COPY("text/plain", reply.contenttype)
 								ELSIF ext = ".css" THEN COPY("text/css", reply.contenttype)
 								ELSIF ext = ".gif" THEN COPY("image/gif", reply.contenttype)
 								ELSIF ext = ".jpg" THEN COPY("image/jpeg", reply.contenttype)
 								ELSIF ext = ".pdf" THEN COPY("application/pdf", reply.contenttype)
+								ELSIF ext = ".xsl" THEN COPY("text/xsl", reply.contenttype)
+								ELSIF ext = ".xml" THEN COPY("text/xml", reply.contenttype)
 								ELSE COPY("application/octet-stream", reply.contenttype)
 								END
 							END
@@ -109,7 +113,7 @@ TYPE
 	
 	(* default plugin for all hosts. Each host has this default plugin *)
 	DefaultPlugin = OBJECT(HTTPPlugin)
-		PROCEDURE CanHandle(host : Host; VAR header: WebHTTP.RequestHeader): BOOLEAN;
+		PROCEDURE CanHandle(host : Host; VAR header: WebHTTP.RequestHeader; secure : BOOLEAN): BOOLEAN;
 		BEGIN RETURN TRUE
 		END CanHandle;
 		
@@ -241,7 +245,7 @@ TYPE
 		
 		PROCEDURE AddPlugin*(pi : HTTPPlugin);
 		BEGIN {EXCLUSIVE}
-			IF plugins.IndexOf(pi) >= 0 THEN log.Enter; log.String("Plugin already plugged in"); log.Exit
+			IF plugins.IndexOf(pi) >= 0 THEN AosOut.String("Plugin already plugged in"); AosOut.Ln 
 			ELSE
 				plugins.Add(pi)
 			END	
@@ -267,7 +271,8 @@ TYPE
 			COPY(Error, error)
 		END SetError;
 		
-		PROCEDURE Handle*(VAR request: WebHTTP.RequestHeader; VAR reply: WebHTTP.ResponseHeader; VAR in: AosIO.Reader; VAR out: AosIO.Writer);
+		PROCEDURE Handle*(VAR request: WebHTTP.RequestHeader; VAR reply: WebHTTP.ResponseHeader; 
+																			VAR in: AosIO.Reader; VAR out: AosIO.Writer; secure : BOOLEAN);
 		VAR i: LONGINT; pi: HTTPPlugin; p: PTR; exit: BOOLEAN;
 		BEGIN
 			BEGIN {EXCLUSIVE}
@@ -275,7 +280,7 @@ TYPE
 				i := plugins.GetCount()-1; 
 				WHILE (i >= 0) & (~exit) DO 
 					p := plugins.GetItem(i);
-					IF p(HTTPPlugin).CanHandle(SELF, request) THEN pi := p(HTTPPlugin); exit := TRUE END;
+					IF p(HTTPPlugin).CanHandle(SELF, request, secure) THEN pi := p(HTTPPlugin); exit := TRUE END;
 					DEC(i);
 				END;
 			END;
@@ -292,7 +297,7 @@ TYPE
 	HTTPAgent = OBJECT (AosTCPServices.Agent)
 		VAR
 			res, len, method, maj, min: LONGINT; 
-			body, huga: BOOLEAN;
+			body, closeRequested: BOOLEAN;
 			f: AosFS.File; out: AosIO.Writer; in, inR: AosIO.Reader;
 			o : PTR;
 			h, th : Host;
@@ -303,6 +308,7 @@ TYPE
 			timeout: AosActive.Timer;
 			dechunk: WebHTTP.ChunkedInStream;
 			consecutiveErrors: LONGINT;
+			secure : BOOLEAN;
 			
 		PROCEDURE HandleTimeout;
 		BEGIN client.Close
@@ -321,11 +327,11 @@ TYPE
 		
 		consecutiveErrors := 0;
 		
+		
 		REPEAT
 			AosActive.SetTimeout(timeout, HandleTimeout, Timeout);
 			WebHTTP.ParseRequest(in, request, res, log);
 			AosActive.CancelTimeout(timeout);
-		
 			IF (client.state = AosTCP.Established) THEN
 				IF (Utilities.Pos("hunked", request.transferencoding) > 0) THEN
 					NEW(dechunk, in, inR)
@@ -356,7 +362,7 @@ TYPE
 						END;
 						log.Ln
 					END;
-					h.Handle(request, reply, inR, out)
+					h.Handle(request, reply, inR, out, secure)
 				ELSE
 					reply.statuscode := res;
 					WebHTTP.WriteStatus(reply, out)
@@ -364,9 +370,9 @@ TYPE
 				IF logEnabled THEN W3CLog(request, reply) END;
 	
 				IF WebHTTP.GetAdditionalFieldValue(request.additionalFields, "Connection", value) THEN
-					huga := Utilities.Pos("lose", value) > 0
+					closeRequested := Utilities.Pos("lose", value) > 0
 				ELSE
-					huga := FALSE
+					closeRequested := FALSE
 				END;
 				
 				IF (reply.statuscode >= 400) THEN
@@ -378,12 +384,13 @@ TYPE
 				
 				out.Update()	(* ignore out.res *)
 			END
-		UNTIL huga OR ((request.maj = 1) & (request.min = 0)) OR (client.state # AosTCP.Established);
+		UNTIL closeRequested OR ((request.maj = 1) & (request.min = 0)) OR (client.state # AosTCP.Established);
 		Terminate
 	END HTTPAgent;
 
 VAR
 	http: AosTCPServices.Service;
+	https: AosTCPServices.TLSService;
 	hosts : Classes.List;
 	log : AosLog.Log;
 	hitStat : Statistics;
@@ -405,8 +412,16 @@ END GetRequests;
 PROCEDURE NewHTTPAgent(c: AosTCP.Connection; s: AosTCPServices.Service): AosTCPServices.Agent;
 VAR a: HTTPAgent;
 BEGIN
-	NEW(a, c, s); RETURN a
+	NEW(a, c, s); a.secure := FALSE; RETURN a
 END NewHTTPAgent;
+
+
+PROCEDURE NewHTTPSAgent(c: AosTCP.Connection; s: AosTCPServices.Service): AosTCPServices.Agent;
+VAR a: HTTPAgent;
+BEGIN
+	NEW(a, c, s); a.secure := TRUE; RETURN a
+END NewHTTPSAgent;
+
 
 PROCEDURE OpenW3CLog(fn: ARRAY OF CHAR);
 VAR w : AosFS.Writer;
@@ -524,27 +539,57 @@ BEGIN {EXCLUSIVE}
 END RemoveHost;
 
 (** Start the basic Server functionality. *)
-PROCEDURE Start*(root, logFile: ARRAY OF CHAR);
+PROCEDURE StartHTTP*(root, logFile: ARRAY OF CHAR);
+VAR
+	res : LONGINT;
 BEGIN {EXCLUSIVE}
 	IF http = NIL THEN
 		Utilities.Trim(root, " "); defaultHost.SetPrefix(root);
 		IF (logFile # "") THEN OpenW3CLog(logFile) END;
-		
-		AosTCPServices.OpenService(http, WebHTTP.HTTPPort, NewHTTPAgent);
+
+		NEW(http, WebHTTP.HTTPPort,  NewHTTPAgent, res);
+		IF res # AosTCPServices.Ok THEN http := NIL END;
 		IF Log THEN log.Enter; log.TimeStamp; log.String("Started"); log.Exit END
 	END
-END Start;
+END StartHTTP;
+
+(** Start the basic Server functionality. *)
+PROCEDURE StartHTTPS*(root, logFile: ARRAY OF CHAR);
+VAR
+	res : LONGINT;
+BEGIN {EXCLUSIVE}
+	IF https = NIL THEN
+		Utilities.Trim(root, " "); defaultHost.SetPrefix(root);
+		IF (logFile # "") THEN OpenW3CLog(logFile) END;
+		
+		NEW(https, WebHTTP.HTTPSPort,  NewHTTPSAgent, res);
+		IF res # AosTCPServices.Ok THEN https := NIL END;
+
+		IF Log THEN log.Enter; log.TimeStamp; log.String("Started"); log.Exit END
+	END
+END StartHTTPS;
 
 (** Stop the server *)
-PROCEDURE Stop*(par: PTR): PTR;
+PROCEDURE StopHTTP*(par: PTR): PTR;
 BEGIN {EXCLUSIVE}
 	IF http # NIL THEN
-		AosTCPServices.CloseService(http);
+		http.Stop(); http := NIL;
 		defaultHost.SetPrefix("");
 		IF Log THEN log.Enter; log.TimeStamp; log.String("Stopped"); log.Exit END
 	END;
 	RETURN NIL
-END Stop;
+END StopHTTP;
+
+(** Stop the server *)
+PROCEDURE StopHTTPS*(par: PTR): PTR;
+BEGIN {EXCLUSIVE}
+	IF https # NIL THEN
+		https.Stop(); https := NIL;
+		defaultHost.SetPrefix("");
+		IF Log THEN log.Enter; log.TimeStamp; log.String("Stopped"); log.Exit END
+	END;
+	RETURN NIL
+END StopHTTPS;
 
 (** enumerate all installed hosts to AosOut *)
 PROCEDURE ShowHosts*;
@@ -581,7 +626,7 @@ PROCEDURE Cleanup;
 VAR dummy: PTR; t: AosKernel.Timer;
 BEGIN
 	hitStat.Kill;
-	dummy := Stop(NIL);
+	dummy := StopHTTP(NIL);
 	hosts := NIL; defaultHost := NIL;
 	FlushW3CLog;
 	IF Log THEN log.Close END;
@@ -626,24 +671,23 @@ The interfaces in all these modules may change.
 *)
 
 COMPILE THE SERVER AND EXAMPLES
-Compiler.Compile \s TFLog.Mod WebHTTP.Mod WebHTTPServer.Mod WebSSMPPlugin.Mod WebDefaultSSMP.Mod
-	WebWormWatch.Mod~
+PC0.Compile \s TFLog.Mod WebHTTP.Mod WebHTTPServer.Mod WebSSMPPlugin.Mod WebDefaultSSMP.Mod~
 	
 	TFPostParser.Mod TFHTTPServerExample.Mod~
 
 START THE SERVER
 Configuration.DoCommands
-Aos.Call WebHTTPServerTools.Start \r:FAT:/httproot \l:FAT:/httproot/WebHTTP.Log~
+WebHTTPServerTools.Start \r:WORK: \l:WORK:WebHTTP.Log \s:on~
 	Aos.Call WebHTTPServerTools.AddHost livepc.inf.ethz.ch \r:FAT:/httproot/test~
 Aos.Call WebSSMPPlugin.Install~
 Aos.Call WebDefaultSSMP.Install~
 Aos.Call WebHTTPServerTools.ListHosts~
 ~
 
-Aos.Call WebHTTPServerTools.Stop~
+Aos.Call WebHTTPServerTools.Stop ~
 
 FREE THE SERVER
-System.Free WebHTTPServerTools WebDefaultSSMP WebSSMPPlugin WebHTTPServer  WebHTTP~
+S.Free WebHTTPServerTools WebDefaultSSMP WebSSMPPlugin WebHTTPServer  WebHTTP~
 
 System.State WebHTTPServer~
 

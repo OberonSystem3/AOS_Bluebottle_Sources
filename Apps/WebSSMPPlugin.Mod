@@ -26,7 +26,7 @@ TYPE
 			Init^(PluginName)
 		END Init;
 		
-		PROCEDURE CanHandle(host: WebHTTPServer.Host; VAR request: WebHTTP.RequestHeader): BOOLEAN;
+		PROCEDURE CanHandle(host: WebHTTPServer.Host; VAR request: WebHTTP.RequestHeader; secure : BOOLEAN): BOOLEAN;
 		VAR name, ext: ARRAY 16 OF CHAR;
 		BEGIN
 			AosFS.SplitExtension(request.uri, name, ext);

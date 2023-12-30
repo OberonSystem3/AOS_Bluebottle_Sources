@@ -7,7 +7,7 @@
 IMPORT SYSTEM;
 
 CONST
-	Version = "Aos 12.03.2004";
+	Version = "Aos 26.6.07";
 	
 	MaxCPU* = 6;	(** maximum number of processors (up to 16) *)
 	
@@ -531,8 +531,8 @@ BEGIN
 		IF (ch = 0X) & (name[i] = 0X) THEN	(* found: (src^ = 0X) & (name[i] = 0X) *)
 			i := 0;
 			REPEAT
-				INC(src);  ch := config[src];  val[i] := ch; INC(i);
-				IF i = LEN(val) THEN val[0] := 0X; RETURN END	(* val too short *)
+				INC(src);  ch := config[src];  val[i] := ch;  INC(i);
+				IF i = LEN(val) THEN val[i - 1] := 0X; RETURN END	(* val too short *)
 			UNTIL ch = 0X;
 			val[i] := 0X; RETURN
 		ELSE

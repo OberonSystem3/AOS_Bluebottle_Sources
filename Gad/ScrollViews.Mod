@@ -11,6 +11,7 @@ MODULE ScrollViews; (** portable *)	(** PS   **)
 	7.6.96 - heavy dragging / still to do: try to remove flickering
 	5.1.97 - changed scrollbar model (no division by 0 anymore)
 	6.1.97 - heavy dragging / removed flickering (MoveContent)
+	7.5.03 - Oberon.new -> LeftMouse Handling, fof
 *)
 
 IMPORT
@@ -596,9 +597,9 @@ BEGIN
 	
 	IF M.res < 0 THEN (* child does not respond *)
 		last0 := last; last := F;
-		IF 2 IN M.keys THEN (* left *)
+		IF (~Oberon.New) & (2 IN M.keys) THEN (* left *)
 			Oberon.DrawCursor(Oberon.Mouse, Effects.Arrow, M.X, M.Y)
-		ELSIF 1 IN M.keys THEN (* middle *)
+		ELSIF (1 IN M.keys) OR (Oberon.New & (2 IN M.keys)) THEN (* middle *)
 			b:= F.border;
 			IF (f # NIL) & (f IS Gadgets.Frame) & ~(Gadgets.lockedcontents IN F.state) THEN
 				WITH f: Gadgets.Frame DO

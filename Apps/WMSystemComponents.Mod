@@ -1,43 +1,83 @@
-MODULE WMSystemComponents;	(** AUTHOR "TF"; PURPOSE "Components for File-Listings etc"; *)
-
+MODULE WMSystemComponents;	(** AUTHOR "TF/UG"; PURPOSE "Components for File-Listings etc"; *)
+(**
+ * History:
+ *
+ *	10.12.2006	Clear selection in FileList.Refresh, added All, Never & Abort option when copying files (staubesv)
+ *)
+ 
 IMPORT
-	AosFS, Utilities, WMProperties, WMEvents, WMComponents, WMTrees, WMGrids, WMStringGrids, WMEditors,
+	AosFS, Utilities, WMProperties, WMEvents, WMComponents, WMTrees, WMGrids, WMStringGrids,
 (* for testing only *)
-	WMRectangles, WMGraphics, Raster, WMMessages, WMStandardComponents, WMWindowManager, AosModules, AosOut, WMBitmapFont,
-	WMDropTarget, AosTexts, AosTextUtilities, AosIO, WMPopups, WMDialogs, AosConfig, AosCommands;
+	WMRectangles, WMGraphics, Raster,
+	AosOut,
+	WMDropTarget, AosTexts, AosTextUtilities, AosIO, WMPopups, WMDialogs, AosConfig, AosCommands,
+	AosArchives, UTF8Strings,
+	WM := WMWindowManager;
 
 CONST
 	BufSize = 16*1024; (* internal buffer size, used for copy *)
 	
+	TraceCopy = 0;
+	TraceDragging = 1;
+	
+	Trace = {0};
+	
 TYPE 
 	 AosFSDropInterface = OBJECT(WMDropTarget.DropFiles)
-	 VAR path : ARRAY 128 OF CHAR;
-	 	hierarchical : BOOLEAN;
+	 VAR 
+	 	path : ARRAY 128 OF CHAR;
 		f : AosFS.File;
 		w : AosFS.Writer;
 		refresh : WMEvents.EventSource;
+		overwriteOnce, overwriteAll, overwriteNever, abort : BOOLEAN;
 	 	
 		PROCEDURE &New(VAR str : ARRAY OF CHAR);
 		BEGIN
 			COPY(str, path);
 			NEW(refresh, SELF, NIL, NIL, NIL);
+			overwriteAll := FALSE; overwriteNever := FALSE; abort := FALSE;
 		END New;
-		
+				
 		PROCEDURE OpenPut*(remoteName : ARRAY OF CHAR; VAR outw : AosIO.Writer; VAR res : LONGINT);
-		VAR name : ARRAY 1024 OF CHAR;
+		VAR oldFile : AosFS.File; name : ARRAY 1024 OF CHAR;
 		BEGIN
 			res := -1;
+			IF abort THEN RETURN; END;
 			COPY(path, name); Utilities.Append(name, remoteName);
-			IF (AosFS.Old(name) = NIL) OR
-				(WMDialogs.Message("Confirm overwriting", remoteName, {WMDialogs.ResNo, WMDialogs.ResYes}) = WMDialogs.ResYes) THEN
-				AosOut.String(name); AosOut.Ln; 
+			overwriteOnce := FALSE;
+			oldFile := AosFS.Old(name);
+			IF (oldFile # NIL) & ~overwriteAll & ~overwriteNever THEN
+				res := WMDialogs.Message("Confirm overwriting", remoteName, {WMDialogs.ResNo, WMDialogs.ResYes, WMDialogs.ResAll, WMDialogs.ResAbort, WMDialogs.ResNever});
+				CASE res OF
+					|WMDialogs.ResYes: overwriteOnce := TRUE;
+					|WMDialogs.ResNo: overwriteOnce := FALSE;
+					|WMDialogs.ResAll: overwriteAll := TRUE;
+					|WMDialogs.ResAbort: abort := TRUE;
+					|WMDialogs.ResNever: overwriteNever := TRUE;
+				ELSE	
+					AosOut.String("WMSystemComponents: Implementation error, unexpected WMDialog result type."); AosOut.Ln;
+				END;
+			END;
+					
+			IF TraceCopy IN Trace THEN AosOut.String(name); AosOut.String(" ... "); END;
+			IF (oldFile = NIL) OR overwriteOnce OR overwriteAll THEN
 				f := AosFS.New(name);
 				IF f # NIL THEN
 					AosFS.OpenWriter(w, f, 0);
 					outw := w;
-					res := 0
-				END 
-			END;	
+					res := AosFS.Ok;
+					IF TraceCopy IN Trace THEN
+						AosOut.String(" done");
+						IF (oldFile # NIL) THEN AosOut.String(" (overwritten)"); END;
+						AosOut.String(".");
+					END;
+				ELSE
+					AosOut.String("Error: Could not create file "); AosOut.String(name); AosOut.Ln;
+				END;
+			ELSE
+				IF (TraceCopy IN Trace) & (oldFile # NIL) THEN AosOut.String("skipped."); AosOut.Ln; END;
+			END;
+			IF TraceCopy IN Trace THEN AosOut.Ln; END;
 		END OpenPut;
 		
 		PROCEDURE ClosePut*(VAR res : LONGINT);
@@ -51,7 +91,6 @@ TYPE
 		END ClosePut;
 			
 	END AosFSDropInterface;
-	
 	
 	AosFSDropTarget = OBJECT(WMDropTarget.DropTarget)
 	VAR path : ARRAY 128 OF CHAR;
@@ -74,20 +113,35 @@ TYPE
 			ELSE RETURN NIL
 			END
 		END GetInterface;
-	END AosFSDropTarget;	
+	END AosFSDropTarget;
+	
+	CommandCaller = OBJECT
+	VAR msg : ARRAY 512 OF CHAR;
+		s : Utilities.String;
+		res : LONGINT;
+		
+		PROCEDURE &Init(command : ARRAY OF CHAR);
+		BEGIN
+			s := Utilities.NewString(command)
+		END Init;
+
+	BEGIN {ACTIVE}
+		AosCommands.Call(s^, {}, res, msg);
+		IF res # 0 THEN AosOut.String(msg); AosOut.Ln END;
+	END CommandCaller;	
 	
 TYPE
-	String = Utilities.String;
 	TreeData = OBJECT
-	VAR path : String;
+	VAR path : Utilities.String;
 	END TreeData;
+	
 	DirectoryTree* = OBJECT(WMTrees.TreeView)
 	VAR
 		enumerator : AosFS.Enumerator;
 		tree : WMTrees.Tree;
 		currentPath* : WMProperties.StringProperty;
 		onPathChanged* : WMEvents.EventSource;
-		tr, tn : WMTrees.TreeNode; 
+		tr : WMTrees.TreeNode; 
 		
 		PROCEDURE &Init;
 		BEGIN
@@ -111,9 +165,15 @@ TYPE
 			tree.Release;
 		END Init;
 		
+		PROCEDURE Refresh*;
+		BEGIN
+			tree.Acquire;
+			FillMountedFS(tree, tr);
+			tree.Release;
+		END Refresh;
 	
 		PROCEDURE NodeExpanded(sender, data : ANY);
-		VAR td : TreeData; p : ANY;
+		VAR p : ANY;
 		BEGIN
 			IF (data = NIL) OR ~(data IS WMTrees.TreeNode) THEN RETURN END;
 			tree.Acquire;
@@ -127,20 +187,20 @@ TYPE
 		END NodeExpanded;
 		
 		PROCEDURE NodeSelected(sender, data : ANY);
-		VAR s : String; td : TreeData; p : ANY;
+		VAR p : ANY;
 		BEGIN
 			IF (data = NIL) OR ~(data IS WMTrees.TreeNode) THEN RETURN END;
 			tree.Acquire;
 			p := tree.GetNodeData(data(WMTrees.TreeNode));
 			IF (p # NIL) & (p IS TreeData) THEN 
-(*				EnumerateSubDirectories(tree, data(WMTrees.TreeNode), p(TreeData).path); *)
+				EnumerateSubDirectories(tree, data(WMTrees.TreeNode), p(TreeData).path); 
 				currentPath.Set(p(TreeData).path);
 				onPathChanged.Call(p(TreeData).path)
 			END;
 			tree.Release
 		END NodeSelected;
 		
-		PROCEDURE DragDropped(x, y : LONGINT; dragInfo : WMWindowManager.DragInfo);
+		PROCEDURE DragDropped(x, y : LONGINT; dragInfo : WM.DragInfo);
 		VAR node : WMTrees.TreeNode;
 			dropTarget : AosFSDropTarget;
 			p : ANY;
@@ -164,7 +224,7 @@ TYPE
 			END;
 		END PropertyChanged;
 		
-		PROCEDURE EnumerateSubDirectories(tree : WMTrees.Tree; node : WMTrees.TreeNode; dir : String);
+		PROCEDURE EnumerateSubDirectories(tree : WMTrees.Tree; node : WMTrees.TreeNode; dir : Utilities.String);
 		VAR name, path, filename, mask : ARRAY 256 OF CHAR; flags : SET; time, date, size : LONGINT;
 			dirNode : WMTrees.TreeNode;
 			td : TreeData; has : BOOLEAN;
@@ -198,7 +258,7 @@ TYPE
 		
 		PROCEDURE FillMountedFS(tree : WMTrees.Tree; node : WMTrees.TreeNode);
 		VAR list: AosFS.FileSystemTable;
-			prefixNode, first : WMTrees.TreeNode;
+			prefixNode : WMTrees.TreeNode;
 			td : TreeData;
 			i : LONGINT;
 			prefix : ARRAY 32 OF CHAR;
@@ -226,43 +286,56 @@ TYPE
 	END DirectoryTree;
 
 TYPE 
-	DirEntry = OBJECT
-	VAR name, path : String;
+	DirEntry* = OBJECT
+	VAR name*, path-, full* : Utilities.String;
+		time, date, size*: LONGINT;
 		flags : SET;
 		visible : BOOLEAN;
+		node* : WMTrees.TreeNode;
+		
+		PROCEDURE &Init(name, path : Utilities.String; time, date, size : LONGINT; flags : SET);
+		BEGIN
+			SELF.name := name;
+			SELF.path := path;
+			SELF.time := time;
+			SELF.date := date;
+			SELF.size := size;
+			SELF.flags := flags;
+			visible := FALSE;
+			NEW(node)
+		END Init;
+		
 	END DirEntry;
-	DirEntries = POINTER TO ARRAY OF DirEntry;		
-	SelectionWrapper = POINTER TO RECORD
-		sel : DirEntries;
-	END ;
 	
+	DirEntries* = POINTER TO ARRAY OF DirEntry;		
 	
-	FileList = OBJECT(WMComponents.VisualComponent)
+	SelectionWrapper* = POINTER TO RECORD
+		sel* : DirEntries;
+	END;
+
+	FileList* = OBJECT(WMComponents.VisualComponent)
 	VAR grid : WMStringGrids.StringGrid;
-		path : WMProperties.StringProperty;
-		filter : WMProperties.StringProperty;
 		prefixSearch : WMProperties.BooleanProperty;
-		filterEdit : WMEditors.Editor;
+		path, filter : Utilities.String;
+		fullView, fromSearchReq : BOOLEAN;
 		popup: WMPopups.Popup; 
 		enumerator : AosFS.Enumerator;
 		dir : DirEntries;
 		selection : DirEntries;
+		nfiles, nofRows : LONGINT;
 		px, py : LONGINT;
+		colWidths : WMGrids.Spacings;
 	
 		PROCEDURE &Init;
 		BEGIN
 			Init^;
-			(* new properties *)
-			NEW(path, FileListPathProt, NIL, NIL); properties.Add(path);
-			NEW(filter, FileListFilterProt, NIL, NIL); properties.Add(filter);
+
+			(* new properties *) (* it is not possible to change this property at any time but we leave it for the moment *)
 			NEW(prefixSearch, FileListPrefixSearchProt, NIL, NIL); properties.Add(prefixSearch);
 
-			NEW(filterEdit); filterEdit.alignment.Set(WMComponents.AlignTop); 
-			filterEdit.bounds.SetHeight(25); AddContent(filterEdit);
-			filterEdit.text.onTextChanged.Add(TextChanged);
-			filterEdit.multiLine.Set(FALSE);
-			filterEdit.tv.showBorder.Set(TRUE);
-		(*	filterEdit.tv.borders.Set(WMRectangles.MakeRect(3,3,1,1)); *)
+			fullView := FALSE;
+			fromSearchReq := FALSE;
+
 			NEW(grid);
 			grid.alignment.Set(WMComponents.AlignClient);
 			AddContent(grid);
@@ -274,13 +347,24 @@ TYPE
 			grid.model.SetNofCols(1);
 			grid.model.SetNofRows(1);
 			grid.fixedRows.Set(1);
+			NEW(colWidths, 3); 
 			grid.model.SetCellText(0, 0, Utilities.NewString("Filename"));
+			grid.model.SetCellText(1, 0, Utilities.NewString("Size"));
+			grid.model.SetCellText(2, 0, Utilities.NewString("Modified"));
 			grid.SetSelectionMode(WMGrids.GridSelectRows);
 			grid.model.Release;
-			NEW(enumerator)
+			NEW(enumerator);
+
+			SELF.path := Utilities.NewString("");
+			SELF.filter := Utilities.NewString("");
 		END Init;
 		
-		PROCEDURE GetSelection() : DirEntries;
+		PROCEDURE SetSearchReqFlag*;
+		BEGIN
+			fromSearchReq := TRUE
+		END SetSearchReqFlag;
+		
+		PROCEDURE GetSelection*() : DirEntries;
 		VAR selection : DirEntries;
 			l, t, r, b, i, j : LONGINT;
 			p : ANY;
@@ -311,7 +395,7 @@ TYPE
 				IF AosFS.Directory IN curSel[0].flags THEN
 					COPY(curSel[0].path^, p); Utilities.Append(p, curSel[0].name^);
 					MakePathString(p);
-					path.SetAOC(p)
+					StartNewPath(Utilities.NewString(p));
 				ELSE
 					NEW(w); w.sel := curSel;
 					Open(sender, w)
@@ -328,13 +412,22 @@ TYPE
 			NEW(popup);
 			curSel := GetSelection();
 			NEW(w); w.sel := curSel;
-			IF LEN(curSel) = 1 THEN
-				popup.AddParButton("Open", Open, w);
-				popup.AddParButton("Rename", Rename, w);
+			IF ~fromSearchReq THEN
+				(* allow operations on files such as renaming, duplicating, deleting, etc. only in not content-based search lists *)
+				IF LEN(curSel) = 1 THEN
+					popup.AddParButton("Open", Open, w);
+					popup.AddParButton("Rename", Rename, w);
+					popup.AddParButton("Duplicate", Duplicate, w);
+					popup.AddParButton("Untar", Untar, w);
+				END;
+				popup.AddParButton("Tar", Tar, w);
+				popup.AddParButton("Delete", Delete, w);
 			ELSE
-			
-			END;
-			popup.AddParButton("Delete", Delete, w);
+				IF LEN(curSel) = 1 THEN
+					(* only allow opening of files in this case *)
+					popup.AddParButton("Open", Open, w);
+				END					
+			END;				
 			grid.Acquire; grid.ToWMCoordinates(x, y, wmx, wmy); grid.Release;
 			popup.Popup(wmx, wmy)
 		END ContextMenu;
@@ -359,6 +452,7 @@ TYPE
 								(WMDialogs.Message("Confirm overwriting existing file", np, {WMDialogs.ResNo, WMDialogs.ResYes}) = WMDialogs.ResYes) THEN
 								AosFS.Rename(op, np, res);
 								IF res # 0 THEN
+									AosOut.Int(res, 0); AosOut.Ln;
 									res := WMDialogs.Message("Renaming failed", np, {WMDialogs.ResOk})	
 								END;
 								Refresh(NIL, NIL)
@@ -368,7 +462,7 @@ TYPE
 				END
 			END
 		END Rename;
-		
+
 		PROCEDURE Delete(sender, data : ANY);
 		VAR  d : DirEntry; 
 			dr, res, i  : LONGINT;
@@ -405,6 +499,129 @@ TYPE
 			END
 		END Delete;
 		
+		PROCEDURE Duplicate(sender, data : ANY);
+		VAR  d : DirEntry; 
+			name : ARRAY 128 OF CHAR;
+			res : LONGINT;
+		BEGIN
+			IF popup # NIL THEN popup.Close; popup := NIL END;
+			IF (data # NIL) & (data IS SelectionWrapper) THEN
+				d := data(SelectionWrapper).sel[0];
+				IF d # NIL THEN
+					COPY(d.path^, name);
+					Utilities.Append(name, d.name^);
+					AosFS.Copy(name, res);
+					IF res = 0 THEN
+						Utilities.Append(name, ".COPY");
+						AosFS.Paste(name, res);
+						WHILE res # 0 DO
+							IF res = 2908 THEN
+								IF WMDialogs.QueryString("File already exists. Enter a new Name", name) = WMDialogs.ResOk THEN
+									AosFS.Paste(name, res);
+								ELSE
+									res := 0;
+								END;							
+							ELSIF res = 2909 THEN
+								IF WMDialogs.QueryString("FileName too long. Enter a new Name", name) = WMDialogs.ResOk THEN
+									AosFS.Paste(name, res);
+								ELSE
+									res := 0;
+								END;								
+							ELSE							
+								res := WMDialogs.Message("Error", "Some Error occoured while duplicating", {WMDialogs.ResOk});
+							END;
+						END;
+					END;
+				END;
+				Refresh(NIL, NIL);
+			END;		
+		END Duplicate;
+
+(*
+		PROCEDURE Unzip(sender, data : ANY);
+		VAR d : DirEntry; 
+		BEGIN
+			IF popup # NIL THEN popup.Close; popup := NIL END;
+			IF (data # NIL) & (data IS SelectionWrapper) THEN
+				d := data(SelectionWrapper).sel[0];
+				IF d # NIL THEN
+						
+				END
+			END						
+		END Unzip;
+*)	
+		PROCEDURE Untar(sender, data : ANY);
+		VAR d : DirEntry; 
+			name : ARRAY 128 OF CHAR;
+			caller : CommandCaller;
+		BEGIN
+			IF popup # NIL THEN popup.Close; popup := NIL END;
+			IF (data # NIL) & (data IS SelectionWrapper) THEN
+				d := data(SelectionWrapper).sel[0];
+				IF d # NIL THEN
+					COPY("AosTar.Extract ", name);
+					Utilities.Append(name, d.path^);
+					Utilities.Append(name, d.name^);
+					NEW(caller, name);
+				END;
+				(* end of the operation refresh list *)
+				Refresh(NIL, NIL)
+			END
+		END Untar;
+		
+		PROCEDURE Tar(sender, data : ANY);
+		VAR  d : DirEntry; i, len : LONGINT;
+			filename, format, temp : ARRAY 128 OF CHAR;
+			buf: ARRAY BufSize OF CHAR;
+			arc : AosArchives.Archive;
+			file : AosFS.File; reader : AosFS.Reader;
+			writer : AosIO.Writer;
+		
+			PROCEDURE GetFormatFromFilename(filename : ARRAY OF CHAR; VAR format : ARRAY OF CHAR);
+			VAR file : ARRAY 128 OF CHAR;
+			BEGIN
+				IF filename = "" THEN COPY("tar", format);
+				ELSE
+					Utilities.GetExtension(filename, file, format);
+					Utilities.LowerCase(format);
+				 END	
+			END GetFormatFromFilename;
+		
+		BEGIN
+			IF popup # NIL THEN popup.Close; popup := NIL END;
+			IF (data # NIL) & (data IS SelectionWrapper) THEN
+				IF (WMDialogs.QueryString("Enter Name of Archive: ", filename) = WMDialogs.ResOk) THEN
+
+					GetFormatFromFilename(filename, format);
+					arc := AosArchives.Old(filename, format);
+					IF arc = NIL THEN
+						arc := AosArchives.New(filename, format)
+					END;
+									
+					AosOut.String("File Manager: building "); AosOut.String(filename);
+					FOR i := 0 TO LEN(data(SelectionWrapper).sel) - 1 DO
+						d := data(SelectionWrapper).sel[i];
+						COPY(d.path^, temp); Utilities.Append(temp, d.name^);
+						file := AosFS.Old(temp);
+						IF file # NIL THEN
+							AosFS.OpenReader(reader, file, 0);
+							arc.Acquire;
+							AosIO.OpenWriter(writer, arc.OpenSender(d.name^));
+
+							REPEAT
+								reader.Bytes(buf, 0, LEN(buf), len); writer.Bytes(buf, 0, len);
+							UNTIL reader.res # 0;							
+							IF writer # NIL THEN writer.Update END;																				
+							arc.Release;
+						END;
+					END;
+					AosOut.String(" - done!"); AosOut.Ln;
+					(* end of the operation refresh list *)
+					Refresh(NIL, NIL)
+				END
+			END			
+		END Tar;			
+			
 		PROCEDURE Open(sender, data : ANY);
 		VAR  d : DirEntry; 
 			name : ARRAY 128 OF CHAR;
@@ -420,16 +637,16 @@ TYPE
 			END
 		END Open;
 		
-		PROCEDURE MyDragDropped(x, y : LONGINT; dragInfo : WMWindowManager.DragInfo; VAR handled : BOOLEAN);
+		PROCEDURE MyDragDropped(x, y : LONGINT; dragInfo : WM.DragInfo; VAR handled : BOOLEAN);
 		BEGIN
 			handled := TRUE;
 			DragDropped(x, y, dragInfo)
 		END MyDragDropped;
 		
-		PROCEDURE DragDropped(x, y : LONGINT; dragInfo : WMWindowManager.DragInfo);
+		PROCEDURE DragDropped(x, y : LONGINT; dragInfo : WM.DragInfo);
 		VAR dropTarget : AosFSDropTarget;
 		BEGIN
-			NEW(dropTarget, path.Get(), Refresh);
+			NEW(dropTarget, path, Refresh);
 			dragInfo.data := dropTarget;
 			ConfirmDrag(TRUE, dragInfo)
 		END DragDropped;
@@ -452,8 +669,10 @@ TYPE
 					INC(top, 25)
 				END
 			END;
-			IF grid.StartDrag(NIL, img, DragArrived, NIL) THEN AosOut.String("DraggingStarted")
-			ELSE AosOut.String("Drag could not be started")
+			IF grid.StartDrag(NIL, img, DragArrived, NIL) THEN 
+				IF TraceDragging IN Trace THEN AosOut.String("WMSystemComponents: DraggingStarted"); END;
+			ELSE 
+				IF TraceDragging IN Trace THEN AosOut.String("WMSystemComponents: Drag could not be started"); END;
 			END;
 		END MyStartDrag;
 		
@@ -480,15 +699,34 @@ TYPE
 		PROCEDURE Refresh(sender, data : ANY);
 		BEGIN
 			IF ~IsCallFromSequencer() THEN sequencer.ScheduleEvent(SELF.Refresh, sender, data)
-			ELSE ScanPath; PrepareList
+			ELSE 
+				ScanPath; PrepareList;
+				grid.Acquire;
+				grid.SetSelection(-1, -1, -1, -1);
+				selection := NIL;
+				grid.Release;
 			END
 		END Refresh;
 		
+		PROCEDURE Resized;
+		BEGIN
+			grid.model.Acquire;
+			IF fullView THEN
+				colWidths[0] := (bounds.GetWidth() DIV 3)*2 - 20;
+				colWidths[1] := bounds.GetWidth() DIV 6;
+				colWidths[2] := bounds.GetWidth() DIV 6;	
+			ELSE
+				colWidths[0] := bounds.GetWidth();
+			END;
+			grid.SetColSpacings(colWidths);
+			grid.model.Release;	
+			Resized^;
+		END Resized;
+		
 		PROCEDURE DragArrived(sender, data : ANY);
-		VAR di : WMWindowManager.DragInfo;
+		VAR di : WM.DragInfo;
 			dt : WMDropTarget.DropTarget;
 			itf : WMDropTarget.DropInterface;
-			w : AosIO.Writer;
 			i, res : LONGINT;
 			sel : DirEntries;
 			url : ARRAY 1024 OF CHAR;
@@ -498,8 +736,8 @@ TYPE
 			sel := selection;
 			IF sel = NIL THEN RETURN END;
 			
-			IF (data # NIL) & (data IS WMWindowManager.DragInfo) THEN
-				di := data(WMWindowManager.DragInfo);
+			IF (data # NIL) & (data IS WM.DragInfo) THEN
+				di := data(WM.DragInfo);
 				IF (di.data # NIL) & (di.data IS WMDropTarget.DropTarget) THEN		
 					dt := di.data(WMDropTarget.DropTarget)
 				ELSE RETURN
@@ -551,29 +789,88 @@ TYPE
 			END;
 		END DragArrived;
 
-		PROCEDURE PropertyChanged*(sender, data : ANY);
+		PROCEDURE ResetGrid*;
 		BEGIN
-			IF data = path THEN
-				ScanPath;
-				PrepareList
-			ELSIF (data = filter) OR (data = prefixSearch) THEN
-				PrepareList
-			ELSE PropertyChanged^(sender, data)
-			END
-		END PropertyChanged;
+			nofRows := 1;
+			grid.model.Acquire;
+			grid.model.SetNofRows(nofRows);
+			grid.SetTopPosition(0, 0, TRUE);
+			grid.SetSelection(0, 0, 0, 0);
+			grid.model.Release
+		END ResetGrid;
 		
-		PROCEDURE TextChanged(sender, data : ANY);
-		VAR str : ARRAY 128 OF CHAR;
+		PROCEDURE DisplayGrid*(VAR data : ARRAY OF DirEntry; noEl : LONGINT);
+		VAR i, gridindex : LONGINT;
+			d : DirEntry;
+			t : ARRAY 128 OF CHAR; 
 		BEGIN
-			filterEdit.GetAsString(str);
-			filter.Set(Utilities.NewString(str))
-		END TextChanged;
+			grid.model.Acquire;
+			grid.model.SetNofRows(nofRows + noEl);
+			FOR i := 0 TO noEl -1 DO
+				d := data[i];
+				gridindex := nofRows + i;
+				grid.model.SetCellText(0, gridindex , d.name);
+				grid.model.SetCellData(0, gridindex, d);
+				IF fullView THEN
+					Utilities.IntToStr(d.size, t);
+					grid.model.SetCellText(1, gridindex, Utilities.NewString(t));
+					Utilities.FormatDateTime(" yyyy mmm dd hh:nn ", Utilities.OberonToDateTime(d.date, d.time), t);
+					grid.model.SetCellText(2, gridindex, Utilities.NewString(t));
+				END;					
+				IF AosFS.Directory IN d.flags THEN
+					grid.model.SetCellImage(0, gridindex, WMGraphics.LoadImage("Folder.png", TRUE))
+				ELSE
+					grid.model.SetCellImage(0, gridindex, NIL)
+				END
+			END;
+			grid.model.Release;
+			nofRows := nofRows + noEl;
+		END DisplayGrid;
 		
+		PROCEDURE ToggleProps*;
+		BEGIN
+			grid.model.Acquire;
+			IF fullView THEN
+				fullView := FALSE;
+				grid.model.SetNofCols(1);
+				colWidths[0] := bounds.GetWidth();
+			ELSE
+				fullView := TRUE;
+				grid.model.SetNofCols(3);
+				colWidths[0] := (bounds.GetWidth() DIV 3)*2 - 20;
+				colWidths[1] := bounds.GetWidth() DIV 6;
+				colWidths[2] := bounds.GetWidth() DIV 6;
+				grid.model.SetCellText(1, 0, Utilities.NewString("Size"));
+				grid.model.SetCellText(2, 0, Utilities.NewString("Modified"));
+			END;
+			grid.SetColSpacings(colWidths);
+			grid.model.Release;
+			Refresh(NIL, NIL);
+		END ToggleProps;		
+
+		PROCEDURE FillGridRow(rowNo : LONGINT; dir : DirEntry);
+		VAR t : ARRAY 128 OF CHAR;
+		BEGIN
+			grid.model.SetCellText(0, rowNo, dir.name);
+			grid.model.SetCellData(0, rowNo, dir);
+			IF fullView THEN
+				Utilities.IntToStr(dir.size, t);
+				grid.model.SetCellText(1, rowNo, Utilities.NewString(t));
+				Utilities.FormatDateTime(" yyyy mmm dd hh:nn ", Utilities.OberonToDateTime(dir.date, dir.time), t);
+				grid.model.SetCellText(2, rowNo, Utilities.NewString(t));
+			END;					
+			IF AosFS.Directory IN dir.flags THEN
+				grid.model.SetCellImage(0, rowNo, WMGraphics.LoadImage("Folder.png", TRUE))
+			ELSE
+				grid.model.SetCellImage(0, rowNo, NIL)
+			END;			
+		END FillGridRow;		
+
 		PROCEDURE PrepareList;
-		VAR i, vis : LONGINT; mask : ARRAY 128 OF CHAR; s : String;
+		VAR i, vis : LONGINT; mask : ARRAY 128 OF CHAR; s : Utilities.String;
 		BEGIN
 			IF dir = NIL THEN RETURN END;
-			s := filter.Get();
+			s := SELF.filter;
 			mask := "";
 			IF s # NIL THEN COPY(s^, mask) END;
 			IF mask = "" THEN
@@ -593,29 +890,26 @@ TYPE
 		
 			grid.model.Acquire;
 			grid.model.SetNofRows(vis + 1);
+
 			vis := 0;
 			FOR i := 0 TO LEN(dir) - 1 DO
 				IF dir[i].visible THEN
-					grid.model.SetCellText(0, vis + 1, dir[i].name);
-					grid.model.SetCellData(0, vis + 1, dir[i]);
-					IF AosFS.Directory IN dir[i].flags THEN
-						grid.model.SetCellImage(0, i + 1, WMGraphics.LoadImage("Folder.png", TRUE))
-					ELSE
-						grid.model.SetCellImage(0, i + 1, NIL)
-					END;
+					FillGridRow(vis + 1, dir[i]);
 					INC(vis)
 				END	
 			END;
 			grid.SetTopPosition(0, 0, TRUE);
 			grid.model.Release;
 		END PrepareList;
+
 		
 		PROCEDURE ScanPath;
 		VAR s, pathS : Utilities.String;
 			i, l : LONGINT;
 			name, path, filename, mask : ARRAY 256 OF CHAR; flags : SET; time, date, size : LONGINT;
+			sorted : BOOLEAN;
 		BEGIN
-			s := SELF.path.Get();
+			s := SELF.path;
 			IF s = NIL THEN RETURN END;
 			COPY(s^, mask);
 			IF Utilities.Length(mask) > 1 THEN
@@ -624,124 +918,98 @@ TYPE
 				END
 			ELSE mask := '*'
 			END;
-			AosOut.String("mask = "); AosOut.String(mask); AosOut.Ln; 
-			enumerator.Open(mask, {});
+			
+			IF fullView THEN enumerator.Open(mask, {AosFS.EnumSize, AosFS.EnumTime}); ELSE enumerator.Open(mask, {}); END;
+			nfiles := enumerator.size;
 			i := 0;
-			AosOut.String("enumerator.size = "); AosOut.Int(enumerator.size, 0); AosOut.Ln; 
+			sorted := TRUE;
 			NEW(dir, enumerator.size);
 			WHILE enumerator.HasMoreEntries() DO
 				IF enumerator.GetEntry(name, flags, time, date, size) THEN
-					NEW(dir[i]);
 					AosFS.SplitPath(name, path, filename);
 					l := Utilities.Length(path);
 					path[l] := name[l]; path[l + 1] := 0X;
-					dir[i].name := Utilities.NewString(filename);
 					IF (pathS = NIL) OR (pathS^ # path) THEN pathS := Utilities.NewString(path) END;
-					dir[i].path := pathS;
-					dir[i].flags := flags;
+					NEW(dir[i], Utilities.NewString(filename), pathS, time, date, size, flags);
+					IF i > 0 THEN
+						sorted := sorted & (UTF8Strings.Compare(dir[i-1].name^, dir[i].name^) = UTF8Strings.CmpLess)
+					END
 				END;
 				INC(i)
 			END;
-			enumerator.Close
+			enumerator.Close;
+			IF ~sorted THEN
+				SortDir
+			END
 		END ScanPath;
 		
+		PROCEDURE StartNewPath*(path : Utilities.String);
+		BEGIN
+			SELF.path := path;
+			ScanPath;
+			PrepareList
+		END StartNewPath;
 		
-	END FileList;
-
-(***************************************************************************************)
-(***************************************************************************************)
-TYPE
-	KillerMsg = OBJECT
-	END KillerMsg; 
-	
-	Window* = OBJECT (WMComponents.FormWindow)
-	VAR label: WMStandardComponents.Label;	
-		tree : DirectoryTree;
-		list : FileList;
-
-		PROCEDURE CreateForm(): WMComponents.VisualComponent;
-		VAR
-			panel : WMStandardComponents.Panel;
-			toolbar: WMStandardComponents.Panel;
-			button : WMStandardComponents.Button;
-
+		PROCEDURE StartNewFilter*(filter : Utilities.String);
 		BEGIN
-			NEW(panel); panel.bounds.SetExtents(800, 700); panel.fillColor.Set(0FFFFFFFFH); panel.takesFocus.Set(TRUE);
-(*			NEW(toolbar); toolbar.fillColor.Set(000FF00FFH); toolbar.bounds.SetHeight(20); toolbar.alignment.Set(WMComponents.AlignTop);
-			panel.AddContent(toolbar);
-			NEW(button); button.alignment.Set(WMComponents.AlignLeft); button.caption.SetAOC("Test"); 
-			toolbar.AddContent(button); *)
-	
-			NEW(tree);
-			tree.alignment.Set(WMComponents.AlignLeft); tree.bounds.SetWidth(200);
-			panel.AddContent(tree);
+			SELF.filter := filter;
+			PrepareList
+		END StartNewFilter;
 
-			NEW(list);
-			list.alignment.Set(WMComponents.AlignClient);
-			panel.AddContent(list);			
-			
-			RETURN panel
-		END CreateForm;
-
-		PROCEDURE &New();
-		VAR vc : WMComponents.VisualComponent; s : Utilities.String;
+		PROCEDURE GetNofFiles*() : LONGINT;
 		BEGIN
-			IncCount;
-			vc := CreateForm();
-			
-			tree.onPathChanged.Add(PathChanged);
-			
-			Init(vc.bounds.GetWidth(), vc.bounds.GetHeight(), FALSE);
-			SetContent(vc);
-			WMWindowManager.DefaultAddWindow(SELF);
-			SetTitle(Utilities.NewString("Test Window"));
-			s := tree.currentPath.Get();
-		END New; 
+			RETURN nfiles
+		END GetNofFiles;
 		
-		PROCEDURE PathChanged(sender, data : ANY);
+		(* binary insertion algorithm from "Algorithms and Data Structures" by N. Wirth *)
+		PROCEDURE SortDir;
+		VAR i, j, m, L, R : LONGINT;
+			x : DirEntry;		
 		BEGIN
-			list.path.Set(tree.currentPath.Get());
-		END PathChanged;
-		
-		PROCEDURE Close;
-		BEGIN
-			DecCount;
-			Close^;
-		END Close;
-		
-		PROCEDURE Handle(VAR x: WMMessages.Message);
-		BEGIN
-			IF (x.msgType = WMMessages.MsgExt) & (x.ext # NIL) & (x.ext IS KillerMsg) THEN Close
-			ELSE Handle^(x)
+			FOR i := 1 TO LEN(dir) - 1 DO
+				x := dir[i]; L := 0; R := i;
+				WHILE L < R DO
+					m := (L + R) DIV 2;
+					IF UTF8Strings.Compare(dir[m].name^, x.name^) = UTF8Strings.CmpGreater THEN 
+						R := m
+					ELSE
+						L := m + 1
+					END
+				END;
+				FOR j := i TO R + 1 BY -1 DO dir[j] := dir[j - 1] END;
+				dir[R] := x
 			END
-		END Handle;		
-		
-		
-	END Window;
-(***************************************************************************************)
+		END SortDir;
 
-
+	END FileList;	
+	
 VAR
 	DirTreePathProt : WMProperties.StringProperty;
-	FileListPathProt : WMProperties.StringProperty;
-	FileListFilterProt : WMProperties.StringProperty;
 	FileListPrefixSearchProt : WMProperties.BooleanProperty;
-	
 	GSonPathChanged, GSonPathChangedInfo : Utilities.String;
-	
-	nofWindows : LONGINT;
-	
+
 PROCEDURE InitPrototypes;
 BEGIN
 	NEW(DirTreePathProt, NIL, Utilities.NewString("CurrentPath"), Utilities.NewString("contains the selected path"));
 	GSonPathChanged := Utilities.NewString("onPathChanged");
 	GSonPathChangedInfo := Utilities.NewString("called when the path is changed");
 
-	NEW(FileListPathProt, NIL, Utilities.NewString("Path"), Utilities.NewString("contains the displayed path"));
-	NEW(FileListFilterProt, NIL, Utilities.NewString("Filter"), Utilities.NewString("display filename filter"));
 	NEW(FileListPrefixSearchProt, NIL, Utilities.NewString("PrefixSearch"), Utilities.NewString("match prefix only"));
 	FileListPrefixSearchProt.Set(TRUE);
 END InitPrototypes;
+
+(*
+PROCEDURE CopyDirEntry(from, to : DirEntry);
+BEGIN
+	to.name := from.name;
+	to.path := from.path;
+	to.time := from.time;
+	to.date := from.date;
+	to.size := from.size;
+	to.flags := from.flags;
+	to.visible := from.visible
+END CopyDirEntry;
+*)
 
 (** Opens the file path; corresponding file handlers are specified in AosConfig.XML *)
 PROCEDURE OpenFile* (path : ARRAY OF CHAR);
@@ -778,44 +1046,9 @@ BEGIN
 	IF (l > 1) & (s[l - 1] # ":") & (s[l - 1] # "/") THEN Utilities.Append(s, "/") END;
 END MakePathString;
 
-
-PROCEDURE Open*(par : ANY) : ANY;
-VAR inst : Window;
-BEGIN
-	NEW(inst);
-	RETURN NIL
-END Open;
-
-PROCEDURE IncCount;
-BEGIN {EXCLUSIVE}
-	INC(nofWindows);
-END IncCount;		
-
-PROCEDURE DecCount;
-BEGIN {EXCLUSIVE}
-	DEC(nofWindows);
-END DecCount;		
-
-PROCEDURE Cleanup;
-VAR die : KillerMsg;
-	 msg : WMMessages.Message;
-	 m : WMWindowManager.WindowManager;
-BEGIN {EXCLUSIVE}
-	NEW(die); msg.ext := die; msg.msgType := WMMessages.MsgExt;
-	m := WMWindowManager.GetDefaultManager();
-	m.Broadcast(msg);
-	AWAIT(nofWindows = 0)
-END Cleanup;
-
 BEGIN
 	InitPrototypes;
-	AosModules.InstallTermHandler(Cleanup)
 END WMSystemComponents.
 
 S.Free WMSystemComponents ~
-WMSystemComponents.Open ~
-
-AosFSTools.Mount RUM RamFS 409600 4096 ~
-AosFSTools.Unmount RAM ~
-AosFSTools.Mount FAT FatFS IDE0#6 ~
 

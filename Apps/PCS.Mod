@@ -91,10 +91,10 @@ MODULE PCS; (** AUTHOR "prk"; PURPOSE "Parallel Compiler: scanner"; *)
 	passivate* =  55; return* =  56; refines* =  57; implements* =  58; 
 	array* =  59; definition* =  60; object* =  61; record* =  62; pointer* =  63; 
 	begin* =  64; code* =  65; const* =  66; type* =  67; var* =  68; 
-	procedure* =  69; import* =  70; module* =  71; eof* =  72; 
+	procedure* =  69; import* =  70; module* =  71; eof* =  72; finally* = 73;
 		
 VAR
-	opTable: ARRAY 73 OF Name;
+	opTable: ARRAY 74 OF Name; (* opTable: ARRAY 73 OF Name;*)
 	reservedChar-, newChar: ARRAY 256 OF BOOLEAN;
 			
 TYPE
@@ -389,6 +389,7 @@ TYPE
 					| "F": Identifier(s);
 								IF str = "FALSE" THEN s := false
 								ELSIF str = "FOR" THEN s := for
+								ELSIF str = "FINALLY" THEN s := finally
 								END
 					| "I": Identifier(s);
 								IF str = "IF" THEN s := if
@@ -404,7 +405,8 @@ TYPE
 								ELSIF str = "MODULE" THEN s := module
 								END
 					| "N": Identifier(s);
-								IF str = "NIL" THEN s := nil END
+								IF str = "NIL" THEN s := nil
+								END
 					| "O": Identifier(s);
 								IF str = "OR" THEN s := or
 								ELSIF str = "OF" THEN s := of
@@ -473,6 +475,7 @@ TYPE
 			| "+", "-", "*", "/" : IF (ch1=0X) (* OR ((ch2=0X) & (ch1="*")) *) THEN RETURN TRUE END;
 			| "~": IF (ch1=0X) THEN RETURN TRUE END;
 			| ":": IF str=":=" THEN RETURN TRUE END;
+			| "[": IF str = "[]" THEN RETURN TRUE  END (* Indexer *)
 			END;
 			RETURN FALSE;
 		END IsOperatorValid;

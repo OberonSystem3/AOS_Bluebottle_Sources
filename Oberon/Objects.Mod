@@ -210,8 +210,8 @@ Most entities in Oberon are derived from this base type.
 
 (* Check if end of s matches ext.  len returns length of ext. *)
 
-	PROCEDURE Match(VAR s, ext: ARRAY OF CHAR; VAR len: INTEGER): BOOLEAN;
-	VAR i, j: INTEGER;
+	PROCEDURE Match(VAR s, ext: ARRAY OF CHAR; VAR len: LONGINT): BOOLEAN;
+	VAR i, j: LONGINT;
 	BEGIN
 		i := 0; WHILE ext[i] # 0X DO INC(i) END; len := i;
 		j := 0; WHILE s[j] # 0X DO INC(j) END;
@@ -222,7 +222,7 @@ Most entities in Oberon are derived from this base type.
 
 (** Search, load and cache a public library. *)
   PROCEDURE ThisLibrary* (name: ARRAY OF CHAR): Library;
-    VAR L: Library; len, n, n0, t: INTEGER; proc: NewProc;  A: Alias;
+    VAR L: Library; len, n, n0, t: LONGINT; proc: NewProc;  A: Alias;
   BEGIN
     A := FirstAlias.next;
     WHILE (A # NIL) & (name # A.name) DO A := A.next END;
@@ -279,7 +279,7 @@ Most entities in Oberon are derived from this base type.
 
 (** Register a new library file extension and its associated generator procedure. *)
   PROCEDURE Register* (ext: ARRAY OF CHAR; new: NewProc);
-    VAR n, len: INTEGER; L: Library;
+    VAR n, len: LONGINT; L: Library;
   BEGIN n := 0;
     WHILE (n # nofreg) & (ext # LibExt[n]) DO INC(n) END;
     IF n # nofreg THEN LibNew[n] := new
@@ -296,7 +296,7 @@ Most entities in Oberon are derived from this base type.
   (*standard libraries*)
 
   PROCEDURE ReadName (VAR R: Files.Rider; VAR name: ARRAY OF CHAR);
-    VAR i: INTEGER; ch: CHAR;
+    VAR i: LONGINT; ch: CHAR;
   BEGIN i := 0; Files.Read(R, ch);
     WHILE (ch # ".") & (ch # 0X) DO name[i] := ch; INC(i); Files.Read(R, ch) END;
     name[i] := "."; INC(i); Files.Read(R, ch);
@@ -305,7 +305,7 @@ Most entities in Oberon are derived from this base type.
   END ReadName;
 
   PROCEDURE SplitName (VAR name, MName, PName: ARRAY OF CHAR);
-    VAR i, j: INTEGER;
+    VAR i, j: LONGINT;
   BEGIN i := 0;
     WHILE name[i] # "." DO MName[i] := name[i]; INC(i) END;
     MName[i] := 0X; INC(i); j := 0;
@@ -353,7 +353,7 @@ Most entities in Oberon are derived from this base type.
 	END NewDummy;
 
 	PROCEDURE GetObj (L: Library; ref: INTEGER; VAR obj: Object);
-		VAR objOrg: LONGINT; ind: ArrayIndex; MName, PName: ARRAY 32 OF CHAR; n: INTEGER;
+		VAR objOrg: LONGINT; ind: ArrayIndex; MName, PName: ARRAY 32 OF CHAR; n: INTEGER; nl : LONGINT;
 				Mod: Modules.Module; Cmd: Modules.Command; M: FileMsg;
 	BEGIN
 		ind := L.ind(ArrayIndex);
@@ -361,20 +361,21 @@ Most entities in Oberon are derived from this base type.
 		obj := ind.index[ref];
 		IF obj = NIL THEN
 			IF L.f # NIL THEN
-				Files.Set(L.R, L.f, ind.org + ref*4);
+				Files.Set(L.R, L.f, ind.org + LONG(ref)*4);
 				Files.ReadLInt(L.R, objOrg);
 				IF objOrg > ind.org THEN
 					NewObj := NIL;
 					Files.Set(L.R, L.f, objOrg);
 					Files.ReadInt(L.R, n);
-					SplitName(L.GName[n], MName, PName);
+					IF n < 0 THEN nl := MAX(LONGINT) - n ELSE nl := n END; (* fof *)
+					SplitName(L.GName[nl], MName, PName);
 					Mod := Modules.ThisMod(MName);
 					IF Modules.res = 0 THEN
 						Cmd := Modules.ThisCommand(Mod, PName);
 						IF Modules.res = 0 THEN Cmd
-						ELSE NewDummy(L.GName[n])
+						ELSE NewDummy(L.GName[nl])
 						END
-					ELSE NewDummy(L.GName[n])
+					ELSE NewDummy(L.GName[nl])
 					END;
 					obj := NewObj;
 					IF obj # NIL THEN
@@ -396,16 +397,16 @@ Most entities in Oberon are derived from this base type.
 	END GetObj;
 
 	PROCEDURE PutObj (L: Library; ref: INTEGER; obj: Object);
-		VAR index: Block; ind: ArrayIndex; i : LONGINT; size: INTEGER;
+		VAR index: Block; ind: ArrayIndex; i ,size: LONGINT; 
 	BEGIN
 		IF (ref < 0) OR (obj = NIL) THEN RETURN END;
 		ind := L.ind(ArrayIndex);
 		IF ref >= ind.size THEN
 			size := (ref DIV StepSize + 1) * StepSize;
 			NEW(index, size);
-			IF ind.index # NIL THEN SYSTEM.MOVE(SYSTEM.ADR(ind.index^), SYSTEM.ADR(index^), ind.size*4) END;
+			IF ind.index # NIL THEN SYSTEM.MOVE(SYSTEM.ADR(ind.index^), SYSTEM.ADR(index^), LONG(ind.size)*4) END;
 			FOR i := ind.size TO size-1 DO index[i] := NoObj END;
-			ind.size := size; ind.index := index
+			ind.size := SHORT(size); ind.index := index
 		END;
 		ind.index[ref] := obj; obj.lib := L; obj.ref := ref;
 		IF ref >= L.maxref THEN L.maxref := ref + 1 END
@@ -496,7 +497,7 @@ Most entities in Oberon are derived from this base type.
 	
 (** Load a standard object library from position pos in file f. *)
 	PROCEDURE LoadLibrary* (L: Library; f: Files.File; pos: LONGINT; VAR len: LONGINT);
-		VAR ind: ArrayIndex; dict: ListDict; i, version, dorg, gorg: LONGINT; key, n, N: INTEGER; entry: Entry;
+		VAR ind: ArrayIndex; dict: ListDict; i, n, N, version, dorg, gorg: LONGINT; key: INTEGER; entry: Entry;
 				R: Files.Rider;
 	BEGIN
 		ind := L.ind(ArrayIndex);
@@ -509,7 +510,7 @@ Most entities in Oberon are derived from this base type.
 			FOR i := 0 TO L.maxref - 1 DO ind.index[i] := NIL END;
 			(* read generator table *)
 			Files.Set(R, f, gorg);
-			Files.ReadInt(R, N);
+			Files.ReadInt(R, key); N:= key; 
 			IF N > 0 THEN
 				NEW(L.GName, N);
 				FOR n := 0 TO N - 1 DO Files.ReadString(R, L.GName[n]) END
@@ -540,7 +541,7 @@ Most entities in Oberon are derived from this base type.
 
 (** Store a standard object library at position pos in file f. *)
 	PROCEDURE StoreLibrary* (L: Library; f: Files.File; pos: LONGINT; VAR len: LONGINT);
-		VAR obj: Object; ind: ArrayIndex; i, olen, org, indorg: LONGINT; m, n, N: INTEGER; entry: Entry;
+		VAR obj: Object; ind: ArrayIndex; i, olen, org, indorg,n,N: LONGINT; m: INTEGER; entry: Entry;
 				ch: CHAR; GName: ARRAY MaxNews OF GenName; R, indR: Files.Rider; M: FileMsg; A: AttrMsg;
 	BEGIN
 		ind := L.ind(ArrayIndex);
@@ -551,7 +552,7 @@ Most entities in Oberon are derived from this base type.
 		Files.WriteLInt(R, -1);	(* place holder dict pos *)
 		Files.WriteInt(R, L.maxref);
 		indorg := Files.Pos(R); Files.Set(indR, f, indorg);
-		IF L.maxref > 0 THEN Files.WriteBytes(R, ind.index^, L.maxref*4) END;
+		IF L.maxref > 0 THEN Files.WriteBytes(R, ind.index^, LONG(L.maxref)*4) END;
 
 		(* store obj data *)
 		A.id := get; A.name := "Gen";
@@ -571,7 +572,7 @@ Most entities in Oberon are derived from this base type.
 					IF n = N THEN INC(N) END;
 					
 					Files.WriteLInt(indR, Files.Pos(R));	(* write index *)
-					Files.WriteInt(R, n);
+					Files.WriteInt(R, SHORT(n));
 					Files.WriteLInt(R, olen);
 					WHILE olen > 0 DO Files.Read(L.R, ch); Files.Write(R, ch); DEC(olen) END
 				ELSE	(* there was never an object with this ref *)
@@ -584,7 +585,7 @@ Most entities in Oberon are derived from this base type.
 				IF n = N THEN INC(N) END;
 
 				Files.WriteLInt(indR, Files.Pos(R));	(* write index *)
-				Files.WriteInt(R, n);
+				Files.WriteInt(R, SHORT(n));
 				Files.Set(M.R, f, Files.Pos(R));
 				Files.WriteLInt(M.R, 0); obj.handle(obj, M);
 				olen := Files.Pos(M.R) - Files.Pos(R) - 4;
@@ -598,7 +599,7 @@ Most entities in Oberon are derived from this base type.
 		(* write generator table *)
 		i := Files.Pos(R);
 		Files.Set(R, f, pos + 5); Files.WriteLInt(R, i); Files.Set(R, f, i);
-		Files.WriteInt(R, N);
+		Files.WriteInt(R, SHORT(N));
 		IF N > 0 THEN
 			NEW(L.GName, N);
 			FOR n := 0 TO N-1 DO

@@ -1,6 +1,6 @@
 (* Aos, Copyright 2001, Pieter Muller, ETH Zurich *)
 
- MODULE AosTestNet; (** AUTHOR "pjm, mvt"; PURPOSE "Module for testing network device drivers"; *)
+MODULE AosTestNet; (** AUTHOR "pjm, mvt"; PURPOSE "Module for testing network device drivers"; *)
 
 IMPORT SYSTEM, AosKernel, AosModules, AosOut, AosPlugins, AosNet, Texts, Oberon, In;
 
@@ -97,8 +97,8 @@ BEGIN
 		IF dev # NIL THEN
 			Texts.WriteString(w, name); Texts.WriteString(w, " is now the test device");
 			Texts.WriteLn(w); Texts.Append(Oberon.Log, w.buf);
-			dev.InstallReceiver(TestSendType, Receiver);
-			dev.InstallReceiver(TestReplyType, Receiver)
+			dev.InstallReceiver(SELF, TestSendType, Receiver, IsPacketValid, IsPacketForSingleRec, IsPacketAccepted, FALSE);
+			dev.InstallReceiver(SELF, TestReplyType, Receiver, IsPacketValid, IsPacketForSingleRec, IsPacketAccepted, FALSE);
 		ELSE
 			Texts.WriteString(w, name); Texts.WriteString(w, " not found");
 			Texts.WriteLn(w); Texts.Append(Oberon.Log, w.buf)
@@ -117,8 +117,8 @@ BEGIN
 		IF dev2 # NIL THEN
 			Texts.WriteString(w, name); Texts.WriteString(w, " is now the 2nd test device");
 			Texts.WriteLn(w); Texts.Append(Oberon.Log, w.buf);
-			dev2.InstallReceiver(TestSendType, Receiver);
-			dev2.InstallReceiver(TestReplyType, Receiver)
+			dev.InstallReceiver(SELF, TestSendType, Receiver, IsPacketValid, IsPacketForSingleRec, IsPacketAccepted, FALSE);
+			dev.InstallReceiver(SELF, TestReplyType, Receiver, IsPacketValid, IsPacketForSingleRec, IsPacketAccepted, FALSE);
 		ELSE
 			Texts.WriteString(w, name); Texts.WriteString(w, " not found");
 			Texts.WriteLn(w); Texts.Append(Oberon.Log, w.buf)
@@ -159,15 +159,37 @@ BEGIN
 	END
 END SendTest;
 
+
+(* Checks if an incoming packet should be sent to only one installed receivers *)
+PROCEDURE IsPacketForSingleRec* (buffer: AosNet.Buffer): BOOLEAN;
+BEGIN
+	RETURN FALSE;
+END IsPacketForSingleRec;
+
+
+(* Checks if an incoming packet is accepted from a certain installed receiver *)
+PROCEDURE IsPacketAccepted* (buffer: AosNet.Buffer): BOOLEAN;	
+BEGIN
+	RETURN TRUE;
+END IsPacketAccepted;
+
+
+(* Checks if an incoming packet is valid *)
+PROCEDURE IsPacketValid* (VAR buffer: AosNet.Buffer): BOOLEAN;
+BEGIN
+	RETURN TRUE;
+END IsPacketValid;
+
+	
 PROCEDURE Cleanup;
 BEGIN
 	IF dev # NIL THEN
-		dev.RemoveReceiver(TestSendType);
-		dev.RemoveReceiver(TestReplyType);
+		dev.RemoveReceiver(SELF, TestSendType);
+		dev.RemoveReceiver(SELF, TestReplyType);
 	END;
 	IF dev2 # NIL THEN
-		dev2.RemoveReceiver(TestSendType);
-		dev2.RemoveReceiver(TestReplyType);
+		dev2.RemoveReceiver(SELF, TestSendType);
+		dev2.RemoveReceiver(SELF, TestReplyType);
 	END;
 END Cleanup;
 
@@ -187,4 +209,4 @@ AosTestNet.SetDevice "3Com90x#0"
 AosTestNet.SetDevice2 "3Com90x#1"
 AosTestNet.SendBroadcast  AosTestNet.SendTest ^ 1 10 100 1000 10000
 
-System.Free AosTestNet~
+S.Free AosTestNet~

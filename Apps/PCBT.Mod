@@ -3,11 +3,11 @@
 MODULE PCBT; (** AUTHOR "prk / be"; PURPOSE "Parallel Compiler: back-end common structures"; *)
 
 IMPORT
-		SYSTEM, PCM;
+		SYSTEM, PCM, PCT;
 
 CONST
 	(*static buffer for constants*)
-	ConstSize = 16*1024;
+	MaxConstSize = 2147483647; (* 2^31 - 1, i.e. the maximum positive LONGINT number *)
 	
 
 	(** system calls *)
@@ -17,11 +17,11 @@ CONST
 	registerinterface* = 10;
 
 	(** Fixup, last address in a fixup chain *)
-	FixupSentinel* = 0FFFFH;
+	FixupSentinel* = 0FFFFFFFFH;
 	UndefEntryNo* = -1;	(** GlobalVariable.EntryNo *)
 	
 	(** Calling Conventions *)
-	OberonCC* = 1;  OberonPassivateCC* = 2;
+	OberonCC* = 1;  OberonPassivateCC* = 2;  WinAPICC* = 3; (* ejz *)
 
 VAR
 	init: BOOLEAN;
@@ -83,17 +83,35 @@ TYPE
 		END Init;
 	END GlobalVariable;
 
-	Procedure* = OBJECT (PCM.Attribute)
+	(* ug *)	
+	Attribute* = OBJECT(PCM.Attribute)	(* common part of Procedure and Module *)
+		VAR
+			codeoffset-: LONGINT;  (* entry point relative to code base of owner*)
+			beginOffset- : LONGINT;	 (* entry point relative to code base of owner*)	(* ug *)
+			endOffset- : LONGINT;  (* offset of statement block end relative to code base *)	(* ug *)
+			
+		PROCEDURE SetBeginOffset*(offset : LONGINT);  (* ug *)
+		BEGIN 
+			beginOffset := offset
+		END SetBeginOffset;
+		
+		PROCEDURE SetEndOffset*(offset : LONGINT); (* ug *)
+		BEGIN
+			endOffset := offset
+		END SetEndOffset;
+		
+	END Attribute;		
+
+	Procedure* = OBJECT (Attribute)
 		VAR
 			owner-: Module;
 			public-: BOOLEAN;
 			locsize*: LONGINT;	(* local variables size *)
 			parsize*: LONGINT;	(* parameters size incl. self/sl, return addr and dynamic link *)
-			codeoffset-: LONGINT;	(* entry point relative to code base of owner*)
 			entryNr*, fixlist*: LONGINT;	(* set/used by PCOF *)
-			next-: Procedure;	(* entrylist *)
-			
+			next-: Procedure;	(* entrylist *)			
 			link-: Fixup;
+			finallyOff*: LONGINT; (* Offset of the handled region. Relative to the codeoffset. *)
 		
 		PROCEDURE AddFixup(offset: LONGINT);
 			VAR l: Fixup;
@@ -107,6 +125,7 @@ TYPE
 			SELF.owner := owner;
 			SELF.public := public;
 			fixlist := FixupSentinel;
+			finallyOff := -1;
 		END Init;
 		
 	END Procedure;
@@ -115,10 +134,11 @@ TYPE
 		mthNo*: LONGINT
 	END;
 	
-	Module* = OBJECT (PCM.Attribute)
+	Module* = OBJECT (Attribute)
 		VAR
-			locsize*: LONGINT;	(** data section size*)
-			constsize*: INTEGER;	(** const section size*)
+			locsize*: LONGINT;			(** data section size*)
+			constsize*: INTEGER;			(** const section size*)
+			casetablesize*: INTEGER;  	(** length of case table within const section *) (* ug *)
 			nr*: INTEGER;
 	
 			const*: ConstArray;
@@ -131,6 +151,8 @@ TYPE
 			
 			syscalls-: POINTER TO ARRAY OF Fixup;	(** syscalls' fixup lists *)
 		
+			finallyOff*: LONGINT; (* offset of the finally in the module init code *)
+		
 		PROCEDURE & Init;
 		BEGIN
 			NEW(syscalls, NofSysCalls);
@@ -138,6 +160,7 @@ TYPE
 			ResetLists;
 			constsize := 0;
 			nr := 0;
+			finallyOff := -1;
 		END Init;
 		
 		(** ResetLists - remove entries from OwnVars, ExtVars, OwnProcs, ExtProcs *)
@@ -183,7 +206,7 @@ TYPE
 		BEGIN {EXCLUSIVE}
 			ASSERT(len <= LEN(a));
 			base := constsize;
-			ASSERT(base+len < ConstSize);
+			ASSERT(base+len < MaxConstSize);
 			IF base+len > LEN(const^) THEN
 				NEW(c, LEN(const) + 256);
 				SYSTEM.MOVE(SYSTEM.ADR(const[0]), SYSTEM.ADR(c[0]), LEN(const));
@@ -211,7 +234,7 @@ TYPE
 		BEGIN {EXCLUSIVE}
 			ASSERT(len <= LEN(a));
 			base := constsize;
-			ASSERT(base+len < ConstSize);
+			ASSERT(base+len < MaxConstSize);
 			IF base+len > LEN(const^) THEN
 				NEW(c, LEN(const) + 256);
 				SYSTEM.MOVE(SYSTEM.ADR(const[0]), SYSTEM.ADR(c[0]), LEN(const));
@@ -270,13 +293,14 @@ TYPE
 		END UseSyscall;
 	END Module;
 
+	ObjFGeneratorProc* = PROCEDURE (VAR R: PCM.Rider; scope: PCT.ModScope;  VAR codeSize: LONGINT);
 
 VAR
 	NofSysCalls-: LONGINT;
 	sentinel-: GlobalVariable;	(*last element of the VarEntries list *)
 	psentinel-: Procedure;	(** last element of the OwnProcs list *)
 	context*: Module;
-	
+	generate*: ObjFGeneratorProc;
 
 (** --------------- Miscellaneous ------------------ *)
 
@@ -289,12 +313,12 @@ END SetNumberOfSyscalls;
 (** ------------ Resource Allocation ----------------- *)
 
 PROCEDURE AllocateTD*(size: RecSize);	(** td => record.td *)
-VAR  zero: LONGINT; ga: GlobalVariable;
+VAR  zero: HUGEINT; ga: GlobalVariable; (* lk *)
 BEGIN {EXCLUSIVE}
 	IF size.td = NIL THEN
 		zero := 0;
 		NEW(ga, context);
-		ga.offset := context.NewConst(zero, 4);
+		ga.offset := context.NewConst(zero, PCT.AddressSize); (* lk *)
 		size.td := ga;
 	END
 END AllocateTD;
@@ -308,6 +332,7 @@ BEGIN
 END PCBT.
 
 (*
+	15.11.06	ug	FixupSentinel extended to 32 bits, MaxConstSize adapted, additional information in type Procedure for GC
 	18.03.02	prk	PCBT code cleanup and redesign
 	11.08.01	prk	Fixup and use lists for procedures in PCBT cleaned up
 	10.08.01	prk	PCBT.Procedure: imported: BOOLEAN replaced by owner: Module

@@ -112,6 +112,11 @@ TYPE
 		BEGIN
 			IF sender # NIL THEN sender.Pointer(x, y, keys) END
 		END PointerMove;
+
+		PROCEDURE WheelMove*(dz : LONGINT);
+		BEGIN
+			IF sender # NIL THEN sender.Wheel(dz) END
+		END WheelMove;
 		
 		PROCEDURE PointerUp*(x, y: LONGINT; keys: SET);
 		BEGIN
@@ -164,7 +169,8 @@ TYPE
 	Sender = OBJECT
 		VAR
 			c: Connection;
-			head, middle, tail, res: LONGINT;
+			head, middle, tail, res, lx, ly: LONGINT;
+			lkeys : SET;
 			buf: ARRAY OutBufSize OF CHAR;
 			done, poll: BOOLEAN;
 			timer: AosActive.Timer;
@@ -193,9 +199,26 @@ TYPE
 				END;
 				Put(5X);	(* PointerEvent (sec. 5.2.6) *)
 				Put(CHR(SYSTEM.VAL(LONGINT, keys)));
-				PutInt(x); PutInt(y)
+				PutInt(x); PutInt(y);
+				lx := x; ly := y; lkeys := keys
 			END
 		END Pointer;
+
+		PROCEDURE Wheel(dz : LONGINT);
+		VAR keys : SET;
+		BEGIN {EXCLUSIVE}
+			IF (Available() >= 6) THEN
+				IF Trace THEN
+					AosOut.Enter; AosOut.String("Wheel "); AosOut.Int(dz, 5); AosOut.Exit
+				END;
+				Put(5X);	(* PointerEvent (sec. 5.2.6) *)
+				keys := lkeys;
+				IF dz < 0 THEN INCL(keys, 3) END;
+				IF dz > 0 THEN INCL(keys, 4) END;
+				Put(CHR(SYSTEM.VAL(LONGINT, keys)));
+				PutInt(lx); PutInt(ly)
+			END
+		END Wheel;
 		
 		PROCEDURE Key(keysym: LONGINT; flags: SET);
 		BEGIN {EXCLUSIVE}
@@ -858,19 +881,20 @@ END Show;
 PROCEDURE ReadString(r: AosIO.Reader; VAR s: ARRAY OF CHAR);
 VAR i: LONGINT;
 BEGIN
-	i := 0; WHILE (r.res = 0) & (r.Peek() # ":") DO r.Char(s[i]); INC(i) END;
+	i := 0; WHILE (r.res = 0) & (r.Peek() # " ") DO r.Char(s[i]); INC(i) END;
 	s[i] := 0X; r.SkipBytes(1)
 END ReadString;
 
-PROCEDURE Open*(par: PTR): PTR;	(** [ server[:pwd]:port ] *)
+PROCEDURE Open*(par: PTR): PTR;	(** [ server port ] *)
 VAR
 	server: AosIP.Adr; res, port: LONGINT; r: AosIO.StringReader; s: AosCommands.Parameters; ignore: PTR;
 	c: Connection; pwd: ARRAY 32 OF CHAR; str, svr, title: ARRAY 128 OF CHAR;
 BEGIN
 	s := par(AosCommands.Parameters);
 	COPY(s.str^, str);
+
 	IF str[0] = 0X THEN
-		IF Dialogs.QueryString("Enter VNC Server:Port", str) # Dialogs.ResOk THEN RETURN NIL END
+		IF Dialogs.QueryString("Enter VNC Server Port", str) # Dialogs.ResOk THEN RETURN NIL END
 		;AosOut.String("<"); AosOut.String(str); AosOut.String(">"); AosOut.Ln;
 	END;
 	NEW(r, LEN(str)); r.Set(str);
@@ -888,7 +912,7 @@ BEGIN
 				OpenVNC(c, server, port, pwd);
 				IF c.res = Ok THEN
 					pool.Add(c);
-					COPY(svr, title); AosFS.AppendStr(":", title); AosFS.AppendInt(port, title); AosFS.AppendStr(" - VNC ", title); AosFS.AppendInt(c.id, title);
+					COPY(svr, title); AosFS.AppendStr("  Port ", title); AosFS.AppendInt(port, title); AosFS.AppendStr(" - VNC ", title); AosFS.AppendInt(c.id, title);
 					c.w.SetTitle(WMWindowManager.NewString(title)); 
 					ignore := Show(NIL)
 				ELSE
@@ -902,7 +926,7 @@ BEGIN
 			AosOut.String(s.str^); AosOut.String(" not found"); AosOut.Ln
 		END
 	ELSE
-		AosOut.String(s.str^); AosOut.String(" expected server[:pwd]:port"); AosOut.Ln
+		AosOut.String(s.str^); AosOut.String(" expected server[ pwd] port"); AosOut.Ln
 	END;
 	RETURN NIL
 END Open;
@@ -925,8 +949,8 @@ BEGIN
 	NEW(bell); NEW(pool)
 END AosVNC.
 
-Aos.Call AosVNC.Open 129.132.134.50:5901 ~
-Aos.Call AosVNC.Show
-Aos.Call AosVNC.Paste 0 Hello world~
+AosVNC.Open portnoy.ethz.ch 5901 ~
+AosVNC.Show
+AosVNC.Paste 0 Hello world~
 
-System.Free AosVNC ~
+S.Free AosVNC ~

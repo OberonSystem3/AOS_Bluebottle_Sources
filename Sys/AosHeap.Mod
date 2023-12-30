@@ -1,15 +1,22 @@
 (* Aos, Copyright 2001, Pieter Muller, ETH Zurich *)
 
- MODULE AosHeap; (** AUTHOR "pjm"; PURPOSE "Heap management and garbage collector"; *)
+MODULE AosHeap; (** AUTHOR "pjm/Luc Bläser"; PURPOSE "Heap management and garbage collector"; *)
 
 (* This module contains lots of low-level memory manipulations, which are best read together with the memory management data structure documentation. *)
+
+(* 
+	Garbage collector using a marking stack with overflow handling, 
+	References:
+		Jones, Lins, Garbage Collection, Section 4.2, Algorithm 4.1
+		Knuth, The Art of Computer Programming, Volume 1, Section 2.3.5, Algorithm C
+  *)
 
 IMPORT SYSTEM, AosBoot, AosLocks, AosOut, AosMemory;
 
 CONST
 	DebugValue = 0DEADDEADH;	(* set non-0 to clear free storage to this value *)
 	Trace = TRUE;	(* include trace code *)
-	Stats = TRUE;	(* maintain statistical counters *)
+	Stats* = TRUE;	(* maintain statistical counters *)
 	
 	HeapMin = 50;	(* "minimum" heap size as percentage of total memory size *)
 	HeapMax = 95;	(* maximum heap size as percentage of total memory size *)
@@ -23,6 +30,8 @@ CONST
 	
 	FreeLists = 9;
 	MaxCandidates = 1024;
+	
+	MarkStackSize = 1024; (* maximum stack size for temporary marking *)
 	
 	MarkBit = 0;  ArrayBit = 1;  FreeBit = 2;	(* in tag *)
 	SubObjBit = 3;	(* in tag or ptr => indirect tag present *)
@@ -39,7 +48,7 @@ CONST
 
 	MinPtrOfs = -40000000H;	(* sentinel offset for ptrOfs *)
 	
-	NilVal = 0;
+	NilVal* = 0;
 	
 TYPE
 	PtrElemRec = RECORD	(* has same type descriptor as element of ARRAY OF POINTER *)
@@ -69,189 +78,319 @@ VAR
 	initBlock: PTR;	(* anchor for init calls *)
 	freeList: ARRAY FreeLists+1 OF LONGINT;	(* array of freelists *)
 	lastFreeListAdr: LONGINT;
-	candidates: ARRAY MaxCandidates OF LONGINT;	(* stack pointer candidates *)
+	markStack: ARRAY MarkStackSize OF LONGINT; (* temporary marking stack *)
+	lowestForgotten: LONGINT; (* lowest forgotten block due to mark stack overflow *)
+	markStackHeight: LONGINT; (* current free position in mark stack *) 
+	candidates: ARRAY MaxCandidates OF LONGINT;	(* procedure stack pointer candidates *)
 	numCandidates: LONGINT;
 	rootList: LONGINT;	(* list of root objects during GC *)
 	newSum, gcThreshold, expandMin, heapMinKB, heapMaxKB: LONGINT;
 	checkRoot: FinalizerNode;	(* list of checked objects (contains weak references to the checked objects) *)
 	finalizeRoot: FinalizerNode;	(* objects scheduled for finalization (contains references to scheduled objects) *)
 	traceHeap*: SET;	(* exported for testing *)
-	Nmark, Nmarked, Nsweeped, Nnew, NnewBytes, Ngc, NfinalizeAlive, NfinalizeDead: LONGINT;
 
-(*
-PROCEDURE Largest(): LONGINT;
-VAR i, max, ptr, size: LONGINT;
+	(** Statistics. Will only be maintained if Stats = TRUE *)
+
+	(** Memory allocation statistics *)
+	Nnew- : LONGINT;			(** Number of times NewBlock has been called since system startup *)
+	NnewBytes- : HUGEINT;		(** Number of bytes allocated by NewBlock since system startup *)
+	
+	(** Garbage collection statistics *)
+	Ngc- : LONGINT; 			(** Number of GC cycles since system startup *)
+	
+	(** Statistics considering the last GC cyle *)
+	Nmark-, Nmarked-, Nsweeped-, NfinalizeAlive-, NfinalizeDead-: LONGINT;
+	NgcCyclesMark-, NgcCyclesSweep-, NgcCyclesLastRun-, NgcCyclesMax-, NgcCyclesAllRuns- : HUGEINT;
+
+(* ug *) (*  allCandidates : ARRAY 5000 OF LONGINT; *)
+(* ug *) (* noCandidates : LONGINT; *)
+
+PROCEDURE MarkInitialBlock(p: PTR);
+VAR block, pTagAdr, tag, pTDescAdr, tdIndirectTag, tdEffectiveTag, ptrOfs: LONGINT;
 BEGIN
-	i := FreeLists;  max := 0;
-	WHILE (i >= 0) & (max = 0) DO
-		ptr := freeList[i];
-		WHILE ptr # NilVal DO
-			SYSTEM.GET(ptr+4, size);	(* size *)
-			IF size > max THEN max := size END;
-			SYSTEM.GET(ptr+8, ptr)	(* next *)
-		END;
-		DEC(i)
+	block := SYSTEM.VAL(LONGINT, p);
+	IF (block < beginBlockAdr) OR (block >= endBlockAdr) THEN RETURN (* temporary (buffers?) *) END;
+	
+	(* -- compute tag adress -- *)
+	IF ~(SubObjBit IN SYSTEM.VAL(SET, block)) THEN
+		IF ~(ProtObjBit IN SYSTEM.VAL(SET, block)) THEN (* RecBlk, ArrBlk *)
+			pTagAdr := block-4
+		ELSE (* ProtRecBlk *)
+			pTagAdr := block-(ProtOfs+4)
+		END
+	ELSE (* SysBlk, SysBlkArray, TypeDesc *)
+		SYSTEM.GET(block-4, pTagAdr); (* indirect tag *)
+		ASSERT(SYSTEM.VAL(SET, pTagAdr) * {MarkBit} = {}); (* mark bit must not be set *)
+		pTagAdr := SYSTEM.VAL(LONGINT, SYSTEM.VAL(SET, pTagAdr) - {ArrayBit}) - 4 
+			(* remove array bit because of array SysBlks in module block *)
 	END;
-	RETURN max
-END Largest;
-*)
+	
+	(* -- set mark for block -- *)
+	SYSTEM.GET(pTagAdr, tag);
+	IF ~(MarkBit IN SYSTEM.VAL(SET, tag)) THEN
+		SYSTEM.PUT(pTagAdr, SYSTEM.VAL(SET, tag) + {MarkBit}); (* mark block *)
+	
+		IF ~(SubObjBit IN SYSTEM.VAL(SET, block)) THEN (* RecBlk, ArrBlk, ProtRecBlk have a type descriptor *)
+			(* -- get address of type descriptor -- *)
+			SYSTEM.GET(block-4, pTDescAdr);
+			pTDescAdr := SYSTEM.VAL(LONGINT, SYSTEM.VAL(SET, pTDescAdr) - {MarkBit, ArrayBit}); 
+				(* mask out mark and array bit *)
+	
+			(* -- set mark for type descriptor of block -- *)
+			SYSTEM.GET(pTDescAdr-4, tdIndirectTag);
+			tdIndirectTag := SYSTEM.VAL(LONGINT, SYSTEM.VAL(SET, tdIndirectTag) - {MarkBit}) - 4;
+				(* mask out MarkBit because block may be a TypeDesc start pointer *)
+			ASSERT(SYSTEM.VAL(SET, tdIndirectTag) * {ArrayBit} = {}); (* array bit must not be set *)
+			SYSTEM.GET(tdIndirectTag, tdEffectiveTag);
+			SYSTEM.PUT(tdIndirectTag, SYSTEM.VAL(SET, tdEffectiveTag) + {MarkBit}); (* mark type desc *)
+			IF (SubObjBit IN SYSTEM.VAL(SET, pTDescAdr)) & 
+					(SYSTEM.GET32(pTDescAdr-8) = SYSTEM.TYPECODE(RootObject)) THEN (* root object detected *)
+				SYSTEM.PUT(block, rootList); rootList := block (* link root list *)
+			END;
+		
+			ASSERT(markStackHeight = 0);
+			(* -- determine whether block is not atomic, i.e. has outgoing references -- *)
+			SYSTEM.GET(pTDescAdr+4, ptrOfs);
+			IF ~(ptrOfs < MinPtrOfs) THEN (* not atomic *)
+				(* -- Push block on mark stack -- *)
+				IF markStackHeight # MarkStackSize THEN 
+					markStack[markStackHeight] := block; INC(markStackHeight)
+				ELSE (* overflow *)
+					(* lowestForgotten points to the beginning of the block *)
+					IF pTagAdr < lowestForgotten THEN lowestForgotten := pTagAdr END 
+					(* remember lowest forgotten block for later rescan *)
+				END
+			END
+		END
+	END
+END MarkInitialBlock;
 
 (** Mark - Mark an object and its decendents.  Used by findRoots. *)
 (* Mark is best read together with the heap data structures diagram. *)
-
 PROCEDURE Mark*(p: PTR);
-VAR t, block, tag, pTagAdr, tdTag, currElem, father, ptrOfs, field, downTag: LONGINT;  s, arrayBit: SET;
-BEGIN	(* {p is RecBlk, ArrayBlk or SubObj} *)
+VAR orgBlock, orgPTagAdr, orgTag, orgPTDescAdr, orgTdIndirectTag, orgTdEffectiveTag, orgPtrOfs: LONGINT;
+		currentPtrOfsPos: LONGINT; isArrayBlock: BOOLEAN; currentArrayElemAdr, lastArrayElemAdr, arrayElemSize: LONGINT;
+		refBlock, refPTagAdr, refTag, refPTDescAdr, refTdIndirectTag, refTdEffectiveTag, refPtrOfs: LONGINT;
+BEGIN
 	IF Stats THEN INC(Nmark) END;
-	block := SYSTEM.VAL(LONGINT, p);
-	IF (block < beginBlockAdr) OR (block >= endBlockAdr) THEN	(* UNSIGNED *)
-		AosOut.String("OutPtr");  AosOut.Hex(block, 9);  AosOut.Ln;	(* remove *)
-		RETURN	(* temporary (buffers?) *)
-	END;
-	IF ~(SubObjBit IN SYSTEM.VAL(SET, block)) THEN	(* block is not a SubObj pointer *)
-		IF ~(ProtObjBit IN SYSTEM.VAL(SET, block)) THEN	(* not protected object pointer *)
-			pTagAdr := block-4;
-			SYSTEM.GET(pTagAdr, s)	(* tag & bits *)
-(*
-			;IF (SYSTEM.VAL(LONGINT, s) = block) & (SYSTEM.GET16(block+10) = -1) THEN
-				AosOut.String("!P"); AosOut.Hex(block, 8); AosOut.Char(" ")
-			END
-*)
-		ELSE	(* protected object pointer (~SubObj) *)
-			pTagAdr := block-(ProtOfs+4);
-			SYSTEM.GET(pTagAdr, s)	(* tag & bits *)
-		END;
-		IF ~(MarkBit IN s) THEN	(* not marked *)
-			SYSTEM.GET(block-4, tag);
-			SYSTEM.PUT(pTagAdr, s + {MarkBit});	(* mark it *)
-			arrayBit := SYSTEM.VAL(SET, tag) * {ArrayBit};
-			EXCL(SYSTEM.VAL(SET, tag), ArrayBit);	(* tag = ADR(recsize) or ADR(tdsize) *)
-				(* now mark tdesc *)
-			SYSTEM.GET(tag-4, tdTag);	(* tdTag = ADR(tdsize) & bits *)
-				(* mask out MarkBit, because block may be a TypeDesc start pointer *)
-			tdTag := SYSTEM.VAL(LONGINT, SYSTEM.VAL(SET, tdTag) - {MarkBit}) - 4;	(* tdTag = ADR(tdesctag) *)
-			SYSTEM.GET(tdTag, s);  SYSTEM.PUT(tdTag, s + {MarkBit});	(* mark tdesc *)
-			IF (SubObjBit IN SYSTEM.VAL(SET, tag)) & (SYSTEM.GET32(tag-8) = SYSTEM.TYPECODE(RootObject)) THEN
-				SYSTEM.PUT(block, rootList);  (* link *)
-				rootList := block
+	markStackHeight := 0; (* clear mark stack *)
+	lowestForgotten := endBlockAdr; (* sentinel: no overflow has happened *)
+	MarkInitialBlock(p);
+	LOOP
+		WHILE markStackHeight # 0 DO
+			DEC(markStackHeight); orgBlock := markStack[markStackHeight]; (* pop marked block *)
+			ASSERT(~(SubObjBit IN SYSTEM.VAL(SET, orgBlock))); (* must be RecBlk, ArrBlk or ProtRecBlk *)
+			SYSTEM.GET(orgBlock-4, orgPTDescAdr);
+			isArrayBlock := ArrayBit IN SYSTEM.VAL(SET, orgPTDescAdr);
+			orgPTDescAdr := SYSTEM.VAL(LONGINT, SYSTEM.VAL(SET, orgPTDescAdr) - {MarkBit, ArrayBit});
+			SYSTEM.GET(orgPTDescAdr+4, orgPtrOfs); currentPtrOfsPos := 0;
+			ASSERT(~(orgPtrOfs < MinPtrOfs)); (* must not be atomic *)
+			IF isArrayBlock THEN
+				SYSTEM.GET(orgBlock+8, currentArrayElemAdr); (* currentArrayElemAdr becomes firstArrayElemAdr *)
+				SYSTEM.GET(orgBlock, lastArrayElemAdr);
+				SYSTEM.GET(orgPTDescAdr, arrayElemSize);
+				IF currentArrayElemAdr > lastArrayElemAdr THEN HALT(100) (* array must not be empty *) END
 			END;
-				(* move into element *)
-			IF arrayBit # {} THEN SYSTEM.GET(block+8, currElem)	(* firstElem *)
-			ELSE currElem := block
-			END;
-			father := NilVal;
-			LOOP	(* subgraph traversal *)
-				INC(tag, 4);	(* tag = ADR(ptrOfs[0]) *)
-				SYSTEM.GET(tag, ptrOfs);
-				ASSERT(ptrOfs MOD 4 = 0);	(* temporary sanity check (no deep copy flag) *)
-				IF ptrOfs < MinPtrOfs THEN	(* end of element *)
-					INC(tag, ptrOfs-MinPtrOfs);	(* tag = ADR(recsize) *)
-					IF (arrayBit # {}) & (currElem # SYSTEM.GET32(block)) THEN	(* array & (currElem # lastElemToMark) *)
-						INC(currElem, SYSTEM.GET32(tag))	(* skip to next element using recSize *)
-					ELSE	(* end of array or record => move up in graph *)
-							(* restore the original tag *)
-						IF SYSTEM.VAL(SET, block) * {ProtObjBit, SubObjBit} # {ProtObjBit} THEN	(* not protected object *)
-							SYSTEM.PUT(block-4, SYSTEM.VAL(SET, tag) + arrayBit + {MarkBit})
-						ELSE	(* protected object *)
-							ASSERT(arrayBit = {});	(* protected object can not be array element *)
-							SYSTEM.PUT(block-4, tag)
-						END;
-						IF father = NilVal THEN EXIT END;	(* end of subgraph traversal *)
-							(* restore values of father *)
-						SYSTEM.GET(father-4, tag);
-						arrayBit := SYSTEM.VAL(SET, tag) * {ArrayBit};
-						tag := SYSTEM.VAL(LONGINT, SYSTEM.VAL(SET, tag) - {ArrayBit, MarkBit});
-						IF arrayBit # {} THEN SYSTEM.GET(father+4, currElem)	(* currElem *)
-						ELSE currElem := father
-						END;
-						ptrOfs := currElem + SYSTEM.GET32(tag);	(* last field of father *)
-							(* pointer rotation *)
-						SYSTEM.GET(ptrOfs, field);  SYSTEM.PUT(ptrOfs, block);
-						block := father;  father := field
-					END
-				ELSE	(* next field of element *)
-					INC(ptrOfs, currElem);	(* ptrOfs = ADR(field) *)
-					SYSTEM.GET(ptrOfs, field);
-					ASSERT(ptrOfs MOD 4 = 0);	(* temporary sanity check (no deep copy flag) *)
-					IF field = NilVal THEN
-						(* skip *)
-					ELSIF (field < beginBlockAdr) OR (field >= endBlockAdr) THEN	(* UNSIGNED *)
-						(*AosOut.String("OutPtr");  AosOut.Hex(field, 9);  AosOut.Hex(ptrOfs, 9);  AosOut.Ln*)
-					ELSE
-						IF ~(SubObjBit IN SYSTEM.VAL(SET, field)) THEN	(* field is not a SubObj *)
-							IF ~(ProtObjBit IN SYSTEM.VAL(SET, field)) THEN	(* normal record *)
-								pTagAdr := field-4;
-								SYSTEM.GET(pTagAdr, s)	(* tag & bits *)
-(*
-								;IF (SYSTEM.VAL(LONGINT, s) = field) & (SYSTEM.GET16(field+10) = -1) THEN
-									AosOut.String("!F"); AosOut.Hex(field, 8); AosOut.Char(" ")
-								END
-*)
-							ELSE	(* protected object (~SubObj) *)
-								pTagAdr := field-(ProtOfs+4);
-								SYSTEM.GET(pTagAdr, s)	(* tag & bits *)
-							END;
-							IF ~(MarkBit IN s) THEN	(* not marked => move down in graph *)
-								SYSTEM.GET(field-4, downTag);
-								IF (SubObjBit IN SYSTEM.VAL(SET, downTag)) & (SYSTEM.GET32(SYSTEM.VAL(LONGINT, SYSTEM.VAL(SET, downTag)-{ArrayBit})-8) = SYSTEM.TYPECODE(RootObject)) THEN
-									SYSTEM.PUT(field, rootList);  (* link *)
-									rootList := field
-								END;
-								SYSTEM.PUT(pTagAdr, s + {MarkBit});	(* mark it *)
-									(* modify block tag to point to father's last traversed ptrOfs, set mark bit & leave array bit *)
-								IF SYSTEM.VAL(SET, block) * {ProtObjBit, SubObjBit} # {ProtObjBit} THEN	(* not protected object *)
-									SYSTEM.PUT(block-4, SYSTEM.VAL(SET, tag) + arrayBit + {MarkBit})
-								ELSE	(* protected object *)
-									ASSERT(arrayBit = {});	(* protected object can not be array element *)
-									SYSTEM.PUT(block-4, tag)
-								END;
-									(* for arrays, also update the father's currElem ptr *)
-								IF arrayBit # {} THEN SYSTEM.PUT(block+4, currElem) END;
-									(* now mark tdesc *)
-								SYSTEM.GET(SYSTEM.VAL(LONGINT, SYSTEM.VAL(SET, downTag) - {ArrayBit})-4, tdTag);
-									(* mask out MarkBit, because block may be a TypeDesc start pointer *)
-								tdTag := SYSTEM.VAL(LONGINT, SYSTEM.VAL(SET, tdTag) - {MarkBit}) - 4;	(* tdTag = ADR(tdesctag) *)
-								SYSTEM.GET(tdTag, s);  SYSTEM.PUT(tdTag, s + {MarkBit});	(* mark tdesc *)
-									(* move into element *)
-								arrayBit := SYSTEM.VAL(SET, downTag) * {ArrayBit};
-								IF arrayBit # {} THEN SYSTEM.GET(field+8, currElem)	(* firstElem *)
-								ELSE currElem := field
-								END;
-									(* pointer rotation *)
-								SYSTEM.PUT(ptrOfs, father);  father := block;  block := field;
-								tag := SYSTEM.VAL(LONGINT, SYSTEM.VAL(SET, downTag) - arrayBit)	(* tag = new block tag *)
-							ELSE	(* marked - skip *)
+			
+			(* -- visit all outgoing references -- *)
+			REPEAT
+				IF isArrayBlock THEN SYSTEM.GET(currentArrayElemAdr + orgPtrOfs, refBlock)
+				ELSE SYSTEM.GET(orgBlock + orgPtrOfs, refBlock)
+				END;
+								
+				(* -- inspect referenced block -- *)
+				IF refBlock # NilVal THEN
+					IF (refBlock >= beginBlockAdr) & (refBlock < endBlockAdr) THEN
+						(* -- compute tag adress -- *)
+						IF ~(SubObjBit IN SYSTEM.VAL(SET, refBlock)) THEN
+							IF ~(ProtObjBit IN SYSTEM.VAL(SET, refBlock)) THEN (* RecBlk, ArrBlk *)
+								refPTagAdr := refBlock-4
+							ELSE (* ProtRecBlk *)
+								refPTagAdr := refBlock-(ProtOfs+4)
 							END
-						ELSE	(* field is a SubObj *)
-							SYSTEM.GET(field-4, downTag);	(* indirect tag *)
-							t := SYSTEM.VAL(LONGINT, SYSTEM.VAL(SET, downTag) - {ArrayBit}) - 4;
-								(* remove array bit because of array SubObjs in module block *)
-							SYSTEM.GET(SYSTEM.VAL(LONGINT, SYSTEM.VAL(SET, downTag) - {ArrayBit}) - 4, downTag);	(* indirect tag *)
-								(* remove mark bit because it may already be marked *)
-							downTag := SYSTEM.VAL(LONGINT, SYSTEM.VAL(SET, downTag) - {MarkBit}) - 4;	(* ADR(tag) *)
-							ASSERT(t = downTag);	(* temporary sanity check, always true => can remove indirection here *)
-							SYSTEM.GET(downTag, s);  SYSTEM.PUT(downTag, s + {MarkBit})	(* mark it *)
+						ELSE (* SysBlk, SysBlkArray, TypeDesc *)
+							SYSTEM.GET(refBlock-4, refPTagAdr); (* indirect tag *)
+							ASSERT(SYSTEM.VAL(SET, refPTagAdr) * {MarkBit} = {}); (* mark bit must not be set *)
+							refPTagAdr := SYSTEM.VAL(LONGINT, SYSTEM.VAL(SET, refPTagAdr) - {ArrayBit}) - 4; 
+								(* remove array bit because of array SysBlks in module block *)
+							ASSERT(SYSTEM.VAL(SET, SYSTEM.GET32(refPTagAdr)) - {MarkBit} = SYSTEM.VAL(SET, refPTagAdr+4))
+						END;
+						SYSTEM.GET(refPTagAdr, refTag);
+						
+						IF ~(MarkBit IN SYSTEM.VAL(SET, refTag)) THEN (* referenced block is not yet marked *)
+							(* -- set mark for referenced block -- *)
+							SYSTEM.PUT(refPTagAdr, SYSTEM.VAL(SET, refTag) + {MarkBit});
+							IF ~(SubObjBit IN SYSTEM.VAL(SET, refBlock)) THEN (* RecBlk, ArrBlk, ProtRecBlk have a type descriptor *)
+								(* -- get address of type descriptor for referenced block -- *)
+								SYSTEM.GET(refBlock-4, refPTDescAdr);
+								refPTDescAdr := SYSTEM.VAL(LONGINT, SYSTEM.VAL(SET, refPTDescAdr) - {MarkBit, ArrayBit}); 
+		
+								(* -- set mark for type descriptor of referenced block -- *)
+								SYSTEM.GET(refPTDescAdr-4, refTdIndirectTag);
+								refTdIndirectTag := SYSTEM.VAL(LONGINT, SYSTEM.VAL(SET, refTdIndirectTag) - {MarkBit}) - 4;
+									(* mask out MarkBit because block may be a TypeDesc start pointer *)
+								ASSERT(SYSTEM.VAL(SET, refTdIndirectTag) * {ArrayBit} = {}); (* array bit must not be set *)
+								SYSTEM.GET(refTdIndirectTag, refTdEffectiveTag);
+								SYSTEM.PUT(refTdIndirectTag, SYSTEM.VAL(SET, refTdEffectiveTag) + {MarkBit}); (* mark type desc *)
+								IF (SubObjBit IN SYSTEM.VAL(SET, refPTDescAdr)) & 
+										(SYSTEM.GET32(refPTDescAdr-8) = SYSTEM.TYPECODE(RootObject)) THEN (* root object detected *)
+									SYSTEM.PUT(refBlock, rootList); rootList := refBlock (* link root list *)
+								END;
+													
+								(* -- determine whether referenced block is not atomic, i.e. has outgoing references -- *)
+								SYSTEM.GET(refPTDescAdr+4, refPtrOfs);
+								IF ~(refPtrOfs < MinPtrOfs) THEN (* not atomic *)
+									(* -- Push block on mark stack -- *)
+									IF markStackHeight # MarkStackSize THEN 
+										markStack[markStackHeight] := refBlock; INC(markStackHeight)
+									ELSE (* overflow *)
+										(* lowestForgotten points to the beginning of the block *)
+										IF refPTagAdr < lowestForgotten THEN lowestForgotten := refPTagAdr END 
+											(* remember lowest forgotten block for later rescan *)
+									END
+								END
+							END
 						END
 					END
+				END;
+
+				(* -- advance to next pointer -- *)
+				INC(currentPtrOfsPos, 4);
+				SYSTEM.GET(orgPTDescAdr + 4 + currentPtrOfsPos, orgPtrOfs);
+				IF isArrayBlock & (orgPtrOfs < MinPtrOfs) & (currentArrayElemAdr # lastArrayElemAdr) THEN 
+					(* advance to next array element *)
+					INC(currentArrayElemAdr, arrayElemSize);
+					SYSTEM.GET(orgPTDescAdr+4, orgPtrOfs); currentPtrOfsPos := 0;
+					ASSERT(~(orgPtrOfs < MinPtrOfs)); (* must not be atomic *)
 				END
-			END	(* LOOP *)
-		ELSE	(* marked - skip *)
-		END
-	ELSE	(* p is a SubObj *)
-		SYSTEM.GET(block-4, tag);	(* indirect tag *)
-		t := SYSTEM.VAL(LONGINT, SYSTEM.VAL(SET, tag) - {ArrayBit}) - 4;
-			(* remove array bit because of array SubObjs in module block *)
-		SYSTEM.GET(SYSTEM.VAL(LONGINT, SYSTEM.VAL(SET, tag) - {ArrayBit}) - 4, tag);	(* indirect tag *)
-			(* remove mark bit because it may already be marked *)
-		tag := SYSTEM.VAL(LONGINT, SYSTEM.VAL(SET, tag) - {MarkBit}) - 4;	(* ADR(tag) *)
-		ASSERT(t = tag);	(* temporary sanity check, always true => can remove indirection here *)
-		SYSTEM.GET(tag, s);
-		IF (SubObjBit IN s) & (SYSTEM.GET32(SYSTEM.VAL(LONGINT, s - {ArrayBit,FreeBit,MarkBit})-8) =  SYSTEM.TYPECODE(RootObject)) THEN
-			HALT(99)	(* untraced rootObj! *)
+			UNTIL (orgPtrOfs < MinPtrOfs)
 		END;
-		SYSTEM.PUT(tag, s + {MarkBit})	(* mark it *)
-	END
+		(* mark stack is empty *)
+		IF lowestForgotten = endBlockAdr THEN EXIT END;
+		FindForgottenBlock;
+		(* must continue *)
+		IF Trace & (12 IN traceHeap) THEN
+			AosOut.Enter;
+			AosOut.String("Overflow handling lowestForgotten="); AosOut.Int(lowestForgotten, 0); 
+			AosOut.String (" endBlockAdr="); AosOut.Int(endBlockAdr, 0); AosOut.Ln;
+			AosOut.Exit
+		END		
+	END;
+	ASSERT(markStackHeight = 0)
 END Mark;
+				
+(* Only used for handling overflows of the marking stack *)
+PROCEDURE FindForgottenBlock;
+VAR block, size, pTagAdr, tag, pTDescAdr, ptrOfs, lastArrayElemAdr, tmp, arrayElemSize, currentArrayElemAdr, 
+	refBlock, currentPtrOfsPos, refPTagAdr, refTag: LONGINT; isNormalBlock, isPtrArray, isMarkStackEntry: BOOLEAN;
+BEGIN
+	pTagAdr := SYSTEM.VAL(LONGINT, lowestForgotten);
+	ASSERT(pTagAdr MOD BlockSize = BlockSize-4);
+	WHILE pTagAdr # endBlockAdr DO
+		ASSERT(pTagAdr MOD BlockSize = BlockSize-4);
+		SYSTEM.GET(pTagAdr, tag);
+		SYSTEM.GET(tag - tag MOD 8, size); (* record size, excluding tag *)
+		IF ArrayBit IN SYSTEM.VAL(SET, tag) THEN
+			SYSTEM.GET(pTagAdr+4, lastArrayElemAdr); 
+			arrayElemSize := size;
+			size := lastArrayElemAdr + size - pTagAdr; (* size of array including tag *)
+			isPtrArray := TRUE;
+		ELSE
+			INC(size, 4); (* include tag *)
+			isPtrArray := FALSE
+		END;
+		size := SYSTEM.VAL(LONGINT, SYSTEM.VAL(SET, size + (BlockSize-1)) - SYSTEM.VAL(SET, BlockSize-1));	(* round up *)
+		ASSERT(size MOD BlockSize = 0);
+		
+		isNormalBlock := FALSE;
+		IF tag - tag MOD 8 = pTagAdr+4 THEN (* SysBlk, FreeBlk, TypeDesc, ProtRecBlk *)
+			IF ~(FreeBit IN SYSTEM.VAL(SET, tag)) THEN
+				SYSTEM.GET(pTagAdr + (4+20), tmp); (* tag or awaitingCond.head *)
+				IF tmp # pTagAdr+4 THEN (* ProtRecBlk or TypeDesc *)
+					SYSTEM.GET(pTagAdr+12, tmp); (* self address of typedesc or lockCount *)
+					IF (tmp > pTagAdr + 24) & (tmp < pTagAdr + size) & (tmp MOD 16 = 8) THEN
+						(* potential indirect address *)
+						SYSTEM.GET(tmp-4, tmp); 
+						IF tmp - tmp MOD 8 # pTagAdr+4 THEN (* ProtRecBlk *)
+							isNormalBlock := TRUE; block := pTagAdr + (4 + ProtOfs)
+						END
+					ELSE
+						isNormalBlock := TRUE; block := pTagAdr + (4 + ProtOfs)
+					END
+				END
+			END
+		ELSE
+			isNormalBlock := TRUE; block := pTagAdr + 4
+		END;
+				
+		(* -- look for non atomic and already marked block pointing to not yet marked blocks -- *)
+		isMarkStackEntry := FALSE;
+		IF isNormalBlock THEN (* RecBlk, ArrBlk, ProtRecBlk and block is defined *)
+			IF MarkBit IN SYSTEM.VAL(SET, tag) THEN (* marked *)
+				SYSTEM.GET(block-4, pTDescAdr);
+				pTDescAdr := SYSTEM.VAL(LONGINT, SYSTEM.VAL(SET, pTDescAdr) - {MarkBit, ArrayBit});
+				
+				SYSTEM.GET(pTDescAdr+4, ptrOfs); currentPtrOfsPos := 0;
+				IF ~(ptrOfs < MinPtrOfs) THEN (* not atomic *)
+					IF isPtrArray THEN 
+						SYSTEM.GET(block + 8, currentArrayElemAdr); (* firstElem *)
+					END;
+					REPEAT
+						IF isPtrArray THEN SYSTEM.GET(currentArrayElemAdr + ptrOfs, refBlock)
+						ELSE SYSTEM.GET(block + ptrOfs, refBlock)
+						END;
+						
+						IF refBlock # NilVal THEN
+							IF (refBlock >= beginBlockAdr) & (refBlock < endBlockAdr) THEN
+								(* compute tag address *)
+								IF ~(SubObjBit IN SYSTEM.VAL(SET, refBlock)) THEN
+									IF ~(ProtObjBit IN SYSTEM.VAL(SET, refBlock)) THEN (* RecBlk, ArrBlk *)
+										refPTagAdr := refBlock-4
+									ELSE (* ProtRecBlk *)
+										refPTagAdr := refBlock-(ProtOfs+4)
+									END
+								ELSE (* SysBlk, SysBlkArray, TypeDesc *)
+									SYSTEM.GET(refBlock-4, refPTagAdr); (* indirect tag *)
+									ASSERT(SYSTEM.VAL(SET, refPTagAdr) * {MarkBit} = {}); (* mark bit must not be set *)
+									refPTagAdr := SYSTEM.VAL(LONGINT, SYSTEM.VAL(SET, refPTagAdr) - {ArrayBit}) - 4; 
+										(* remove array bit because of array SysBlks in module block *)
+									ASSERT(SYSTEM.VAL(SET, SYSTEM.GET32(refPTagAdr)) - {MarkBit} = SYSTEM.VAL(SET, refPTagAdr+4))
+								END;
+								SYSTEM.GET(refPTagAdr, refTag);
+								IF ~(MarkBit IN SYSTEM.VAL(SET, refTag)) THEN (* referenced block is not marked *)
+									isMarkStackEntry := TRUE
+								END
+							END
+						END;
+						
+						(* advance to next pointer *)
+						INC(currentPtrOfsPos, 4);
+						SYSTEM.GET(pTDescAdr + 4 + currentPtrOfsPos, ptrOfs);
+						IF isPtrArray & (ptrOfs < MinPtrOfs) & (currentArrayElemAdr # lastArrayElemAdr) THEN
+							(* advance to next array element *)
+							INC(currentArrayElemAdr, arrayElemSize);
+							SYSTEM.GET(pTDescAdr + 4, ptrOfs); currentPtrOfsPos := 0;
+							ASSERT(~(ptrOfs < MinPtrOfs)); (* must not be atomic *)
+						END
+					UNTIL isMarkStackEntry OR (ptrOfs < MinPtrOfs)
+				END;
+				
+				IF isMarkStackEntry THEN
+					(* forgotten block *)
+					IF markStackHeight # MarkStackSize THEN
+						markStack[markStackHeight] := block; INC(markStackHeight)
+					ELSE (* overflow *)
+						RETURN (* ! continue with mark process, lowestForgotten = pTagAdr < endBlockAdr *)
+					END
+				END
+			END
+		END;
+		
+		(* advance to next block *)
+		INC(pTagAdr, size); lowestForgotten := pTagAdr
+	END
+	(* lowestForgotten = endBlockAdr *)
+END FindForgottenBlock;
 
 (** WriteType - Write a type name (for tracing only). *)
 
@@ -343,7 +482,7 @@ BEGIN
 						ELSE	(* protblk *)
 							IF 9 IN traceHeap THEN
 								SYSTEM.GET(p+(4+44), t);	(* tag *)
-								AosOut.String("[DP");  AosOut.Hex(p+(4+48), 9);  AosOut.Char(" ");  WriteType(t);  AosOut.Char("]")
+								AosOut.String("[DP");  AosOut.Hex(p+(4+ProtOfs), 9);  AosOut.Char(" ");  WriteType(t);  AosOut.Char("]")
 							END
 						END
 					END
@@ -448,6 +587,7 @@ BEGIN	(* {numCandidates > 0} *)
 	numCandidates := 0
 END CheckCandidates;
 
+
 (** RegisterCandidates - Register a block of pointer candidates.  {(adr,size) MOD 4 = 0} *)
 
 PROCEDURE RegisterCandidates*(adr, size: LONGINT);
@@ -494,6 +634,45 @@ BEGIN
 		INC(adr, 4)
 	END
 END RegisterCandidates;
+
+PROCEDURE CheckPointer*(p: LONGINT): BOOLEAN;
+VAR ret: BOOLEAN; tag, tag0: LONGINT; s: SET;
+BEGIN
+	ret := FALSE;
+	IF (p > beginBlockAdr) & (p < endBlockAdr) THEN
+		CASE p MOD BlockSize OF
+			0:	(* RecBlk or ArrBlk candidate *)
+				SYSTEM.GET(p-4, s);
+				IF (s * {MarkBit, FreeBit, SubObjBit} = {SubObjBit}) OR (s * {MarkBit, FreeBit, SubObjBit} = {MarkBit, SubObjBit}) THEN
+					ret := TRUE	
+				END
+		   |16:	(* ProtRecBlk candidate *)
+				SYSTEM.GET(p-4, s);
+				IF (s * {MarkBit, ArrayBit, FreeBit, SubObjBit} = {SubObjBit}) THEN
+					SYSTEM.GET(p-(ProtOfs+4), tag);
+					s := SYSTEM.VAL(SET, tag);
+					IF MarkBit IN s THEN EXCL(s, MarkBit); tag := SYSTEM.VAL(LONGINT, s) END;
+					IF tag = p-ProtOfs THEN
+						ret := TRUE
+					END
+				END
+		   |24:	(* SysBlk candidate *)
+				SYSTEM.GET(p-4, tag);
+				IF (tag MOD BlockSize = 0) & (tag > beginBlockAdr) & (tag < endBlockAdr) THEN
+					SYSTEM.GET(tag-4, tag0);
+					s := SYSTEM.VAL(SET, tag0);
+					IF MarkBit IN s THEN EXCL(s, MarkBit); tag0:= SYSTEM.VAL(LONGINT, s) END;
+					IF tag0 = tag THEN
+						IF tag0+24 = p THEN
+							ret := TRUE
+						END
+					END
+				END
+		ELSE (* skip - all other live heap block types (SubObj, TypeDesc) must be rooted  *)
+		END	(* CASE *)		
+	END;
+	RETURN ret
+END CheckPointer;
 
 (* Check reachability of finalized objects. *)
 
@@ -606,27 +785,27 @@ BEGIN
 	END
 END ShowTimeDiff;
 
-(** Garbage collector.  Caller MUST run in single-processor mode.  Lock level AosHeap. *)
-
-PROCEDURE CollectGarbage*(root: PTR);
+PROCEDURE CollectGarbage*(root : PTR); 
 VAR
 	tagAdr, i: LONGINT; tag: SET; obj: RootObject;
 	stack: ARRAY AosBoot.MaxCPU OF AosMemory.Stack;
 	time1, time2, time3, time4, time5, time6: HUGEINT; first: BOOLEAN;
 BEGIN
 	AosLocks.Acquire(AosLocks.AosHeap);	(* protect from interrupts *)
-	IF Stats THEN INC(Ngc) END;
+	IF Stats OR Trace THEN 
+		Nmark := 0; Nmarked := 0; Nsweeped := 0;
+		INC(Ngc); 
+		time1 := AosBoot.GetTimer();
+	END;
 	IF Trace & (traceHeap - {0,1,2,6} # {}) THEN
 		AosOut.String("[P"); AosOut.Int(AosBoot.ID(), 1);
 		AosOut.Char("@"); AosOut.Int(AosBoot.HIntToLInt(AosBoot.mhz), 1); AosOut.String("MHz ");
 		AosOut.String(" GC");
-		time1 := AosBoot.GetTimer()
 	END;
 	numCandidates := 0; rootList := NilVal;
-	IF Stats THEN Nmark := 0; Nmarked := 0; Nsweeped := 0 END;
 	Mark(root);
-	IF Trace THEN time2 := AosBoot.GetTimer(); first := TRUE END;
-		(* check kernel stacks *)
+	IF Stats OR Trace THEN time2 := AosBoot.GetTimer(); first := TRUE END;
+		(* check kernel stacks *)	
 	AosMemory.GetKernelStacks(stack);
 	FOR i := 0 TO AosBoot.MaxCPU-1 DO
 		RegisterCandidates(stack[i].adr, stack[i].high - stack[i].adr)
@@ -643,13 +822,13 @@ BEGIN
 					SYSTEM.GET(tagAdr, tag);	(* save *)
 					ASSERT(tag * {ArrayBit, FreeBit, SubObjBit} = {SubObjBit});	(* sanity check *)
 					SYSTEM.PUT(tagAdr, tag - {MarkBit});	(* allow type guards & method calls (only as long as not marked again) *)
-					obj.FindRoots;	(* will call Mark & RegisterCandidates *)
+					obj.FindRoots;	(* will call Mark *)
 					SYSTEM.PUT(tagAdr, tag)	(* restore *)
 				UNTIL rootList = NilVal
 			END;
-			IF numCandidates # 0 THEN CheckCandidates END
+			IF numCandidates # 0 THEN CheckCandidates END 
 		UNTIL (numCandidates = 0) & (rootList = NilVal);
-		IF Trace THEN
+		IF Stats OR Trace  THEN
 			IF first THEN first := FALSE; time3 := AosBoot.GetTimer() END	(* total time for finalized objects, with other roots *)
 		END;
 		CheckFinalizedObjects
@@ -658,12 +837,12 @@ BEGIN
 		SYSTEM.GET(rootList-4, tagAdr);
 		AosOut.String("rootList # NIL "); WriteType(tagAdr); AosOut.Ln
 	END;*)
-	IF Trace THEN time4 := AosBoot.GetTimer() END;
+	IF Stats OR Trace THEN time4 := AosBoot.GetTimer() END;
 	Sweep;
-	IF Trace THEN time5 := AosBoot.GetTimer() END;
+	IF Stats OR Trace THEN time5 := AosBoot.GetTimer() END;
 	IF DebugValue # 0 THEN DebugClear END;
+	IF Stats OR Trace THEN time6 := AosBoot.GetTimer(); END;
 	IF Trace & (traceHeap - {0,1,2,6} # {}) THEN
-		time6 := AosBoot.GetTimer();
 		ShowTimeDiff(time1, time6, "tot");
 		ShowTimeDiff(time1, time2, "mod");
 		ShowTimeDiff(time2, time3, "obj");
@@ -679,6 +858,13 @@ BEGIN
 		END;
 		IF traceHeap * {3..5, 8..9, 11} # {} THEN AosOut.String(" (with tracing)") END;
 		AosOut.String(" CG]");  AosOut.Ln
+	END;
+	IF Stats THEN
+		NgcCyclesLastRun := AosBoot.SubH(time6, time1);
+		IF AosBoot.GreaterH(NgcCyclesLastRun, NgcCyclesMax) THEN NgcCyclesMax := NgcCyclesLastRun; END;
+		NgcCyclesAllRuns := AosBoot.AddH(NgcCyclesAllRuns, NgcCyclesLastRun);
+		NgcCyclesSweep := AosBoot.SubH(time5, time4);
+		NgcCyclesMark := AosBoot.SubH(time4, time1);
 	END;
 	AosLocks.Release(AosLocks.AosHeap)
 END CollectGarbage;
@@ -721,7 +907,7 @@ BEGIN
 		GC;	(* try to free memory (other processes may also steal memory now) *)
 		AosLocks.Acquire(AosLocks.AosHeap)
 	END;
-	IF Stats THEN INC(Nnew); INC(NnewBytes, size) END;
+	IF Stats THEN INC(Nnew); NnewBytes := AosBoot.AddH(NnewBytes, size); END;
 	try := 1;
 	LOOP
 		idx := size DIV BlockSize;	(* idx negative if size negative *)
@@ -1029,6 +1215,12 @@ BEGIN
 	END
 END PeriodicCleanup;
 *)
+(* ug *)
+PROCEDURE TestGC*(par : ANY): ANY;
+BEGIN
+	GC;
+	RETURN NIL
+END TestGC;
 
 (* NilGC - Default garbage collector. *)
 
@@ -1111,6 +1303,7 @@ TraceHeap:
 9	512	DP deallocate protrec #
 10	1024	finalizers
 11	2048	live/dead #
+12 4096 trace mark stack overflows #
 
 # influences timing
 *)
@@ -1124,4 +1317,6 @@ TraceHeap:
 26.01.1999	pjm	Incorporated changes for new compiler
 10.11.2000	pjm	Finalizers
 26.01.2001	pjm	Removed trapReserve, reimplemented NewBlock
+11.11.2004	lb	   Garbage collector with marking stack
+19.06.2007	ug	Garbage collector using meta data for stack inspection (cf. AosActive)
 *)

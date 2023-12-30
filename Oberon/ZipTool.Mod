@@ -162,6 +162,7 @@ VAR
 BEGIN
 	IF action = EXTRACT THEN
 		IF ~path THEN
+	(*		GetSuffix(name, name, ':'); *)
 			GetSuffix(name, name, '/')
 		END;
 		f := Files.New(name);
@@ -438,35 +439,39 @@ BEGIN
 END AddFile;
 
 (** Adds the selected files to the selected zip-archive.
-	ZipTool.Add [\level [\strategy]] (^ | ZipFile (^ | {Entry [=> NewName]}))
+	ZipTool.Add [\level [\strategy]] [\p] (^ | ZipFile (^ | {Entry [=> NewName]}))
 	Options:
 	\level: specifies the compression level (0: no compression, 9: best compression)
 		if not set, default level (-1) is used
-	\strategy: specifies the compression strategy (from 0 - 2) **)
+	\strategy: specifies the compression strategy (from 0 - 2)
+	\p: remove prefix from filename **)
 PROCEDURE Add*();
 VAR
 	S: Texts.Scanner; T: Texts.Text; beg, end, time, res: LONGINT;
-	arc: Zip.Archive;
-	strategy, level: SHORTINT;
+	arc: Zip.Archive; i, j: LONGINT;
+	strategy, level: SHORTINT; prefix: BOOLEAN;
 	oldname, newname: ARRAY 256 OF CHAR;
 BEGIN
 	Texts.WriteString(W, "ZipTool.Add ");
-	T := Oberon.Par.text;
+	T := Oberon.Par.text; prefix := TRUE;
 	level := Zip.DefaultCompression;
 	strategy := Zip.DefaultStrategy;
 	Texts.OpenScanner(S, Oberon.Par.text, Oberon.Par.pos); Texts.Scan(S);
-	IF (S.class = Texts.Char) & (S.c = '\') THEN	(* read level *)
+	WHILE (S.class = Texts.Char) & (S.c = '\') DO
 		Texts.Scan(S);
 		IF S.class = Texts.Int THEN
-			level := SHORT(SHORT(S.i));
-			Texts.Scan(S);
-			IF (S.class = Texts.Char) & (S.c = '\') THEN	(* read strategy *)
+			level := SHORT(SHORT(S.i)); Texts.Scan(S);
+			IF (S.class = Texts.Char) & (S.c = '\') THEN
 				Texts.Scan(S);
 				IF S.class = Texts.Int THEN
-					strategy := SHORT(SHORT(S.i));
-					Texts.Scan(S)
+					strategy := SHORT(SHORT(S.i)); Texts.Scan(S)
 				END
 			END
+		ELSIF (S.class = Texts.Name) & (S.s = "p") THEN
+			prefix := FALSE; Texts.Scan(S)
+		ELSE
+			Texts.WriteString(W, "unknown option"); Texts.WriteLn(W);
+			Texts.Append(Oberon.Log, W.buf); RETURN
 		END
 	END;
 	IF (S.class = Texts.Char) & (S.c = "^") THEN
@@ -486,7 +491,21 @@ BEGIN
 				end := T.len
 			END;
 			WHILE (S.class IN {Texts.Name, Texts.String}) & (Texts.Pos(S) <= (end + S.len)) DO
-				COPY(S.s, oldname); COPY(S.s, newname);
+				COPY(S.s, oldname); 
+				IF ~prefix THEN
+					i := 0; j := 0;
+					WHILE S.s[i] # 0X DO
+						IF S.s[i] = ":" THEN
+							j := 0
+						ELSE
+							newname[j] := S.s[i]; INC(j)
+						END;
+						INC(i)
+					END;
+					newname[j] := 0X
+				ELSE
+					COPY(S.s, newname)
+				END;
 				Texts.Scan(S);
 				IF (S.class = Texts.Char) & (S.c = "=") THEN
 					Texts.Scan(S);

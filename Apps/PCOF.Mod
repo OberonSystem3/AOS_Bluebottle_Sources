@@ -3,19 +3,33 @@
 MODULE PCOF; (** AUTHOR "prk / be"; PURPOSE "Parallel Compiler: object file plug-in"; *)
 
 IMPORT
-		SYSTEM, AosOut,
-		StringPool, PCDebug, PCBT, PCLIR, PCM, PCT, PCOM;
+	SYSTEM, AosOut,
+	StringPool, PCDebug, PCBT, PCLIR, PCM, PCT, PCOM;
 
 CONST
 	TraceUse = FALSE;
 	Optimize = FALSE;
 	
 	NewRefSection = TRUE;
+	
+	Sentinel = 0FFFFFFFFH;
 
 	EUEnd = 0X; EURecord = 1X; EUProcFlag = 080000000H;
 	
+	
 TYPE
 	StringBuf = ARRAY 256 OF CHAR;
+	
+	OffsetList = POINTER TO RECORD
+		offset : LONGINT;
+		nextOffset : OffsetList
+	END;
+		
+	ExTableEntry = POINTER TO RECORD
+		pcFrom*, pcTo*, pcHandler*: LONGINT;
+		next*: ExTableEntry;
+	END;
+	
 
 VAR
 	refSize: LONGINT;
@@ -23,10 +37,12 @@ VAR
 	dsize: LONGINT;
 	
 	globR: PCM.Rider;	(* used for OutReference *)
-
-		(* stat counters *)
-	Nreschedule0, Nreschedule1, Nreschedule2: LONGINT;
 	
+		(* stat counters *)
+	Nreschedule0, Nreschedule1, Nreschedule2: LONGINT;	
+	
+	exTable: ExTableEntry;
+	exTableLen: LONGINT;
 	
 (* ---------- Helper Procedures -------------- *)
 
@@ -142,19 +158,110 @@ BEGIN
 	END;
 END OutRefVar;
 
+PROCEDURE CheckAll(s: PCT.Symbol); (* fof *) 
+VAR name: ARRAY 256 OF CHAR;	
+
+	PROCEDURE CheckType(s: PCT.Type);
+	BEGIN
+		IF ~(PCT.used IN s.flags) & (s.pos # 0) & (PCT.Public * s.vis = {})  THEN 
+			StringPool.GetString(s.name,name); 
+			PCM.Warning(900,s.pos,name); 
+		END; 
+	END CheckType;
+	
+	PROCEDURE CheckProc(s: PCT.Proc);
+	BEGIN
+		IF ~(PCT.used IN s.flags) & (s.pos # 0) & (PCT.Public * s.vis = {})  THEN 
+			StringPool.GetString(s.name,name); 
+			PCM.Warning(900,s.pos,name); 
+		END; 
+	END CheckProc;
+	
+	PROCEDURE CheckVar(s: PCT.Variable);
+	BEGIN
+		IF ~(PCT.used IN s.flags) & (s.pos # 0) & (PCT.Public * s.vis = {})  THEN 
+			StringPool.GetString(s.name,name); 
+			PCM.Warning(900,s.pos,name); 
+		END; 
+	END CheckVar;
+	
+	PROCEDURE CheckVal(s: PCT.Value);
+	BEGIN
+		IF ~(PCT.used IN s.flags) & (s.pos # 0) & (PCT.Public * s.vis = {})  THEN 
+			StringPool.GetString(s.name,name); 
+			PCM.Warning(900,s.pos,name); 
+		END; 
+	END CheckVal;
+
+BEGIN
+	WHILE(s#NIL) DO 
+		IF s IS PCT.Value THEN 
+			CheckVal(s(PCT.Value)); 
+		ELSIF s IS PCT.Type THEN 
+			CheckType(s(PCT.Type))
+		ELSIF s IS PCT.Proc THEN 
+			CheckProc(s(PCT.Proc))
+		ELSIF s IS PCT.Variable THEN 
+			CheckVar(s(PCT.Variable))
+		END; 
+		s :=s.sorted; 
+	END; 
+END CheckAll;
+
+PROCEDURE CheckModules(mod: PCT.Module);
+VAR i: LONGINT; name: ARRAY 256 OF CHAR;
+
+	PROCEDURE CheckMod(s: PCT.Module);
+	BEGIN
+            	IF (s#NIL) & ~(PCT.used IN s.flags) & (s.pos # 0) & (PCT.Public * s.vis = {})  THEN
+                    StringPool.GetString(s.name,name);
+                    PCM.Warning(900,s.pos,name);
+		END;
+	END CheckMod;
+
+BEGIN
+    IF mod.directImps = NIL THEN RETURN END;
+    FOR i := 0 TO LEN(mod.directImps)-1 DO
+        CheckMod(mod.directImps[i]);
+    END;
+END CheckModules;
+
 PROCEDURE OutReference(scope: PCT.Scope);
-VAR  owner: PCT.Proc;  i: LONGINT; var: PCT.Variable; par: PCT.Parameter; name: StringBuf;
+VAR  owner: PCT.Proc; i: LONGINT; var: PCT.Variable; par: PCT.Parameter; name: StringBuf; entry: ExTableEntry; mod: PCT.Module;
 BEGIN
 (*
 	IF (scope.code = NIL) THEN RETURN  END;
 *)
+	CheckAll(scope.firstVar);  (* fof *) 
+	
 	IF scope IS PCT.ModScope THEN
+		CheckModules(scope.module); (* fof *)
 		PCM.RefW(globR, 0F8X);
 		COPY("$$", name);
 		PCM.RefWNum(globR, 0); (* offset *)
 		PCM.RefWString(globR, "$$"); (* name *)
 		var := scope.firstVar;
-		WHILE var # NIL DO OutRefVar(var, FALSE); var := var.nextVar END
+		WHILE var # NIL DO OutRefVar(var, FALSE); var := var.nextVar END;
+		
+		mod := scope(PCT.ModScope).owner;
+		
+		IF mod.adr(PCBT.Module).finallyOff > -1 THEN						
+			
+			NEW(entry);			
+			entry.pcFrom := 0;
+			entry.pcTo := mod.adr(PCBT.Module).finallyOff;
+			entry.pcHandler := mod.adr(PCBT.Module).finallyOff;
+			entry.next := NIL;
+			
+			IF exTable # NIL THEN
+				entry.next := exTable;
+			END;
+			
+			exTable := entry;
+			
+			INC(exTableLen);
+		END;
+		
 	ELSIF scope IS PCT.ProcScope THEN
 		WITH scope: PCT.ProcScope DO
 			owner := scope.ownerO;
@@ -184,13 +291,30 @@ BEGIN
 				WHILE par # NIL DO OutRefVar(par, par.ref); par := par.nextPar END;
 				var := scope.firstVar;
 				WHILE var # NIL DO OutRefVar(var, FALSE); var := var.nextVar END
-			END
-		END
+			END;
+		
+			IF owner.adr(PCBT.Procedure). finallyOff > -1 THEN							
+			
+				NEW(entry);
+				entry.pcFrom := owner.adr(PCBT.Procedure).codeoffset;
+				entry.pcTo := owner.adr(PCBT.Procedure).finallyOff;
+				entry.pcHandler := owner.adr(PCBT.Procedure).finallyOff;
+				entry.next := NIL;									
+				
+				IF exTable # NIL THEN
+					entry.next := exTable;
+				END;
+			
+				exTable := entry;
+				INC(exTableLen);				
+			END;
+		END;
 	END
 END OutReference;
 
 PROCEDURE Generate*(VAR R: PCM.Rider; scope: PCT.ModScope;  VAR codeSize: LONGINT);
-VAR commands: ARRAY 64 OF PCT.Symbol;  i, nofptrs, EntriesPos, PtrPos, LinksPos, VarConsPos: LONGINT;
+VAR commands: ARRAY 128 OF PCT.Symbol;  
+	i, nofptrs, nofProcs, maxPtrs, EntriesPos, PtrPos, nofProcsPos, maxPtrsPos, LinksPos, VarConsPos: LONGINT;
 	adr: PCBT.Module; mod: PCT.Module;  sym: PCOM.Module; emptyR: PCM.Rider;
 	code: PCLIR.CodeArray; str: StringBuf; hdrCodeSize, addressFactor: LONGINT;
 
@@ -209,12 +333,18 @@ VAR commands: ARRAY 64 OF PCT.Symbol;  i, nofptrs, EntriesPos, PtrPos, LinksPos,
 		nofCmds := 0;
 		proc := scope.firstProc;
 		WHILE (proc # NIL) DO
-			IF (proc.vis = PCT.Public) & ~(PCT.Inline IN proc.flags) THEN
-				IF (proc.scope.firstPar = NIL) & (proc.type = PCT.NoType) THEN
+			IF (proc.vis = PCT.Public) & (~(PCT.Inline IN proc.flags) OR (PCT.Indexer IN proc.flags)) THEN
+				(* ug *)
+				IF 	(proc.scope.formalParCount = 0) & (proc.type = PCT.NoType) OR 
+				  	(proc.scope.formalParCount = 1) & (proc.scope.firstPar.type = PCT.Ptr) & (proc.type = PCT.Ptr) THEN
+					commands[nofCmds] := proc; INC(nofCmds);
+				END;
+(*				IF (proc.scope.firstPar = NIL) & (proc.type = PCT.NoType) THEN
 					commands[nofCmds] := proc; INC(nofCmds)
 				ELSIF (proc.scope.firstPar # NIL) & (proc.scope.firstPar.nextPar = NIL) & (proc.scope.firstPar.type = PCT.Ptr) & (proc.type = PCT.Ptr) THEN
 					commands[nofCmds] := proc; INC(nofCmds)
 				END
+*)
 			END;
 			proc := proc.nextProc
 		END;
@@ -243,7 +373,8 @@ VAR commands: ARRAY 64 OF PCT.Symbol;  i, nofptrs, EntriesPos, PtrPos, LinksPos,
 					bsym := rec.brec.sym(PCOM.Struct);
 					IF bsym.mod # scope.owner THEN UseModule(bsym.mod.adr(PCBT.Module)) END
 				END;
-				rec := rec.link
+				rec := rec.link;
+ 				ASSERT(rec # scope.records, MAX(INTEGER)); (* TODO: Fix bug, sometimes this assertion fails. *)
 			END
 		END;
 (*
@@ -254,18 +385,24 @@ VAR commands: ARRAY 64 OF PCT.Symbol;  i, nofptrs, EntriesPos, PtrPos, LinksPos,
 *)
 	END CollectInfo;
 	
-	PROCEDURE OutPtrs(offset: LONGINT;  type: PCT.Struct);
+	PROCEDURE OutPtrs(offset: LONGINT;  type: PCT.Struct; debug : BOOLEAN);
 	VAR  i, n, off: LONGINT;  f: PCT.Variable; scope: PCT.Scope;  base: PCT.Struct; size: PCBT.Size;
 		name: StringBuf; state: LONGINT;
 	BEGIN
 		IF type.size(PCBT.Size).containPtrs THEN
 			IF PCT.IsPointer(type) THEN
-				PCM.ObjWLInt(R, offset); INC(nofptrs);
-			ELSIF (type IS PCT.Delegate) & ~(PCT.StaticMethodsOnly IN type.flags) THEN
-				PCM.ObjWLInt(R, offset+4); INC(nofptrs);
+				PCM.ObjWNum(R, offset); INC(nofptrs);
+				IF debug THEN 
+					AosOut.Int(offset, 0); AosOut.String(" "); (* AosOut.Ln; *)
+				END
+			ELSIF PCT.IsDynamicDelegate(type) THEN
+				PCM.ObjWNum(R, offset+4); INC(nofptrs);
+				IF debug THEN 
+					AosOut.Int(offset+4, 0); AosOut.String(" "); (* AosOut.Ln; *)
+				END
 			ELSIF type IS PCT.Record THEN
 				WITH type: PCT.Record DO
-					IF type.brec # NIL THEN  OutPtrs(offset, type.brec)  END;
+					IF type.brec # NIL THEN OutPtrs(offset, type.brec, debug)  END;
 					scope := type.scope;
 				END;
 				f := scope.firstVar;
@@ -274,10 +411,10 @@ VAR commands: ARRAY 64 OF PCT.Symbol;  i, nofptrs, EntriesPos, PtrPos, LinksPos,
 						StringPool.GetString(f.name, name); state := scope.state;
 						ASSERT(state >= PCT.structallocated);
 						type := f.type;  off := f.adr(PCBT.Variable).offset;
-						OutPtrs(offset+off, type)
+						OutPtrs(offset+off, type, debug)
 					END;
 					f := f.nextVar
-				END
+				END;
 			ELSIF type IS PCT.Array THEN
 				WITH type: PCT.Array DO
 					IF type.mode = PCT.static THEN
@@ -290,7 +427,7 @@ VAR commands: ARRAY 64 OF PCT.Symbol;  i, nofptrs, EntriesPos, PtrPos, LinksPos,
 						END;
 						size := base.size(PCBT.Size);
 						IF size.containPtrs THEN
-							FOR i := 0 TO n-1 DO  OutPtrs(offset+i*size.size, base)  END
+							FOR i := 0 TO n-1 DO OutPtrs(offset+i*size.size, base, debug)  END
 						END
 					ELSE
 						PCDebug.ToDo(PCDebug.NotImplemented);	(*find pointers in the array, call NewPtr for each one*)
@@ -300,64 +437,64 @@ VAR commands: ARRAY 64 OF PCT.Symbol;  i, nofptrs, EntriesPos, PtrPos, LinksPos,
 		END
 	END OutPtrs;
 	
-	PROCEDURE FixupList(l: PCBT.Fixup;  addressFactor, base, entryNr, sentinel: LONGINT);
-	(* Insert fixup list into table starting at base (can be either const or code). If entryNr = -1 don't write the entryNr in the table *)
+	PROCEDURE FixupList(l: PCBT.Fixup;  addressFactor, base, sentinel: LONGINT; prev: PCBT.Fixup; VAR tail: PCBT.Fixup);
+	(* Insert fixup list into code *)
 		VAR offset: LONGINT;
 	BEGIN
-		ASSERT(entryNr < 10000H);
-		ASSERT(sentinel < 10000H);
+		tail := NIL;
 		IF l # NIL THEN
-(*PCM.LogWLn;*)
+			IF prev # NIL THEN
+				SYSTEM.PUT(base + prev.offset*addressFactor, l.offset);
+			END;
 			offset := l.offset;
+			tail := l;
 			l := l.next;
 			WHILE l # NIL DO
-(*PCM.LogWStr("  "); PCM.LogWHex(offset);*)
-				IF entryNr # -1 THEN SYSTEM.PUT(base+offset*addressFactor+0, SHORT(entryNr)) END;
-				SYSTEM.PUT(base+offset*addressFactor+2, SHORT(l.offset));
+				SYSTEM.PUT(base+offset*addressFactor, l.offset);
 				offset := l.offset;
+				tail := l;
 				l := l.next;
 			END;
-			IF entryNr # -1 THEN SYSTEM.PUT(base+offset*addressFactor+0, SHORT(entryNr)) END;
-			SYSTEM.PUT(base+offset*addressFactor+2, SHORT(sentinel));
+			SYSTEM.PUT(base+offset*addressFactor, sentinel);
 		END;
 	END FixupList;
 	
 	PROCEDURE InsertFixupLists(addressFactor: LONGINT);
-		VAR p: PCBT.Procedure; i, codebase: LONGINT;
+		VAR p: PCBT.Procedure; i, codebase: LONGINT; dummy : PCBT.Fixup;
 	BEGIN
-(*PCM.LogWLn; PCM.LogWStr("InsertFixupLists");*)
 		codebase := SYSTEM.ADR(code[0]);
 		FOR i := 0 TO PCBT.NofSysCalls-1 DO
-(*PCM.LogWLn; PCM.LogWStr("Insert SysCall"); PCM.LogWNum(i);*)
-			IF i = PCBT.casetable THEN
-				FixupList(adr.syscalls[i], addressFactor, SYSTEM.ADR(adr.const[0]), -1, 0FFFFH)
-			ELSE
-				FixupList(adr.syscalls[i], addressFactor, codebase, 0, 0FFFFH)
+			IF i # PCBT.casetable THEN
+				FixupList(adr.syscalls[i], addressFactor, codebase, Sentinel, NIL, dummy)
 			END
 		END;
-(*PCM.LogWLn; PCM.LogWStr("Externals");*)
 		p := adr.ExtProcs;
 		WHILE p # PCBT.psentinel DO
 			ASSERT(p.owner # PCBT.context);
-			FixupList(p.link, addressFactor, codebase, 0, 0FFFFH);
+			FixupList(p.link, addressFactor, codebase, Sentinel, NIL, dummy);
 			p := p.next
 		END;
 	END InsertFixupLists;
 	
 	PROCEDURE EntryBlock(addressFactor: LONGINT);
-	VAR nofEntries, sentinel, codebase: LONGINT;
+	VAR nofEntries, codebase, firstOffset: LONGINT;
 		
 		PROCEDURE Traverse(p: PCBT.Procedure);
+		VAR prev, tail : PCBT.Fixup; 
 		BEGIN
+			prev := NIL;
 			WHILE p # PCBT.psentinel DO
 				IF (p.public) OR (p.link # NIL) OR (p IS PCBT.Method) THEN
-					PCM.ObjWInt(R, SHORT(p.codeoffset));
+					PCM.ObjWNum(R, p.codeoffset);
 					p.entryNr := nofEntries;
 					INC(nofEntries);
-					IF p.link # NIL THEN
-						FixupList(p.link, addressFactor, codebase, p.entryNr, sentinel);
-						sentinel := p.link.offset;
-					END
+					FixupList(p.link, addressFactor, codebase, Sentinel, prev, tail);
+					IF tail # NIL THEN 
+						prev := tail 
+					END;
+					IF (p.link # NIL) & (firstOffset = -1) THEN 
+						firstOffset := p.link.offset 
+					END;
 				END;
 				p := p.next
 			END
@@ -365,14 +502,15 @@ VAR commands: ARRAY 64 OF PCT.Symbol;  i, nofptrs, EntriesPos, PtrPos, LinksPos,
 	
 	BEGIN
 		PCM.ObjW(R, 82X);
-		nofEntries := 0; sentinel := 0FFFFH;
+		nofEntries := 0;
 		codebase := SYSTEM.ADR(code[0]);
+		firstOffset := -1;
 		Traverse(adr.OwnProcs);
 (*
 		Traverse(adr.ExtProcs);
 *)
-		IF sentinel # 0FFFFH THEN adr.UseSyscall(PCBT.procaddr, sentinel) END;
-		IF nofEntries # 0 THEN PCM.ObjWIntAt(R, EntriesPos, SHORT(nofEntries)) END
+		IF firstOffset # -1 THEN adr.UseSyscall(PCBT.procaddr, firstOffset) END;
+		IF nofEntries # 0 THEN PCM.ObjWLIntAt(R, EntriesPos, nofEntries) END
 	END EntryBlock;
 	
 	PROCEDURE CommandBlock;
@@ -384,7 +522,7 @@ VAR commands: ARRAY 64 OF PCT.Symbol;  i, nofptrs, EntriesPos, PtrPos, LinksPos,
 			IF commands[i].type # PCT.NoType THEN PCM.ObjW(R, "$") END;
 			StringPool.GetString(commands[i].name, str);
 			PCM.ObjWName(R, str);
-			PCM.ObjWInt(R, SHORT(commands[i].adr(PCBT.Procedure).codeoffset));
+			PCM.ObjWNum(R, commands[i].adr(PCBT.Procedure).codeoffset);
 			INC(i)
 		END
 	END CommandBlock;
@@ -393,15 +531,23 @@ VAR commands: ARRAY 64 OF PCT.Symbol;  i, nofptrs, EntriesPos, PtrPos, LinksPos,
 	VAR   p: PCT.Variable;
 	BEGIN
 		PCM.ObjW(R, 84X);
-		nofptrs := 0; p := scope.firstVar;
+		nofptrs := 0; 
+		p := scope.firstVar;
 		WHILE p # NIL DO
-			IF ~(PCM.Untraced IN p.flags) THEN
-				OutPtrs(p.adr(PCBT.GlobalVariable).offset, p.type)
+			IF ~(PCM.Untraced IN p.flags) & (p.adr # NIL) THEN
+				OutPtrs(p.adr(PCBT.GlobalVariable).offset, p.type, FALSE)  (* debug = FALSE *)
+			END;
+			p := p.nextVar
+		END;
+		p := scope.firstHiddenVar;
+		WHILE p # NIL DO
+			IF p.adr # NIL THEN (* ug: checking for PCM.Untraced not necessary here, flags of hidden variables always {} *)
+				OutPtrs(p.adr(PCBT.GlobalVariable).offset, p.type, FALSE)	(* debug = FALSE *)
 			END;
 			p := p.nextVar
 		END;
 		IF nofptrs > MAX(INTEGER) THEN PCM.Error(222, 0, "") END;
-		IF nofptrs # 0 THEN  PCM.ObjWIntAt(R, PtrPos, SHORT(nofptrs))  END;
+		IF nofptrs # 0 THEN PCM.ObjWLIntAt(R, PtrPos, nofptrs) END;
 	END PointerBlock;
 
 	PROCEDURE ImportBlock;
@@ -452,7 +598,7 @@ VAR commands: ARRAY 64 OF PCT.Symbol;  i, nofptrs, EntriesPos, PtrPos, LinksPos,
 		PROCEDURE FixList(p: PCBT.Fixup);
 		BEGIN
 			WHILE p # NIL DO
-				PCM.ObjWInt(R, SHORT(p.offset)); p := p.next; INC(count)
+				PCM.ObjWNum(R, p.offset); p := p.next; INC(count)
 			END
 		END FixList;
 		
@@ -460,14 +606,14 @@ VAR commands: ARRAY 64 OF PCT.Symbol;  i, nofptrs, EntriesPos, PtrPos, LinksPos,
 		PCM.ObjW(R, 8DX);
 		(*first pass: local GVars*)
 		nofVarCons := 0;
-		PCM.ObjW(R, 0X);  PCM.ObjWInt(R, -1);  PCM.ObjWGetPos(R, pos);  PCM.ObjWInt(R, -1);
+		PCM.ObjW(R, 0X);  PCM.ObjWNum(R, -1);  PCM.ObjWGetPos(R, pos);  PCM.ObjWLInt(R, -1);
 		p := adr.OwnVars;  count := 0;
 		WHILE p # PCBT.sentinel DO
 			FixList(p.link);
 			ASSERT(p.entryNo = PCBT.UndefEntryNo);
 			p := p.next
 		END;
-		PCM.ObjWIntAt(R, pos, SHORT(count));
+		PCM.ObjWLIntAt(R, pos, count);
 		INC(nofVarCons);
 		
 		(*second pass: imported GVars*)
@@ -476,25 +622,48 @@ VAR commands: ARRAY 64 OF PCT.Symbol;  i, nofptrs, EntriesPos, PtrPos, LinksPos,
 			IF (p.link # NIL) THEN
 				p.entryNo := nofVarCons;	(* remember the position for the UseSection *)
 				count := 0;  INC(nofVarCons);
-				PCM.ObjW(R, CHR(p.owner.nr));  PCM.ObjWInt(R, 0);  PCM.ObjWGetPos(R, pos);  PCM.ObjWInt(R, -1);
+				PCM.ObjW(R, CHR(p.owner.nr));  PCM.ObjWNum(R, 0);  PCM.ObjWGetPos(R, pos);  PCM.ObjWLInt(R, -1);
 				FixList(p.link);
-				PCM.ObjWIntAt(R, pos, SHORT(count));
+				PCM.ObjWLIntAt(R, pos, count);
 			END;
 			p := p.next
 		END;
 	END VarConsBlock;
 	
 	PROCEDURE LinkBlock;
-		VAR nofLinks: LONGINT;
+		VAR nofLinks: LONGINT; p: PCBT.Procedure; count : LONGINT;
+
+		(* ug *)		
+		PROCEDURE CountFixups(p: PCBT.Procedure; VAR count: LONGINT);
+		VAR f : PCBT.Fixup;
+		BEGIN
+			count := 0;
+			f := p.link;
+			WHILE f # NIL DO
+				INC(count);
+				f := f.next;
+			END
+		END CountFixups;
+		
 	BEGIN
 		PCM.ObjW(R, 86X);
 		FOR i := 0 TO PCBT.NofSysCalls-1 DO
 			IF adr.syscalls[i] # NIL THEN
-				PCM.ObjW(R, 0X);  PCM.ObjW(R, PCLIR.CG.SysCallMap[i]);  PCM.ObjWInt(R, SHORT(adr.syscalls[i].offset));
+				PCM.ObjW(R, 0X);  PCM.ObjW(R, PCLIR.CG.SysCallMap[i]);  PCM.ObjWNum(R, adr.syscalls[i].offset);
 				INC(nofLinks)
 			END
 		END;
-		IF nofLinks # 0 THEN PCM.ObjWIntAt(R, LinksPos, SHORT(nofLinks)) END
+		(* ug *)
+		p := adr.OwnProcs;
+		WHILE p # PCBT.psentinel DO
+			IF (p.public) OR (p.link # NIL) OR (p IS PCBT.Method) THEN
+				CountFixups(p, count);
+				PCM.ObjWNum(R, count)
+			END;
+			p := p.next;
+		END;
+		PCM.ObjWNum(R, adr.casetablesize);
+		IF nofLinks # 0 THEN PCM.ObjWLIntAt(R, LinksPos, nofLinks) END
 	END LinkBlock;
 
 	PROCEDURE UseBlock;
@@ -539,7 +708,7 @@ VAR commands: ARRAY 64 OF PCT.Symbol;  i, nofptrs, EntriesPos, PtrPos, LinksPos,
 							PCM.ObjW(R, EUEnd);
 							size.td := NIL;	(*avoid double tracing*)
 						ELSE
-								(* aliasing of imported type: schedule module for emission in use list *)
+							(* aliasing of imported type: schedule module for emission in use list *)
 							j := i+1;
 							LOOP
 								IF j = LEN(mod.imports) THEN
@@ -625,8 +794,9 @@ VAR commands: ARRAY 64 OF PCT.Symbol;  i, nofptrs, EntriesPos, PtrPos, LinksPos,
 		Other: link = 0
 	*)
 	PROCEDURE ExportBlock;
+	TYPE ExpList = POINTER TO ARRAY OF LONGINT;
 	VAR count, nofstr: INTEGER;  pos: LONGINT; 
-		explist: ARRAY 256 OF LONGINT; exppos: LONGINT;
+		explist: ExpList; exppos, explen: LONGINT;
 		v: PCT.Variable; p: PCT.Proc; t: PCT.Type; c: PCT.Value;
 	
 		PROCEDURE ExportType(t: PCT.Struct);
@@ -645,24 +815,24 @@ VAR commands: ARRAY 64 OF PCT.Symbol;  i, nofptrs, EntriesPos, PtrPos, LinksPos,
 						count := 0;
 						INC(nofstr);  sym.uref := nofstr;	(*remember it's exported*)
 						PCM.ObjWNum(R, t.size(PCBT.RecSize).td.offset);	(* link address in the constant section*)
-						PCM.ObjWGetPos(R, pos);  PCM.ObjWInt(R, 2);	(* number of entries *)
+						PCM.ObjWGetPos(R, pos);  PCM.ObjWLInt(R, 2);	(* number of entries *)
 						ExportType(t.btyp);
 						PCM.ObjWNum(R, sym.pbfp);  PCM.ObjWNum(R, sym.pvfp);
 						v := t.scope.firstVar;
-						WHILE p # NIL DO
+						WHILE v # NIL DO
 							IF v.vis # PCT.Internal THEN
-								PCM.ObjWNum(R, v.sym(PCOM.Symbol).fp); ExportType(v.type); INC(count)
+								PCM.ObjWNum(R, v.sym(PCOM.Symbol).fp); ExportType(v.type); INC(count);
 							END;
 							v := v.nextVar
 						END;
 						p := t.scope.firstProc;
 						WHILE p # NIL DO
 							IF (p.vis # PCT.Internal) & (p # t.scope.body) THEN
-								PCM.ObjWNum(R, p.sym(PCOM.Symbol).fp); INC(count)
+								PCM.ObjWNum(R, p.sym(PCOM.Symbol).fp); INC(count);
 							END;
 							p := p.nextProc
 						END;
-						IF count # 0 THEN  PCM.ObjWIntAt(R, pos, count+2)  END;
+						IF count # 0 THEN  PCM.ObjWLIntAt(R, pos, count+2) END;
 						PCM.ObjW(R, EUEnd)
 					END
 				END
@@ -670,12 +840,17 @@ VAR commands: ARRAY 64 OF PCT.Symbol;  i, nofptrs, EntriesPos, PtrPos, LinksPos,
 		END ExportType;
 		
 		PROCEDURE ExportSymbol(p: PCT.Symbol; offset: LONGINT);
-			VAR i, fp: LONGINT; name: ARRAY 256 OF CHAR;
+			VAR i, fp: LONGINT; name: ARRAY 256 OF CHAR; explist2: ExpList;
 		BEGIN
 			StringPool.GetString(p.name, name);
 			fp := p.sym(PCOM.Symbol).fp;
 			FOR i := 0 TO exppos-1 DO
 				IF fp = explist[i] THEN  PCM.ErrorN(280, -1, p.name) END
+			END;
+			IF exppos >= explen THEN
+				NEW(explist2, 2*explen);
+				SYSTEM.MOVE(SYSTEM.ADR(explist[0]), SYSTEM.ADR(explist2[0]), 4*explen);
+				explist := explist2; explen := 2*explen
 			END;
 			explist[exppos] := fp; INC(exppos);
 			PCM.ObjWNum(R, fp);
@@ -683,9 +858,11 @@ VAR commands: ARRAY 64 OF PCT.Symbol;  i, nofptrs, EntriesPos, PtrPos, LinksPos,
 			INC(count);
 		END ExportSymbol;
 	
-	BEGIN  PCM.ObjW(R, 88X);
-		PCM.ObjWGetPos(R, pos);  PCM.ObjWInt(R, 0);
+	BEGIN  
+		PCM.ObjW(R, 88X);
+		PCM.ObjWGetPos(R, pos);  PCM.ObjWLInt(R, 0);
 		nofstr := 0;  count := 0;  exppos := 0;
+		NEW(explist, 256); explen := 256;
 		c := scope.firstValue;
 		WHILE c # NIL DO
 			IF c.vis # PCT.Internal THEN
@@ -716,7 +893,7 @@ VAR commands: ARRAY 64 OF PCT.Symbol;  i, nofptrs, EntriesPos, PtrPos, LinksPos,
 			END;
 			p := p.nextProc
 		END;
-		IF count # 0 THEN  PCM.ObjWIntAt(R, pos, count)  END;
+		IF count # 0 THEN  PCM.ObjWLIntAt(R, pos, count)  END;
 		PCM.ObjW(R, EUEnd)
 	END ExportBlock;
 	
@@ -725,7 +902,7 @@ VAR commands: ARRAY 64 OF PCT.Symbol;  i, nofptrs, EntriesPos, PtrPos, LinksPos,
 	BEGIN
 		PCM.ObjW(R, tag);
 		i := 0;
-		WHILE i < size DO  PCM.ObjW(R, block[i]); INC(i)  END
+		WHILE i < size DO PCM.ObjW(R, block[i]); INC(i)  END
 	END RawBlock;
 	
 	PROCEDURE WriteType(rec: PCT.Record);
@@ -735,8 +912,8 @@ VAR commands: ARRAY 64 OF PCT.Symbol;  i, nofptrs, EntriesPos, PtrPos, LinksPos,
 	BEGIN
 		PCT.GetTypeName(rec, name);
 		size := rec.size(PCBT.RecSize);
-		PCM.ObjWLInt(R, size.size);
-		PCM.ObjWInt(R, SHORT(size.td.offset));
+		PCM.ObjWNum(R, size.size);
+		PCM.ObjWNum(R, size.td.offset);
 		IF rec.brec = NIL THEN
 			oldmth := 0;
 			basenr := -1;
@@ -747,7 +924,7 @@ VAR commands: ARRAY 64 OF PCT.Symbol;  i, nofptrs, EntriesPos, PtrPos, LinksPos,
 			IF (base.sym # NIL) THEN
 				bsym := base.sym(PCOM.Struct);
 				ASSERT(bsym.mod # NIL);
-				IF bsym.mod # scope.owner THEN  basenr := SHORT(bsym.mod.adr(PCBT.Module).nr)  END
+				IF bsym.mod # scope.owner THEN basenr := SHORT(bsym.mod.adr(PCBT.Module).nr) END
 			END;
 			IF basenr = 0 THEN
 				baseid := base.size(PCBT.RecSize).td.offset
@@ -759,31 +936,33 @@ VAR commands: ARRAY 64 OF PCT.Symbol;  i, nofptrs, EntriesPos, PtrPos, LinksPos,
 			END;
 			oldmth := base.size(PCBT.RecSize).nofMethods;
 		END;
-		PCM.ObjWInt(R, basenr);
-		PCM.ObjWLInt(R, baseid);
-		PCM.ObjWInt(R, SHORT(size.nofMethods));	(*NofMethods*)
-		PCM.ObjWInt(R, SHORT(oldmth));	(*InheritedMethods*)
-		PCM.ObjWInt(R, SHORT(size.nofLocalMethods));	(*NewMethods*)
-		PCM.ObjWGetPos(R, pos);
-		PCM.ObjWInt(R, 0);
+		PCM.ObjWNum(R, basenr);
+		PCM.ObjWNum(R, baseid);
+		PCM.ObjWNum(R, size.nofMethods);			(* NofMethods *)
+		PCM.ObjWNum(R, oldmth);					(* InheritedMethods *)
+		PCM.ObjWNum(R, size.nofLocalMethods);	(* NewMethods *)
+		PCM.ObjWGetPos(R, pos);					
+		PCM.ObjWLInt(R, 0);
 		PCM.ObjWName(R, name);
 		
 		(*New Methods in Record*)
 		i := 0; m := rec.scope.firstMeth;
 		WHILE m # NIL DO
-			adr := m.adr(PCBT.Method);
-			PCM.ObjWInt(R, SHORT(adr.mthNo));
-			PCM.ObjWInt(R, SHORT(adr.entryNr));
-			INC(i);
+			IF ~(PCT.Inline IN m.flags) OR (PCT.Indexer IN m.flags) THEN
+				adr := m.adr(PCBT.Method);
+				PCM.ObjWNum(R, adr.mthNo);
+				PCM.ObjWNum(R, adr.entryNr);
+				INC(i);				
+			END;
 			m := m.nextMeth
 		END;
 		ASSERT(i = size.nofLocalMethods, 500);	(*sanity check*)
 		
 		(* Ptrs in Record *)
 		nofptrs := 0;
-		OutPtrs(0, rec);
+		OutPtrs(0, rec, FALSE);  (* debug = FALSE *)
 		IF nofptrs > MAX(INTEGER) THEN PCM.Error(221, 0, "") END;
-		IF nofptrs # 0 THEN PCM.ObjWIntAt(R, pos, SHORT(nofptrs)) END;
+		IF nofptrs # 0 THEN PCM.ObjWLIntAt(R, pos, nofptrs) END;
 	END WriteType;
 	
 	PROCEDURE WriteInterface(rec: PCT.Record);
@@ -791,14 +970,14 @@ VAR commands: ARRAY 64 OF PCT.Symbol;  i, nofptrs, EntriesPos, PtrPos, LinksPos,
 	BEGIN
 		PCT.GetTypeName(rec, name);
 		size := rec.size(PCBT.RecSize);
-		PCM.ObjWLInt(R, 4 + 4*rec.scope.procCount);
-		PCM.ObjWInt(R, SHORT(size.td.offset));
-		PCM.ObjWInt(R, -1);
-		PCM.ObjWLInt(R, -1);
-		PCM.ObjWInt(R, 0);	(*NofMethods*)
-		PCM.ObjWInt(R, 0);	(*InheritedMethods*)
-		PCM.ObjWInt(R, 0);	(*NewMethods*)
-		PCM.ObjWInt(R, 0);
+		PCM.ObjWNum(R, 4 + 4*rec.scope.procCount);
+		PCM.ObjWNum(R, size.td.offset);
+		PCM.ObjWNum(R, -1);
+		PCM.ObjWNum(R, -1);
+		PCM.ObjWNum(R, 0);	(* NofMethods *)
+		PCM.ObjWNum(R, 0);	(* InheritedMethods *)
+		PCM.ObjWNum(R, 0);	(* NewMethods *)
+		PCM.ObjWLInt(R, 0);      	(* no. pointers (fixed size) *)
 		PCM.ObjWName(R, name);
 	END WriteInterface;
 
@@ -820,11 +999,105 @@ VAR commands: ARRAY 64 OF PCT.Symbol;  i, nofptrs, EntriesPos, PtrPos, LinksPos,
 			rec := rec.link
 		END;
 	END TypeBlock;
+
+	(* 	Stores the exception handle table in the following format
+		ExceptionHandlerTable 	::= 8EX {ExceptionTableEntry}
+		ExceptionTableEntry 	::= 0FFX pcFrom(4 bytes) pcTo(4 bytes) pcHandler(4 bytes)
+		
+		Since there is only one FINALLY  in every procedure, method, body, ... we don't need
+		to obtain an order for nesting.
+	*)
+	PROCEDURE ExTableBlock() ;
+	VAR  
+		entry: ExTableEntry;
+	BEGIN  				
+		PCM.ObjW(R, 8EX);			
+		entry := exTable;
+		WHILE entry # NIL DO			
+			PCM.ObjW(R, 0FEX);
+			PCM.ObjWNum(R, entry.pcFrom);
+			PCM.ObjWNum(R, entry.pcTo);
+			PCM.ObjWNum(R, entry.pcHandler);			
+			entry := entry.next;		
+		END;		
+	END ExTableBlock;
+	
+	(* ug *)
+	PROCEDURE PointerInProcBlock;
+		
+		PROCEDURE PointerOffsets(s : PCT.Scope; codeoffset, beginOffset, endOffset: LONGINT);
+		VAR code: PCM.Attribute; v: PCT.Variable; p: PCT.Proc; t: PCT.Type; par: PCT.Parameter;
+			rs: PCT.RecScope; m: PCT.Method; adr: PCBT.Procedure;
+			nofPtrPos : LONGINT;
+		BEGIN
+			IF s # NIL THEN
+				IF s IS PCT.ModScope THEN
+					PCM.ObjWNum(R, codeoffset);
+					PCM.ObjWNum(R, beginOffset);
+					PCM.ObjWNum(R, endOffset);
+					PCM.ObjWLInt(R, 0);			(* nofptrs *)	
+					INC(nofProcs);
+				ELSIF s IS PCT.ProcScope THEN
+					PCM.ObjWNum(R, codeoffset);
+					PCM.ObjWNum(R, beginOffset);	
+					PCM.ObjWNum(R, endOffset);
+					nofptrs := 0;
+					PCM.ObjWGetPos(R, nofPtrPos); PCM.ObjWLInt(R, nofptrs);					
+					v := s.firstVar; 
+					WHILE v # NIL DO
+						IF (v.adr # NIL) & ~(PCM.Untraced IN v.flags) THEN OutPtrs(v.adr(PCBT.Variable).offset, v.type, FALSE) (* debug = FALSE *) END;  
+						v := v.nextVar 
+					END;
+					v := s.firstHiddenVar;
+					WHILE v # NIL DO
+						IF v.adr # NIL THEN OutPtrs(v.adr(PCBT.Variable).offset, v.type, FALSE) (* debug = FALSE *) END;
+						v := v.nextVar
+					END;
+					par := s(PCT.ProcScope).firstPar;
+					WHILE par # NIL DO
+						IF ~par.ref THEN
+							OutPtrs(par.adr(PCBT.Variable).offset, par.type, FALSE) (* debug = FALSE *)
+						END;
+						par := par.nextPar
+					END;
+					PCM.ObjWLIntAt(R, nofPtrPos, nofptrs);
+ 					IF nofptrs > maxPtrs THEN maxPtrs := nofptrs END;
+					INC(nofProcs);
+				END;
+				p := s.firstProc;
+				WHILE p # NIL DO
+					adr := p.adr(PCBT.Procedure);
+					IF adr.codeoffset # 0 THEN
+						PointerOffsets(p.scope, adr.codeoffset, adr.beginOffset, adr.endOffset)
+					END;
+					p := p.nextProc
+				END;
+				t := s.firstType;
+				WHILE t # NIL DO
+					IF (t.type IS PCT.Pointer) & (t.type(PCT.Pointer).base IS PCT.Record)THEN 
+						rs := t.type(PCT.Pointer).baseR.scope;
+						PointerOffsets(rs, 0, 0, 0)
+					END;
+					t := t.nextType
+				END
+			END
+		END PointerOffsets;
+
+	BEGIN
+		PCM.ObjW(R, 8FX);	
+		nofProcs := 0;
+		maxPtrs := 0;
+		PointerOffsets(scope, adr.codeoffset, adr.beginOffset, adr.endOffset);
+		PCM.ObjWLIntAt(R, nofProcsPos, nofProcs);
+		PCM.ObjWLIntAt(R, maxPtrsPos, maxPtrs);
+	END PointerInProcBlock;
+	(* ug *)
 	
 BEGIN
+	exTable := NIL; exTableLen := 0;
 	mod := scope.owner;
 	adr := mod.adr(PCBT.Module);
-	sym := NIL;
+	sym := NIL;	
 	IF mod.sym # NIL THEN  sym := mod.sym(PCOM.Module)  END;
 	PCLIR.CG.GetCode(code, codeSize, hdrCodeSize, addressFactor);
 	InsertFixupLists(addressFactor);
@@ -833,30 +1106,35 @@ BEGIN
 	ASSERT(codeSize < PCLIR.CG.MaxCodeSize);	(*objfile restriction*)
 (* header block *)
 	PCM.ObjWLInt (R, PCM.RefSize(R)+1);
-	PCM.ObjWGetPos(R, EntriesPos); PCM.ObjWInt (R, 0);
-	PCM.ObjWInt (R, nofCmds);
-	PCM.ObjWGetPos(R, PtrPos); PCM.ObjWInt (R, 0);
-	PCM.ObjWInt (R, scope.nofRecs);
-	PCM.ObjWInt (R, nofImp);
-	PCM.ObjWGetPos(R, VarConsPos); PCM.ObjWInt (R, 0);
-	PCM.ObjWGetPos(R, LinksPos); PCM.ObjWInt (R, 0);
+	PCM.ObjWGetPos(R, EntriesPos); PCM.ObjWLInt (R, 0);
+	PCM.ObjWLInt (R, nofCmds);
+	PCM.ObjWGetPos(R, PtrPos); PCM.ObjWLInt (R, 0);
+	PCM.ObjWLInt (R, scope.nofRecs);
+	PCM.ObjWLInt (R, nofImp);
+	PCM.ObjWGetPos(R, VarConsPos); PCM.ObjWLInt (R, 0);
+	PCM.ObjWGetPos(R, LinksPos); PCM.ObjWLInt (R, 0);
 	PCM.ObjWLInt (R, dsize);
-	PCM.ObjWInt (R, adr.constsize);
-	PCM.ObjWInt (R, SHORT (hdrCodeSize));
+	PCM.ObjWLInt (R, adr.constsize);
+	PCM.ObjWLInt (R, hdrCodeSize);
+	PCM.ObjWLInt(R, exTableLen);
+	PCM.ObjWGetPos(R, nofProcsPos); PCM.ObjWLInt(R, 0); (* ug *)
+	PCM.ObjWGetPos(R, maxPtrsPos); PCM.ObjWLInt(R, 0); (* ug *)
 	StringPool.GetString(mod.name, str); PCM.ObjWName (R, str);
-	
+
 	EntryBlock(addressFactor);
 	CommandBlock;
 	PointerBlock;
 	ImportBlock;
 	VarConsBlock; 
-	IF nofVarCons # 0 THEN PCM.ObjWIntAt(R, VarConsPos, nofVarCons) END;
+	IF nofVarCons # 0 THEN PCM.ObjWLIntAt(R, VarConsPos, nofVarCons) END;
 	LinkBlock;
 	RawBlock(87X, adr.constsize, adr.const^);
 	ExportBlock;
 	RawBlock(89X, codeSize, code^);
 	UseBlock;
 	TypeBlock;
+	ExTableBlock;
+	PointerInProcBlock; (* ug *)
 (* ref block *)
 	PCM.ObjW(R, 8CX);
 	
@@ -874,8 +1152,15 @@ BEGIN
 	dsize := 0;
 END Init;
 
+PROCEDURE Install*;
+BEGIN
+	Init();
+	PCBT.generate := Generate
+END Install;
+
 BEGIN
 	IF TraceUse THEN PCM.LogWLn; PCM.LogWStr("PCOF.TraceUse on") END;
+	PCBT.generate := Generate
 END PCOF.
 
 (*

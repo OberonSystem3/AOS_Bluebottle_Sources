@@ -2,14 +2,14 @@
 
 (* AUTHOR: Christian Heinzer, heinzerc@student.ethz.ch *)
 (* Based on FreeBSDs dev/sound/pci/es137x.c *)
-(* for description of exported procedures see AosSound.Mod *)
+(* The exported procedures implement those of the generic sound driver interface AosSound.Mod *)
 
 MODULE EnsoniqSound;	(** AUTHOR "chh"; PURPOSE "Ensoniq PCI Sounddriver"; *)
 
-IMPORT AosOut, PCI, AosMemory, SYSTEM, AosKernel, AosActive, AosInterrupts, AosModules, AosSound;
+IMPORT AosOut, PCI, SYSTEM, AosActive, AosInterrupts, AosKernel, AosMemory, AosModules, AosPlugins, AosSound;
 
 CONST 
-	Trace = FALSE; (* debug output *)
+	Trace = FALSE; (* debug output kernel log *)
 	Bsize = 25600 * 3; (* size of intern soundbuffer, better > 25600*)
 
 	(* Ensoniq registers and content *)
@@ -62,7 +62,7 @@ TYPE
 	BufferObj* = OBJECT
 	VAR inplaycopy : BOOLEAN;
 		drv : Driver;
-	
+
 		PROCEDURE Setinplaycopy(pc: BOOLEAN);
 		BEGIN {EXCLUSIVE}
 			inplaycopy := pc		
@@ -208,12 +208,12 @@ TYPE
 		silent, rsilent : BOOLEAN; (* is a  channel playing/recording? *)
 	
 		PROCEDURE ReturnAllBuffers;
-		VAR akt : POINTER TO Bufferlist;
+		VAR driver : POINTER TO Bufferlist;
 		BEGIN
-			akt := first;
-			WHILE akt#NIL DO 
-				drv.AddBufferToReturn(blistener, akt.content); (* triggers blistener(akt.content); *)
-				akt := akt.next
+			driver := first;
+			WHILE driver#NIL DO 
+				drv.AddBufferToReturn(blistener, driver.content); (* triggers blistener(driver.content); *)
+				driver := driver.next
 			END;
 			first := NIL; last := NIL
 		END ReturnAllBuffers;
@@ -400,12 +400,12 @@ TYPE
 				IF ~ (4 IN SYSTEM.VAL(SET, drv.EsState.rctrl)) THEN
 					IF Trace THEN AosOut.String("Enabling ADC Interrupt"); END;
 					drv.rloopcount := 0;
-					SYSTEM.PORTOUT(drv.Base+Es1370RegMemPage, 0DH); (*1101*)
-					SYSTEM.PORTOUT(drv.Base+34H, SYSTEM.VAL(LONGINT, Bsize DIV 4-1));
+					SYSTEM.PORTOUT(drv.base+Es1370RegMemPage, 0DH); (*1101*)
+					SYSTEM.PORTOUT(drv.base+34H, SYSTEM.VAL(LONGINT, Bsize DIV 4-1));
 					(*additionally resets the counter of transfered longwords to 0*)
 	
 					drv.EsState.rctrl := SYSTEM.VAL(LONGINT, {4}+SYSTEM.VAL(SET, drv.EsState.rctrl));
-					SYSTEM.PORTOUT(drv.Base+Es1370RegControl, drv.EsState.rctrl) (*AdcEn*)
+					SYSTEM.PORTOUT(drv.base+Es1370RegControl, drv.EsState.rctrl) (*AdcEn*)
 				END
 			END
 		END Start;
@@ -416,7 +416,7 @@ TYPE
 			recordchannels : ARRAY 32 OF RecordChannel;    
 			pcm, line, cd : MixerChannel;
 			time: AosKernel.Timer; (* used in init *)
-			Base, Intr : LONGINT; (* base address, interrupt nr of soundcard *)
+			base, irq : LONGINT; (* base address, interrupt nr of soundcard *)
 	
 			EsState : RECORD (* actual state of the soundcard *)
 				sctrl : LONGINT; (* serial control register *)
@@ -444,15 +444,16 @@ TYPE
 			EsWrCd(1AH, SYSTEM.VAL(INTEGER, i+i*256))
 		END SetRecordSource;
 	
-		PROCEDURE &Constructor(Intr, Base: LONGINT);
+		PROCEDURE &Constructor(irq, base: LONGINT);
 		BEGIN
 			NEW(bufferobj);
 			buffersToReturn := NIL;
 			lastbtr := NIL;
-			SELF.Base := Base;
-			SELF.Intr := Intr;
+			SELF.base := base;
+			SELF.irq := irq;
 			SELF.next := installedDrivers;
 			installedDrivers := SELF;
+			INC(installed);
 			Init
 		END Constructor;
 	
@@ -488,7 +489,7 @@ TYPE
 		VAR t, r : LONGINT;
 		BEGIN
 			FOR t := 0 TO 500 DO
-				SYSTEM.PORTIN(Base+Es1371RegSmprate, SYSTEM.VAL(LONGINT, r));
+				SYSTEM.PORTIN(base+Es1371RegSmprate, SYSTEM.VAL(LONGINT, r));
 				IF ~(23 IN SYSTEM.VAL(SET, r)) THEN 
 					RETURN r
 				END 
@@ -513,8 +514,7 @@ TYPE
 		
 		(* set the data part of the value for the src *)
 		PROCEDURE EsSrcRamDatao(reg: LONGINT): SET;
-		VAR s, s2 : SET;
-			i : LONGINT;
+		VAR s : SET;
 		BEGIN
 			s := SYSTEM.VAL(SET, reg);
 			s := s*{0..15};
@@ -532,7 +532,7 @@ TYPE
 			s := s + EsSrcRamAddro(reg)+EsSrcRamDatao(data);
 			s := s + {24};
 			r := SYSTEM.VAL(LONGINT, s);
-			SYSTEM.PORTOUT(Base+Es1371RegSmprate, r)	
+			SYSTEM.PORTOUT(base+Es1371RegSmprate, r)	
 		END EsSrcWrite;
 	
 		(* read from sample rate converter *)
@@ -544,14 +544,14 @@ TYPE
 			s := s*{19..22};
 			s := s + EsSrcRamAddro(reg);
 			r := SYSTEM.VAL(LONGINT, r);
-			SYSTEM.PORTOUT(Base+Es1371RegSmprate, r);
+			SYSTEM.PORTOUT(base+Es1371RegSmprate, r);
 			r := EsWaitSrcReady();
 			RETURN SYSTEM.VAL(LONGINT, EsSrcRamDatao(r))
 		END EsSrcRead;
 	
 		(* set the adc sample rate *)
 		PROCEDURE EsAdcRate(rate, set: LONGINT);
-		VAR n, truncm, freq, result, tmp, r, temp : LONGINT;
+		VAR n, truncm, freq, result, tmp : LONGINT;
 			stmp : SET;
 		BEGIN
 			IF rate > 48000 THEN rate := 48000 END;
@@ -605,7 +605,7 @@ TYPE
 				r := EsWaitSrcReady();
 				stmp := SYSTEM.VAL(SET, r)*{19..22};
 				r := SYSTEM.VAL(LONGINT, stmp);
-				SYSTEM.PORTOUT(Base+Es1371RegSmprate, r);
+				SYSTEM.PORTOUT(base+Es1371RegSmprate, r);
 				r := EsSrcRead(dac+1);
 				stmp := SYSTEM.VAL(SET, r)*{0..7};
 				stmp := stmp + (SYSTEM.VAL(SET, freq DIV 32)*{10..15});
@@ -619,7 +619,7 @@ TYPE
 				stmp := SYSTEM.VAL(SET, r);
 				stmp := stmp*({22}+{dis}+{19});
 				r := SYSTEM.VAL(LONGINT, stmp);
-				SYSTEM.PORTOUT(Base+Es1371RegSmprate, r)
+				SYSTEM.PORTOUT(base+Es1371RegSmprate, r)
 			END
 		END EsDacRate;
 	
@@ -631,17 +631,17 @@ TYPE
 			t := 0;	
 			REPEAT 
 				INC(t);
-				SYSTEM.PORTIN(Base+Es1371RegCodec, SYSTEM.VAL(LONGINT, res))
+				SYSTEM.PORTIN(base+Es1371RegCodec, SYSTEM.VAL(LONGINT, res))
 			UNTIL ((t>2000) OR ~(30 IN SYSTEM.VAL(SET, res)));
-			SYSTEM.PORTIN(Base+Es1371RegSmprate, SYSTEM.VAL(LONGINT, x));
+			SYSTEM.PORTIN(base+Es1371RegSmprate, SYSTEM.VAL(LONGINT, x));
 			t := EsWaitSrcReady();
 			t := SYSTEM.VAL(LONGINT, SYSTEM.VAL(SET, t)*{19..22});	
-			SYSTEM.PORTOUT(Base+Es1371RegSmprate, t);
+			SYSTEM.PORTOUT(base+Es1371RegSmprate, t);
 		
 			t := 0;
 			REPEAT
 				INC(t);
-				SYSTEM.PORTIN(Base+Es1371RegSmprate, SYSTEM.VAL(LONGINT, res))
+				SYSTEM.PORTIN(base+Es1371RegSmprate, SYSTEM.VAL(LONGINT, res))
 			UNTIL (t>2000) OR (SYSTEM.VAL(SET, res)*{16..18, 23} = {16});
 	
 			tset := SYSTEM.VAL(SET, addr)*{0..6};
@@ -652,15 +652,14 @@ TYPE
 			tset := SYSTEM.VAL(SET, data)*{0..15};
 			tset := tset+tset2;
 			res := SYSTEM.VAL(LONGINT, tset);
-			SYSTEM.PORTOUT(Base+Es1371RegCodec, res);
+			SYSTEM.PORTOUT(base+Es1371RegCodec, res);
 			t := EsWaitSrcReady();
-			SYSTEM.PORTOUT(Base+Es1371RegSmprate, x)
+			SYSTEM.PORTOUT(base+Es1371RegSmprate, x)
 		END EsWrCd;
 
 		(* initialise the driver *)
 		PROCEDURE Initdrv;
-		VAR vaddr, i: LONGINT;
-			b : SYSTEM.BYTE;
+		VAR i: LONGINT;
 			sndbuf : LONGINT; (* physical address of the intern soundbuffer *)
 		BEGIN
 	
@@ -684,18 +683,18 @@ TYPE
 			EsState.rctrl := 0;
 			NEW(time);
 	
-			AosActive.InstallHandler(introbj.HandleInterrupt, AosInterrupts.IRQ0+Intr);
+			AosActive.InstallHandler(introbj.HandleInterrupt, AosInterrupts.IRQ0+irq);
 	
 	(*********** INIT like in BSD driver *******************************)
 	 	
-			SYSTEM.PORTOUT(Base+Es1370RegStatus, SYSTEM.VAL(LONGINT, {29})); (* No idea why this is needed *)
+			SYSTEM.PORTOUT(base+Es1370RegStatus, SYSTEM.VAL(LONGINT, {29})); (* No idea why this is needed *)
 			time.Sleep(20);
-			SYSTEM.PORTOUT(Base+Es1370RegSerialControl, SYSTEM.VAL(LONGINT, 0));
-			SYSTEM.PORTOUT(Base+Es1371RegLegacy, SYSTEM.VAL(LONGINT, 0)); 
+			SYSTEM.PORTOUT(base+Es1370RegSerialControl, SYSTEM.VAL(LONGINT, 0));
+			SYSTEM.PORTOUT(base+Es1371RegLegacy, SYSTEM.VAL(LONGINT, 0)); 
 			(* Now not again RegLegacy like in BSD-Driver *)
-			SYSTEM.PORTOUT(Base+Es1370RegControl, SYSTEM.VAL(LONGINT, Es1371SyncRes));
-			time.Sleep(2);	SYSTEM.PORTOUT(Base+Es1370RegControl, SYSTEM.VAL(LONGINT, {}));
-			SYSTEM.PORTOUT(Base+Es1371RegSmprate, SYSTEM.VAL(LONGINT, Es1371DisSrc));
+			SYSTEM.PORTOUT(base+Es1370RegControl, SYSTEM.VAL(LONGINT, Es1371SyncRes));
+			time.Sleep(2);	SYSTEM.PORTOUT(base+Es1370RegControl, SYSTEM.VAL(LONGINT, {}));
+			SYSTEM.PORTOUT(base+Es1371RegSmprate, SYSTEM.VAL(LONGINT, Es1371DisSrc));
 	
 			FOR i := 0 TO 07FH DO 
 				EsSrcWrite(SYSTEM.VAL(INTEGER, i), 0)
@@ -718,7 +717,7 @@ TYPE
 			EsAdcRate(48000, 1); (* set the base (hardware) samplerate for recording *)
 			EsDacRate(48000, 2); (* set the base (hardware) samplerate for playback *)
 			(*EsDacRate(40100, 1);(* DAC1 is not used in this driver *) *)
-			SYSTEM.PORTOUT(Base+Es1371RegSmprate, SYSTEM.VAL(LONGINT, 0));
+			SYSTEM.PORTOUT(base+Es1371RegSmprate, SYSTEM.VAL(LONGINT, 0));
 	
 	(*****************************************************)
 	
@@ -728,20 +727,20 @@ TYPE
 			rloopcount := 0;
 			NEW(p2, Bsize);
 			loopcount := 0;
-			SYSTEM.PORTOUT(Base+Es1370RegControl, SYSTEM.VAL(LONGINT, {})); (* Disable all Channels *)
+			SYSTEM.PORTOUT(base+Es1370RegControl, SYSTEM.VAL(LONGINT, {})); (* Disable all Channels *)
 	
 			sndbuf := AosMemory.PhysicalAdr(SYSTEM.ADR(pr2[0]), Bsize);
 			IF sndbuf = -1 THEN AosOut.String("not enough defragmented space"); END;
 		
 		
-			SYSTEM.PORTOUT(Base+Es1370RegMemPage, 0DH); (*1101*)
-			SYSTEM.PORTOUT(Base+30H, SYSTEM.VAL(LONGINT, sndbuf)); (* physical buf adress *)
+			SYSTEM.PORTOUT(base+Es1370RegMemPage, 0DH); (*1101*)
+			SYSTEM.PORTOUT(base+30H, SYSTEM.VAL(LONGINT, sndbuf)); (* physical buf adress *)
 	
-			SYSTEM.PORTOUT(Base+34H, SYSTEM.VAL(LONGINT, Bsize DIV 4-1)); (* size of buffer (in longwords -1) *)
+			SYSTEM.PORTOUT(base+34H, SYSTEM.VAL(LONGINT, Bsize DIV 4-1)); (* size of buffer (in longwords -1) *)
 	
 			(* number of samples to playback until interrupt for ADC*)
 			(* set it to Bsize DIV 4-1 for 16bitmono/8bitstereo and to Bsize DIV 2-1 for 8bitmono *)
-			SYSTEM.PORTOUT(Base+Es1370RegAdcScount, SYSTEM.VAL(LONGINT, Bsize DIV 8-1));
+			SYSTEM.PORTOUT(base+Es1370RegAdcScount, SYSTEM.VAL(LONGINT, Bsize DIV 8-1));
 			
 			(* enable interrupt and set dataformat for ADC*)
 			(* 14: LoopMode OFF, driver is always in loop mode *)
@@ -749,27 +748,27 @@ TYPE
 			(* 10: INTERRUPT ENABLE*)
 		 
 			EsState.sctrl := SYSTEM.VAL(LONGINT, {4, 5, 10}+SYSTEM.VAL(SET, EsState.sctrl));  
-			SYSTEM.PORTOUT(Base+Es1370RegSerialControl, EsState.sctrl);
+			SYSTEM.PORTOUT(base+Es1370RegSerialControl, EsState.sctrl);
 	
 	
 			sndbuf := AosMemory.PhysicalAdr(SYSTEM.ADR(p2[0]), Bsize);
 			IF sndbuf = -1 THEN AosOut.String("not enough defragmented space") END;
 	
-			SYSTEM.PORTOUT(Base+Es1370RegMemPage, 0CH); (*1100*)
-			SYSTEM.PORTOUT(Base+38H, SYSTEM.VAL(LONGINT, sndbuf)); (*physical buf adress*)
+			SYSTEM.PORTOUT(base+Es1370RegMemPage, 0CH); (*1100*)
+			SYSTEM.PORTOUT(base+38H, SYSTEM.VAL(LONGINT, sndbuf)); (*physical buf adress*)
 	
-			SYSTEM.PORTOUT(Base+3CH, SYSTEM.VAL(LONGINT, Bsize DIV 4-1)); (* size of buffer (in longwords -1) *)
+			SYSTEM.PORTOUT(base+3CH, SYSTEM.VAL(LONGINT, Bsize DIV 4-1)); (* size of buffer (in longwords -1) *)
 		
 			(* number of samples to record until interrupt for DAC2*)
 			(* set it to Bsize DIV 4-1 for 16bitmono/8bitstereo and to Bsize DIV 2-1 for 8bitmono *)
-			SYSTEM.PORTOUT(Base+Es1370RegDac2Scount, SYSTEM.VAL(LONGINT, Bsize DIV 8-1));
+			SYSTEM.PORTOUT(base+Es1370RegDac2Scount, SYSTEM.VAL(LONGINT, Bsize DIV 8-1));
 	
 			(* enable interrupt and set dataformat for DAC2*)
 			(*14: LoopMode OFF, driver is always in loop mode*)
 			(*2,3: 00:8BMono 01:8BStereo 10:16BM 11:16BS *)
 			(*9: INTERRUPT ENABLE*)
 		 	EsState.sctrl := SYSTEM.VAL(LONGINT, {2, 3, 9} + SYSTEM.VAL(SET, EsState.sctrl));
-			SYSTEM.PORTOUT(Base+Es1370RegSerialControl, EsState.sctrl)
+			SYSTEM.PORTOUT(base+Es1370RegSerialControl, EsState.sctrl)
 		END Initdrv;
 	
 		PROCEDURE Initvol;
@@ -795,14 +794,14 @@ TYPE
 			EsWrCd(1EH, SYSTEM.VAL(INTEGER, 15)); (*Record Gain Mic*)
 	*)
 	
-			IF Trace THEN AosOut.String("Volume initialized") END
+			IF Trace THEN AosOut.String("Volume initialized"); AosOut.Ln END
 		END Initvol;
 	
 		PROCEDURE Finalize;
 		BEGIN
 			(* disable interrupt *)
-			SYSTEM.PORTOUT(Base+Es1370RegSerialControl, SYSTEM.VAL(LONGINT, {20}));		 
-			AosActive.RemoveHandler(introbj.HandleInterrupt, AosInterrupts.IRQ0+Intr);
+			SYSTEM.PORTOUT(base+Es1370RegSerialControl, SYSTEM.VAL(LONGINT, {20}));		 
+			AosActive.RemoveHandler(introbj.HandleInterrupt, AosInterrupts.IRQ0+irq);
 			time.Sleep(100); (* make sure interrup has terminated *)
 			IF AosModules.shutdown = AosModules.None THEN						
 				AosSound.devices.Remove(SELF)
@@ -826,7 +825,7 @@ TYPE
 			masterIn := masterin;
 			masterOut := masterout;
 	
-			desc := "Ensoniq PCI Sound Driver";
+			desc := "Ensoniq PCI Sound driver";
 	 
 			masterin.SetVolume(0H);
 			masterout.SetVolume(0FFH);
@@ -848,7 +847,7 @@ TYPE
 			NEW(listenerlist); (* no mixer listeners so far *)
 			listenerlist.proc := NIL;
 			listenerlist.next := NIL;
-			IF Trace THEN AosOut.String("init done") END
+			IF Trace THEN AosOut.String("init done"); AosOut.Ln END
 		END Init;
 	
 		PROCEDURE OpenPlayChannel*(VAR channel : AosSound.Channel; 
@@ -863,9 +862,7 @@ TYPE
 					INC(count)
 				END
 			END;
-			IF Trace THEN
-				AosOut.String("# active: "); AosOut.Int(count, 0); AosOut.Ln
-			END;
+			IF Trace THEN AosOut.String("Active channel #: "); AosOut.Int(count, 0); AosOut.Ln END;
 			i := 0;
 			WHILE (i<=31) & (~playchannels[i].free) DO
 				INC(i);
@@ -883,7 +880,7 @@ TYPE
 				playchannels[i].SetVolume(100H);
 				playchannels[i].RegisterBufferListener(DefaultBufferListener);
 				res := AosSound.ResOK;
-				IF Trace THEN AosOut.String("playchannel opened: #"); AosOut.Int(i, 0) END
+				IF Trace THEN AosOut.String("Open play channel #: "); AosOut.Int(i, 0); AosOut.Ln END
 			ELSE res := AosSound.ResNoMoreChannels
 			END
 		END OpenPlayChannel;
@@ -1025,16 +1022,16 @@ TYPE
 		END Activate;
 	
 		PROCEDURE HandleInterrupt; (* interrupt handler *)
-		VAR r, i, where : LONGINT;
-			sr, ssctrl, s, s2 : SET;
+		VAR r, where : LONGINT;
+			sr, ssctrl : SET;
 		BEGIN {EXCLUSIVE}
-			SYSTEM.PORTIN(driver.Base+Es1370RegStatus, r);
+			SYSTEM.PORTIN(driver.base+Es1370RegStatus, r);
 			sr := SYSTEM.VAL(SET, r); 
 			IF 31 IN sr THEN (* Interrupt pending *)				
 				IF 0 IN sr THEN (* ACD int pending *)
 	
-					SYSTEM.PORTOUT(driver.Base+Es1370RegMemPage, 0DH);
-					SYSTEM.PORTIN(driver.Base+34H, where); 
+					SYSTEM.PORTOUT(driver.base+Es1370RegMemPage, 0DH);
+					SYSTEM.PORTIN(driver.base+34H, where); 
 					
 					IF where DIV 65536 >= Bsize DIV 8 -1 THEN 
 						driver.rloopcount := 0 ELSE driver.rloopcount := 1					
@@ -1042,12 +1039,12 @@ TYPE
 	
 					driver.reccopy := TRUE;
 					ssctrl := SYSTEM.VAL(SET, driver.EsState.sctrl)-{10};
-					SYSTEM.PORTOUT(driver.Base+Es1370RegSerialControl, SYSTEM.VAL(LONGINT, ssctrl));
-					SYSTEM.PORTOUT(driver.Base+Es1370RegSerialControl, driver.EsState.sctrl)	
+					SYSTEM.PORTOUT(driver.base+Es1370RegSerialControl, SYSTEM.VAL(LONGINT, ssctrl));
+					SYSTEM.PORTOUT(driver.base+Es1370RegSerialControl, driver.EsState.sctrl)	
 				END;
 				IF 1 IN sr THEN (* DAC2 int pending *)
-					SYSTEM.PORTOUT(driver.Base+Es1370RegMemPage, 0CH);
-					SYSTEM.PORTIN(driver.Base+3CH, where);
+					SYSTEM.PORTOUT(driver.base+Es1370RegMemPage, 0CH);
+					SYSTEM.PORTIN(driver.base+3CH, where);
 	
 					IF where DIV 65536 >= Bsize DIV 8 - 1 THEN
 						driver.loopcount := 0 ELSE driver.loopcount := 1;
@@ -1055,13 +1052,13 @@ TYPE
 	 
 					driver.playcopy := TRUE; 
 					ssctrl := SYSTEM.VAL(SET, driver.EsState.sctrl)-{9};
-					SYSTEM.PORTOUT(driver.Base+Es1370RegSerialControl, SYSTEM.VAL(LONGINT, ssctrl));
-					SYSTEM.PORTOUT(driver.Base+Es1370RegSerialControl, driver.EsState.sctrl)
+					SYSTEM.PORTOUT(driver.base+Es1370RegSerialControl, SYSTEM.VAL(LONGINT, ssctrl));
+					SYSTEM.PORTOUT(driver.base+Es1370RegSerialControl, driver.EsState.sctrl)
 				END;
 				IF 2 IN sr THEN (* DAC1 int pending, should never happen *)
 					ssctrl := SYSTEM.VAL(SET, driver.EsState.sctrl)-{8};
-					SYSTEM.PORTOUT(driver.Base+Es1370RegSerialControl, SYSTEM.VAL(LONGINT, ssctrl));
-					SYSTEM.PORTOUT(driver.Base+Es1370RegSerialControl, driver.EsState.sctrl)
+					SYSTEM.PORTOUT(driver.base+Es1370RegSerialControl, SYSTEM.VAL(LONGINT, ssctrl));
+					SYSTEM.PORTOUT(driver.base+Es1370RegSerialControl, driver.EsState.sctrl)
 				END
 			END
 			END HandleInterrupt;
@@ -1099,8 +1096,7 @@ TYPE
 		END Clip;
 	
 		PROCEDURE Copy;
-		VAR i, j : LONGINT;
-				first : BOOLEAN;
+		VAR first : BOOLEAN;
 	
 			(* convert sample from mono to stereo *)
 			PROCEDURE mono(VAR ca: Sample);
@@ -1111,7 +1107,6 @@ TYPE
 	
 			(* convert sample from 8 to 16 bit *) 
 			PROCEDURE eight(VAR ca: Sample);
-			VAR s : SET;
 			BEGIN			
 				ca[3] := CHR(ORD(ca[1])-128);
 				ca[2] := CHR(0);
@@ -1253,17 +1248,17 @@ TYPE
 	
 				IF ~driver.allsilent THEN (* make sure playing is in progress *)
 					IF ~ (5 IN SYSTEM.VAL(SET, driver.EsState.rctrl)) THEN
-						IF Trace THEN AosOut.String("Enabling DAC2 Interrupt"); END;
-						SYSTEM.PORTOUT(driver.Base+Es1370RegMemPage, 0CH); (*1100*)
-						SYSTEM.PORTOUT(driver.Base+3CH, SYSTEM.VAL(LONGINT, Bsize DIV 4-1));
+						IF Trace THEN AosOut.String("Enabling DAC2 Interrupt"); AosOut.Ln END;
+						SYSTEM.PORTOUT(driver.base+Es1370RegMemPage, 0CH); (*1100*)
+						SYSTEM.PORTOUT(driver.base+3CH, SYSTEM.VAL(LONGINT, Bsize DIV 4-1));
 						(*resets the counter of transferred longwords to 0*)
 						driver.EsState.rctrl := SYSTEM.VAL(LONGINT, {5}+SYSTEM.VAL(SET, driver.EsState.rctrl));
-						SYSTEM.PORTOUT(driver.Base+Es1370RegControl, driver.EsState.rctrl); (*Dac2En*)
+						SYSTEM.PORTOUT(driver.base+Es1370RegControl, driver.EsState.rctrl); (*Dac2En*)
 					END;
 				ELSE (* make sure playing is stopped *)
 					IF (5 IN SYSTEM.VAL(SET, driver.EsState.rctrl)) THEN
 						temp := SYSTEM.VAL(LONGINT, SYSTEM.VAL(SET, driver.EsState.rctrl)-{5});
-						SYSTEM.PORTOUT(driver.Base+Es1370RegControl, temp); (*Dac2Dis*)
+						SYSTEM.PORTOUT(driver.base+Es1370RegControl, temp); (*Dac2Dis*)
 						FOR i := 0 TO Bsize-1 DO driver.p2[i] := CHR(0) END;
 						driver.EsState.rctrl := temp
 					END
@@ -1357,17 +1352,17 @@ TYPE
 	
 				IF ~driver.rallsilent THEN (* make sure recording is in progress *)		
 					IF ~ (4 IN SYSTEM.VAL(SET, driver.EsState.rctrl)) THEN
-						SYSTEM.PORTOUT(driver.Base+Es1370RegMemPage,  0DH); (*1101*)
-						SYSTEM.PORTOUT(driver.Base+34H, SYSTEM.VAL(LONGINT, Bsize DIV 4-1));
+						SYSTEM.PORTOUT(driver.base+Es1370RegMemPage,  0DH); (*1101*)
+						SYSTEM.PORTOUT(driver.base+34H, SYSTEM.VAL(LONGINT, Bsize DIV 4-1));
 						(*resets the counter of transferred longwords to 0*)
 	
 						driver.EsState.rctrl := SYSTEM.VAL(LONGINT, {4}+SYSTEM.VAL(SET, driver.EsState.rctrl));
-						SYSTEM.PORTOUT(driver.Base+Es1370RegControl, driver.EsState.rctrl) (*AdcEn*)
+						SYSTEM.PORTOUT(driver.base+Es1370RegControl, driver.EsState.rctrl) (*AdcEn*)
 					END
 				ELSE (* make sure recording is stopped *)
 					IF (4 IN SYSTEM.VAL(SET, driver.EsState.rctrl)) THEN
 						driver.EsState.rctrl := SYSTEM.VAL(LONGINT, SYSTEM.VAL(SET, driver.EsState.rctrl)-{4});
-						SYSTEM.PORTOUT(driver.Base+Es1370RegControl, driver.EsState.rctrl); (*AdcDis*)
+						SYSTEM.PORTOUT(driver.base+Es1370RegControl, driver.EsState.rctrl); (*AdcDis*)
 						FOR i := 0 TO Bsize-1 DO driver.pr2[i] := CHR(0) END
 					END
 				END
@@ -1405,72 +1400,91 @@ TYPE
 	END Introbj;
 
 VAR installedDrivers: Driver;
+	installed: LONGINT;
 
 PROCEDURE DefaultBufferListener(buffer: AosSound.Buffer);
 BEGIN
 END DefaultBufferListener;
 
+(** Called when unloading the module *)
 PROCEDURE Cleanup;
-BEGIN {EXCLUSIVE}
+BEGIN
 	WHILE installedDrivers # NIL DO 
 		installedDrivers.Finalize;
 		installedDrivers := installedDrivers.next
-	END
+	END;
+	installed := 0;
 END Cleanup;
 
-PROCEDURE ScanPCI(devid, vendid: LONGINT);
-VAR index, res, i : LONGINT;
-	bus, dev, fkt : LONGINT;
-	Base, Intr : LONGINT;
-	akt : Driver;
+PROCEDURE ScanPCI(vendor, device: LONGINT; name: AosPlugins.Name);
+VAR index, bus, dev, fct, res, base, irq, i : LONGINT;
+	driver : Driver;
+	drivername : AosPlugins.Name;
 BEGIN
-	akt := NIL;
+	driver := NIL;
 	index := 0;
-	WHILE PCI.FindPCIDevice(devid, vendid, index, bus, dev, fkt) = PCI.Done DO
+	WHILE (PCI.FindPCIDevice(device, vendor, index, bus, dev, fct) = PCI.Done) & (installed < 10) DO
 		IF Trace THEN
-			res := PCI.ReadConfigWord(bus, dev, fkt, 0,  i);
-			AosOut.String("vendID: "); AosOut.Int(i, 1);
-			res := PCI.ReadConfigWord(bus, dev, fkt, 2, i);
-			AosOut.String(" devID:" ); AosOut.Int(i, 1);
-			res := PCI.ReadConfigWord(bus, dev, fkt, 4, i);
-			AosOut.String(" Command: "); AosOut.Int(i, 1)
+			AosOut.String("Bus "); AosOut.Int(bus, 1);
+			AosOut.String(", device: "); AosOut.Int(dev, 1);
+			AosOut.String(", function: "); AosOut.Int(fct, 1);
+			AosOut.String(", vendor/device "); AosOut.Hex(ASH(vendor, 16) + device, 0); AosOut.Ln;
 		END;
-		res := PCI.ReadConfigDword(bus, dev, fkt, 10H, Base); 
+
+		(* Get physical base address *)
+		res := PCI.ReadConfigDword(bus, dev, fct, PCI.Adr0Reg, base); 
 		ASSERT(res=PCI.Done);
-		ASSERT(ODD(Base));
-		DEC(Base, Base MOD 4);
-		IF Trace THEN AosOut.String("Adress:");AosOut.Int(Base, 1) END;
-		res := PCI.ReadConfigByte(bus, dev, fkt, 3CH, Intr);
+		ASSERT(ODD(base));
+		DEC(base, base MOD 4); (* zero last 2 bits *)
+		IF Trace THEN AosOut.String("Base address: "); AosOut.Hex(base, 0); AosOut.Ln END;
+
+		(* Get IRQ number *)
+		res := PCI.ReadConfigByte(bus, dev, fct, PCI.IntlReg, irq);
 		ASSERT(res=PCI.Done);
-		IF Trace THEN AosOut.String("Interrupt:"); AosOut.Int(Intr, 1) END;
-		NEW(akt, Intr, Base); (* NEW driver, add it to installedDrivers *)
-		AosOut.Enter; AosOut.String("Ensoniq sound driver installed."); AosOut.Exit;
-		AosSound.devices.Add(akt, res);
+		IF Trace THEN AosOut.String("IRQ"); AosOut.Int(irq, 1); AosOut.Ln END;
+		(* Instanciate new driver object *)
+		NEW(driver, irq, base);
+		AosOut.String("Ensoniq sound driver installed."); AosOut.Ln;
+		i := 0;
+		WHILE name[i] # 0X DO drivername[i] := name[i]; INC(i) END;
+		drivername[i] := "#";
+		drivername[i + 1] := CHR(ORD("0") + installed);
+		drivername[i + 2] := 0X;
+		driver.SetName(drivername);
+		AosSound.devices.Add(driver, res);	(* add NEW driver to installedDrivers *)
 		ASSERT(res=0);
 		INC(index)
 	END
 END ScanPCI;
 
-(* Needed for Autostart *)
+(** AOS command forcing Init and the installation of a driver. *)
 PROCEDURE Install*(par: PTR): PTR;
-BEGIN {EXCLUSIVE}
-	IF installedDrivers = NIL THEN 
-		ScanPCI(1371H, 1274H);
-		ScanPCI(1373H, 1274H);
-		ScanPCI(5880H, 1274H)
-	END;
+BEGIN
+	(* Init routine is called implicitly *)
 	RETURN NIL
 END Install;
 
+(* Initialize the driver module *)
+PROCEDURE Init;
+BEGIN
+	IF installedDrivers = NIL THEN 
+		ScanPCI(1274H, 1371H, "ES1371");
+		ScanPCI(1274H, 1373H, "ES1373");
+		ScanPCI(1274H, 5880H, "5880 AudioPCI")
+	END;
+END Init;
+
 BEGIN {EXCLUSIVE}
 	AosModules.InstallTermHandler(Cleanup);
-	installedDrivers := NIL
+	installedDrivers := NIL;
+	installed := 0;
+	Init;
 END EnsoniqSound.
 
-Compiler.Compile *
+PC.Compile *
 Aos.Call EnsoniqSound.Install ~
-System.Free EnsoniqSound ~
+S.Free EnsoniqSound ~
 
 Installation
-add EnsoniqSound.Install to AosConfig.XML, section 'Autostart' to load driver at system startup.
+Add EnsoniqSound.Install to AosConfig.XML, section 'Autostart' to load driver at system startup.
 

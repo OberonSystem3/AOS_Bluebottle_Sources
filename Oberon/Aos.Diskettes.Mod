@@ -569,7 +569,11 @@ END Register;
 
 (** Install the diskette devices.  Automatically executed when the module is loaded. *)
 PROCEDURE Install*;
-BEGIN {EXCLUSIVE}
+BEGIN 
+END Install;
+
+PROCEDURE DoInstall;
+BEGIN
 	IF ~installed & (dmabufphys # 0) THEN
 		Init;
 		SYSTEM.PORTOUT(3F2H, 0CX);	(* motors off, select drive 0, clear reset *)
@@ -577,7 +581,7 @@ BEGIN {EXCLUSIVE}
 		Register;
 		installed := TRUE
 	END
-END Install;
+END DoInstall;
 
 (** Remove the diskette devices.  Automatically executed when the module is unloaded. *)
 PROCEDURE Remove*;
@@ -605,7 +609,7 @@ BEGIN
 		dmabufphys := 0
 	END;
 	AosModules.InstallTermHandler(Remove);
-	installed := FALSE; Install
+	installed := FALSE; DoInstall
 END Diskettes.
 
 (*

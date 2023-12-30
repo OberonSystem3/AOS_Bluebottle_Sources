@@ -8,7 +8,7 @@ BEGIN
 	In.Open; In.String(fnl); In.String(fnr); In.String(fipstr);
 	IF In.Done THEN
 		fip := AosIP.StrToAdr(fipstr);
-		IF (fip # AosIP.NilAdr) THEN
+		IF (~AosIP.IsNilAdr(fip)) THEN
 			Out.String("Sending '"); Out.String(fnl); Out.String("' to "); Out.String(fipstr); Out.String("...");
 			IF TFTP.Send(fnl, fnr, fip) THEN Out.String(" success.")
 			ELSE Out.String("error; check kernel log.")
@@ -26,7 +26,7 @@ BEGIN
 	In.Open; In.String(fnr); In.String(fnl); In.String(fipstr);
 	IF In.Done THEN
 		fip := AosIP.StrToAdr(fipstr);
-		IF (fip # AosIP.NilAdr) THEN
+		IF (~AosIP.IsNilAdr(fip)) THEN
 			Out.String("Receiving '"); Out.String(fnl); Out.String("' from "); Out.String(fipstr); Out.String("...");
 			IF TFTP.Receive(fnr, fnl, fip) THEN Out.String(" success.")
 			ELSE Out.String("error; check kernel log.")
@@ -39,7 +39,7 @@ BEGIN
 END Receive;
 
 END TFTPTool.
- 
+
 
 System.Free TestTFTP TFTP ~
 

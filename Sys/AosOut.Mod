@@ -1,6 +1,6 @@
 (* Aos, Copyright 2001, Pieter Muller, ETH Zurich *)
 
- MODULE AosOut; (** AUTHOR "pjm"; PURPOSE "Trace output for booting and debugging"; *)
+MODULE AosOut; (** AUTHOR "pjm"; PURPOSE "Trace output for booting and debugging"; *)
 
 (* AFI 12.03.2003 - procedure Init modified to obtain trace port info from Aos.Par i.o. being hardcoded. *)
 
@@ -9,7 +9,7 @@ IMPORT SYSTEM, AosBoot, AosLocks;
 CONST
 	Screen = 0; V24 = 2;	(* TraceMode options *)
 	
-	BufSize = 2000;	(* default trace buffer size (usually overriden by System.StartLog or LogWindow.Open *)
+	BufSize = 8000;	(* default trace buffer size (usually overriden by System.StartLog or LogWindow.Open *)
 	
 VAR
 	tbase: LONGINT;	(* trace base port, 3F8H=com1, 2F8H=com2, etc. *)
@@ -217,6 +217,11 @@ BEGIN
 	IF x < 0 THEN Char("-") END;
 	REPEAT DEC(i); Char(a[i]) UNTIL i = 0
 END Int;
+
+PROCEDURE Boolean*(x : BOOLEAN);
+BEGIN
+	IF x THEN String("TRUE") ELSE String("FALSE") END
+END Boolean;
 
 (** Write "x" as a decimal number with a power-of-two multiplier (K, M or G), followed by "suffix". "w" is the field width, excluding "suffix". *)
 

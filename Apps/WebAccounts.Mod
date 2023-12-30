@@ -63,7 +63,7 @@ CONST
 	
 	WebAccountsContainerPrefixName = "dxp-WebAccounts-Container";
 TYPE
-	WebAccount* = OBJECT(WebComplex.WebForumEntry)
+	WebAccount* = OBJECT(WebComplex.WebForumEntry);
 		VAR
 			username: Utilities.String;
 			password: Utilities.String;
@@ -118,7 +118,8 @@ TYPE
 		BEGIN 
 			BeginModification;
 			email := WebStd.GetString(mail);
-			EndModification
+			EndModification;
+			RETURN email
 		END SetEmail;
 		
 		PROCEDURE GetDefaultMsgName*() : Utilities.String;
@@ -347,7 +348,7 @@ TYPE
 	
 	(** a single web account view to allow a authorized user to inspect and modify his web account properties. Usage example:
 	 * <WebAccounts:WebAccountView id="myAccountView3"/> *)
-	WebAccountView* = OBJECT(DynamicWebpage.StateFullActiveElement)
+	WebAccountView* = OBJECT(DynamicWebpage.StateFullActiveElement);
 		VAR
 			editMode: BOOLEAN; (* true iff edit view is active *)
 			webAccount: WebAccount;
@@ -493,7 +494,7 @@ TYPE
 	END WebAccountView;
 	
 	(** statefull active element *)
-	WebAccountDatagrid* = OBJECT(WebComplex.WebForum)
+	WebAccountDatagrid* = OBJECT(WebComplex.WebForum);
 		VAR
 			searchText: Utilities.String;
 			accountContainerName: Utilities.String;
@@ -649,7 +650,7 @@ TYPE
 		END CompareActivated;
 	END WebAccountDatagrid;
 	
-	AuthorizationDomain* = OBJECT(WebComplex.WebForumEntry)
+	AuthorizationDomain* = OBJECT(WebComplex.WebForumEntry);
 		VAR
 			name: Utilities.String;
 			members: WebStd.PersistentDataContainer; (* PersistentDataContainer of WebAccount *)
@@ -788,7 +789,7 @@ TYPE
 	END AuthorizationDomain;
 	
 		(** statefull active element *)
-	AuthorizationDomainDatagrid* = OBJECT(WebComplex.WebForum)
+	AuthorizationDomainDatagrid* = OBJECT(WebComplex.WebForum);
 		VAR
 			searchText: Utilities.String;
 			reInitializeSubContainer: BOOLEAN; (* true if the sub container of the detail view has to be reinitialized *)
@@ -965,7 +966,7 @@ TYPE
 	 * </table>
 	 * </WebStd:Formular>
 	 *)
-	 AuthenticationForm* = OBJECT(DynamicWebpage.StateLessActiveElement)
+	 AuthenticationForm* = OBJECT(DynamicWebpage.StateLessActiveElement);
 	 		
 		PROCEDURE Transform*(input: XML.Element; request: HTTPSupport.HTTPRequest) : XML.Content;
 		VAR userNameLabel, passwordLabel, loginButtonLabel, failureText: Utilities.String;  
@@ -1098,7 +1099,7 @@ TYPE
 	 * Otherwise it will result in:
 	 *  <Denied/> 
 	 * An administartor is always authorized for each domain *)
-	AuthorizationCheck* = OBJECT (DynamicWebpage.StateLessActiveElement)
+	AuthorizationCheck* = OBJECT (DynamicWebpage.StateLessActiveElement);
 		PROCEDURE Transform*(input: XML.Element; request: HTTPSupport.HTTPRequest) : XML.Content; 
 		VAR domainName: Utilities.String; elem: XML.Element; account: WebAccount; domain: AuthorizationDomain; 
 			session: HTTPSession.Session; granted: BOOLEAN;
@@ -1137,7 +1138,7 @@ TYPE
 	 *  <Granted/>
 	 * Otherwise it will result in:
 	 *  <Denied/>  *)
-	AuthorizationAsAdminCheck* = OBJECT (DynamicWebpage.StateLessActiveElement)
+	AuthorizationAsAdminCheck* = OBJECT (DynamicWebpage.StateLessActiveElement);
 		PROCEDURE Transform*(input: XML.Element; request: HTTPSupport.HTTPRequest) : XML.Content; 
 		VAR elem: XML.Element; session: HTTPSession.Session; 
 		BEGIN
@@ -1155,7 +1156,7 @@ TYPE
 	(** display the actual username, usage example:
 	 * <WebAccounts:GetUserName/>  
 	 * returns NIL if not authorized *)
-	GetUserName* = OBJECT (DynamicWebpage.StateLessActiveElement)
+	GetUserName* = OBJECT (DynamicWebpage.StateLessActiveElement);
 		PROCEDURE Transform*(input: XML.Element; request: HTTPSupport.HTTPRequest) : XML.Content; 
 		VAR session: HTTPSession.Session; pUsername: PTR; usernameDyn: DynamicStrings.DynamicString;
 			username: Utilities.String;
@@ -1176,7 +1177,7 @@ TYPE
 	 * Usage example:
 	 *  <WebAccounts:DisplayNewInterestedEntries id="myDisplay4"/>
 	 *)
-	DisplayNewInterestedEntries* = OBJECT(DynamicWebpage.StateFullActiveElement)
+	DisplayNewInterestedEntries* = OBJECT(DynamicWebpage.StateFullActiveElement);
 	
 		VAR trackerOidPrefix: Utilities.String;
 		
@@ -1302,7 +1303,7 @@ TYPE
 	 *       <IfSuccessfull></IfSuccessfull>
 	 *  </WebAccounts:NewUserFormular>
 	 *)
-	NewUserFormular* = OBJECT(DynamicWebpage.StateFullActiveElement)
+	NewUserFormular* = OBJECT(DynamicWebpage.StateFullActiveElement);
 		VAR 
 			statusMsg: XML.Content;
 			isRegistered: BOOLEAN; 

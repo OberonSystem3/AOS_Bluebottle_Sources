@@ -11,7 +11,8 @@ VAR s : AosCommands.Parameters;
 	connection : AosTCP.Connection;
 	serverName : ARRAY 32 OF CHAR;
 	line : ARRAY 513 OF CHAR;
-	serverIP, res : LONGINT;
+	serverIP: AosIP.Adr;
+	res : LONGINT;
 	reader : AosIO.Reader;
 BEGIN
 	(* open a reader stream on the command parameters *)
@@ -52,7 +53,7 @@ BEGIN
 END GetQuote;
 
 END RFC865Client.
- 
+
 
 System.Free RFC865Client ~
 System.OpenKernelLog

@@ -1,9 +1,9 @@
 (* ETH Oberon, Copyright 2001 ETH Zuerich Institut fuer Computersysteme, ETH Zentrum, CH-8092 Zuerich.
 Refer to the "General ETH Oberon System Source License" contract available at: http://www.oberon.ethz.ch/ *)
 
-MODULE Tar;	(** portable *)	(* Copyright (c) Jacques Supcik, 1995 / js 19.9.95, V4,  modified for S3 C.Hoffmann, 21.9.95 *)
+MODULE Tar; (** portable *)	(* Copyright (c) Jacques Supcik, 1995 / js 19.9.95, V4, modified for S3 C.Hoffmann, 21.9.95 *)
 
-	IMPORT Gadgets, Desktops, Display, Documents,  Texts, TextDocs, TextGadgets, Objects, Files, Out;
+	IMPORT Gadgets, Desktops, Display, Documents, Texts, TextDocs, TextGadgets, Objects, Files, Out;
 
 	CONST
 		Menu = "Tar.Extract Tar.ExtractAll";
@@ -46,9 +46,9 @@ MODULE Tar;	(** portable *)	(* Copyright (c) Jacques Supcik, 1995 / js 19.9.95, 
 		END;
 		name[i] := 0X;
 	END ExtractFileName;
-	
+
 	PROCEDURE ExtractSize(VAR buf: ARRAY OF CHAR; VAR size: LONGINT);
-		VAR i: INTEGER;
+		VAR i: LONGINT;
 	BEGIN
 		i := 124; size := 0;
 		REPEAT
@@ -58,7 +58,7 @@ MODULE Tar;	(** portable *)	(* Copyright (c) Jacques Supcik, 1995 / js 19.9.95, 
 			INC(i)
 		UNTIL i = 136
 	END ExtractSize;
-	
+
 	PROCEDURE ReadEntries(fileName: ARRAY OF CHAR; VAR F: Files.File; VAR entries: Entry);
 		VAR R: Files.Rider; p: Entry; buf: ARRAY 512 OF CHAR; pos, size: LONGINT;
 	BEGIN
@@ -112,7 +112,7 @@ MODULE Tar;	(** portable *)	(* Copyright (c) Jacques Supcik, 1995 / js 19.9.95, 
 	END GetFile;
 	
 
-PROCEDURE DocHandler*(D: Objects.Object; VAR M: Objects.ObjMsg);	(** Handle  D: Document *)
+PROCEDURE DocHandler*(D: Objects.Object; VAR M: Objects.ObjMsg);	(** Handle D: Document *)
 BEGIN
 	WITH D: Documents.Document DO
 		IF M IS Objects.AttrMsg THEN
@@ -135,7 +135,7 @@ BEGIN
 				END
 			END
 		ELSE
-			Documents.Handler(D,M)
+			Documents.Handler(D, M)
 		END
 	END
 END DocHandler;

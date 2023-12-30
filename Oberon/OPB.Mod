@@ -48,7 +48,7 @@ MODULE OPB;	(** non-portable *)
 		Nconst = 7; Ntype = 8; Nproc = 9; Nupto = 10; Nmop = 11; Ndop = 12; Ncall = 13;
 		Ninittd = 14; Nif = 15; Ncaselse = 16; Ncasedo = 17; Nenter = 18; Nassign = 19;
 		Nifelse = 20; Ncase = 21; Nwhile = 22; Nrepeat = 23; Nloop = 24; Nexit = 25;
-		Nreturn = 26; Nwith = 27; Ntrap = 28; Nfixup = 31;
+		Nreturn = 26; Nwith = 27; Ntrap = 28; Nfixup = 31; Nfinally = 40;
 
 		(*function number*)
 		assign = 0;
@@ -1809,7 +1809,7 @@ MODULE OPB;	(** non-portable *)
 		END
 	END Param;
 	
-	PROCEDURE StaticLink*(dlev: SHORTINT);
+	PROCEDURE StaticLink*(dlev: LONGINT);
 		VAR scope: OPT.Object;
 	BEGIN
 		scope := OPT.topScope;
@@ -1820,7 +1820,7 @@ MODULE OPB;	(** non-portable *)
 	END StaticLink;
 
 	PROCEDURE Call*(VAR x: OPT.Node; apar: OPT.Node; fp: OPT.Object);
-		VAR typ: OPT.Struct; p: OPT.Node; lev: SHORTINT;
+		VAR typ: OPT.Struct; p: OPT.Node; lev: LONGINT;
 	BEGIN
 		IF x^.class = Nproc THEN typ := x^.typ;
 			lev := x^.obj^.mnolev;

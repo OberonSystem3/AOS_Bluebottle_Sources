@@ -1,6 +1,6 @@
 (* Aos, Copyright 2001, Pieter Muller, ETH Zurich *)
 
- MODULE AosDiskFS; (** AUTHOR "pjm"; PURPOSE "Aos disk file system"; *)
+MODULE AosDiskFS; (** AUTHOR "pjm"; PURPOSE "Aos disk file system"; *)
 
 IMPORT SYSTEM, AosBoot, AosOut, AosModules, AosClock, AosFS, AosKernel;
 
@@ -341,7 +341,7 @@ TYPE
 						END;
 						ASSERT(q = size-vol.Available());
 						free := vol.Available()*100 DIV size;
-						IF (free > thres) & (vol.Available()*SS > 100000H) THEN
+						IF (free > thres) & (vol.Available() > 100000H DIV SS) THEN
 							state := Opened
 						ELSE	(* undo *)
 							FOR j := SF TO size*SF BY SF DO
@@ -1113,52 +1113,34 @@ BEGIN
 	RETURN vol.Marked(sec DIV SF)
 END Marked;
 
-PROCEDURE MatchPrefix(VAR mask, name: ARRAY OF CHAR; VAR pos, diff: LONGINT);
+PROCEDURE Match*(mask, name: ARRAY OF CHAR): BOOLEAN;
+VAR m,n, om, on: LONGINT; f: BOOLEAN;
 BEGIN
-	pos := 0;
-	LOOP
-		IF mask[pos] = 0X THEN
-			pos := -1; diff := 0; EXIT	(* no "*" found, match all files with this prefix *)
-		ELSIF mask[pos] = "*" THEN
-			IF mask[pos+1] = 0X THEN pos := -1 END;	(* "*" found at end, match all files with this prefix *)
-			diff := 0; EXIT	(* "*" found, do Match *)
-		END;
-		diff := ORD(name[pos]) - ORD(mask[pos]);
-		IF diff # 0 THEN EXIT END;
-		INC(pos)
-	END
-END MatchPrefix;
-
-PROCEDURE Match(pos: LONGINT; VAR pat, name: ARRAY OF CHAR): BOOLEAN;
-VAR i0, i1, j0, j1: LONGINT; f: BOOLEAN;
-BEGIN
+	m := 0; n := 0; om := -1;
 	f := TRUE;
-	IF pos # -1 THEN
-		i0 := pos; j0 := pos;
-		LOOP
-			IF pat[i0] = "*" THEN
-				INC(i0);
-				IF pat[i0] = 0X THEN EXIT END
-			ELSE
-				IF name[j0] # 0X THEN f := FALSE END;
-				EXIT
-			END;
-			f := FALSE;
-			LOOP
-				IF name[j0] = 0X THEN EXIT END;
-				i1 := i0; j1 := j0;
-				LOOP
-					IF (pat[i1] = 0X) OR (pat[i1] = "*") THEN f := TRUE; EXIT END;
-					IF pat[i1] # name[j1] THEN EXIT END;
-					INC(i1); INC(j1)
-				END;
-				IF f THEN j0 := j1; i0 := i1; EXIT END;
-				INC(j0)
-			END;
-			IF ~f THEN EXIT END
-		END
+	LOOP
+		IF (mask[m] = "*") THEN
+			om := m; INC(m);
+			WHILE (name[n] # 0X) & (name[n] # mask[m]) DO INC(n) END;
+			on := n
+		ELSIF (mask[m] = "?") THEN
+			IF (name[n] = 0X) THEN f := FALSE; EXIT END;
+			INC(m); INC(n)
+		ELSE
+			IF (mask[m] # name[n]) THEN
+				IF (om = -1) THEN f := FALSE; EXIT
+				ELSIF (name[n] # 0X) THEN (* try the next position *)
+					m := om; n := on + 1;
+					IF (name[n] = 0X) THEN f := FALSE; EXIT END
+				ELSE
+					f := FALSE; EXIT
+				END
+			ELSE INC(m); INC(n)
+			END
+		END;
+		IF (mask[m] = 0X) & ((name[n] = 0X) OR (om=-1)) THEN EXIT END
 	END;
-	RETURN f & (name[0] # 0X)
+	RETURN f & (name[n] = 0X)
 END Match;
 
 PROCEDURE enumerate(fs: AosFS.FileSystem; VAR mask: ARRAY OF CHAR; dpg: DiskAdr; flags: SET; enum: AosFS.Enumerator; VAR continue: BOOLEAN; VAR fh: FileHeader; VAR fn: ARRAY OF CHAR);
@@ -1166,12 +1148,12 @@ VAR i, pos, diff: LONGINT; dpg1: DiskAdr; a: DirPage; time, date, size: LONGINT;
 BEGIN
 	GetSector(fs.vol, dpg, a); i := 0;
 	WHILE (i < a.m) & continue DO
-		MatchPrefix(mask, a.e[i].name, pos, diff);
+(*		MatchPrefix(mask, a.e[i].name, pos, diff); *)
 		IF i = 0 THEN dpg1 := a.p0 ELSE dpg1 := a.e[i-1].p END;
 		IF diff >= 0 THEN (* matching prefix *)
 			IF dpg1 # 0 THEN enumerate(fs, mask, dpg1, flags, enum, continue, fh, fn) END;
 			IF diff = 0 THEN
-				IF continue & Match(pos, mask, a.e[i].name) THEN
+				IF continue & ((mask = "") OR Match(mask, a.e[i].name)) THEN
 					time := 0; date := 0; size := 0;
 					IF flags * {AosFS.EnumTime, AosFS.EnumSize} # {} THEN
 						GetSector(fs.vol, a.e[i].adr, fh);
@@ -1447,5 +1429,6 @@ END AosDiskFS.
 *)
 
 (*
-	04.02.2004	lb	Prevent disk space leaks during system run (disk GC)
+	04.02.2004	lb			Prevent disk space leaks during system run (disk GC)
+	03.01.2006	staubesv	Avoid longint overflow that caused disk gc even if not necessary
 *)

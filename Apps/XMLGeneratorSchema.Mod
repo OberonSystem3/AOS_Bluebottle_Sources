@@ -1,4 +1,4 @@
-MODULE XMLGeneratorSchema;	(** Stefan Walthert   *)
+MODULE XMLGeneratorSchema;	(** Stefan Walthert  *)
 (** AUTHOR "swalthert"; PURPOSE "XCCS: XML Component Configuration Schema"; *)
 
 IMPORT
@@ -9,10 +9,12 @@ VAR xgsFile: AosFS.File; scanner: XMLScanner.Scanner; parser: XMLParser.Parser; 
 	root: XML.Element; name, generator, elementName: XML.String; contents: XMLObjects.Enumerator; content: PTR;
 	module: AosModules.Module; commandParProc: AosModules.CommandParProc; 
 	res, i: LONGINT; msg: ARRAY 1024 OF CHAR; er: XML.ElementRegistry;
+	reader: AosFS.Reader;
 BEGIN
 	xgsFile := AosFS.Old(xgsName);
 	IF xgsFile = NIL THEN RETURN NIL END;
-	NEW(scanner, xgsFile); NEW(parser, scanner);
+	NEW(reader, xgsFile, 0);
+	NEW(scanner, reader); NEW(parser, scanner);
 	doc := parser.Parse();
 	root := doc.GetRoot();
 	name := root.GetName();

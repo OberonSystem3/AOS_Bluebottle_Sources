@@ -321,7 +321,7 @@ END Load;
 				WITH M: Objects.FileMsg DO
 					IF M.id = Objects.load THEN
 						obj.depth := 0;
-						Load(M.R, 14 (* Display3.textbackC *), TRUE, obj);
+						Load(M.R, 14 (* Display3.textbackC *), FALSE (* fof *), obj);
 						IF obj.depth = 0 THEN M.len := 0 ELSE M.len := Files.Length(Files.Base(M.R)) END
 					ELSE
 						Pictures.Handle(obj, M)

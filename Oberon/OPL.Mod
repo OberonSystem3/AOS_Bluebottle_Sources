@@ -30,7 +30,7 @@ Opcodes of the pseudo risc machine
 
 opcode < 0: dead code
 
- Code	Meaning	op	dest	src1	src2	inx
+Code	Meaning	op	dest	src1	src2	inx
 
 ld z,x	mov z,x	32	reg	base/reg	const/disp/adr	reg
 ldbdw z,x	movsx z,x byte to dword sign ext.	64	reg	base/reg	disp/adr	reg
@@ -148,7 +148,7 @@ fabs z,x	z := ABS (x)	2784	freg	freg	-	-
 fchs z,x	z := -x	2816	freg	freg	-	-
 fcmp x,y	floating point compare	2848	-	freg	freg	-
 newStat	begin of a new statement	3136	-	text pos	-	-
-*)	
+*)	
 
 	ld* = 32;	ldbdw* = 64;	ldwdw* = 96;	ldbw* = 128;	
 	ldbdwu* = 160;	ldwdwu* = 196;	ldbwu* = 224;	getReg* = 256 ;
@@ -174,6 +174,7 @@ newStat	begin of a new statement	3136	-	text pos	-	-
 	cli* = 3168;	sti* = 3200;	in* = 3232;	out* = 3264;
 	assembler* = 3296;
 	clear*= 3328;	std*= 3392;
+	finlabel *= 3456;
 
 	(* floating point *)
 	fload*= 2528;	fstore* = 2560;	fist*= 2592;	fild* = 2624;
@@ -207,6 +208,7 @@ newStat	begin of a new statement	3136	-	text pos	-	-
 	Cli = cli DIV 32;	Sti = sti DIV 32;	In = in DIV 32;	Out = out DIV 32;
 	Assembler = assembler DIV 32;
 	Clear = clear DIV 32; Std = std DIV 32;
+	FinLabel = finlabel DIV 32;
 
 	(* floating point *)
 	FLoad= fload DIV 32;	FStore = fstore DIV 32;	Fist= fist DIV 32;	Fild = fild DIV 32;
@@ -491,7 +493,8 @@ References:
 		END;
 
 		VarConsRec = RECORD
-			mod, entry, noflinks, index: INTEGER
+			mod : LONGINT;
+			entry, noflinks, index: INTEGER
 		END;
 		VarConsTable = POINTER TO ARRAY OF VarConsRec;
 
@@ -508,6 +511,11 @@ References:
 		RecTable = POINTER TO ARRAY OF OPT.Struct;
 		EntryTable = POINTER TO ARRAY OF INTEGER;
 		ExpTable = POINTER TO ARRAY OF LONGINT;
+		
+		ExTableEntry = POINTER TO RECORD
+			pcFrom, pcTo, pcHandler: LONGINT;
+			next: ExTableEntry;
+		END;		
 
 	VAR
 	ptrTab: PtrTable;	(* pointer table *)
@@ -530,6 +538,9 @@ References:
 	JmpConvert: ARRAY Jnc-Je+1 OF SHORTINT;
 	SetccConvert: ARRAY Setnc - Sete + 1 OF SHORTINT;
 	FreeRegDisp: SHORTINT;
+
+	exTableLen: LONGINT;
+	exTable: ExTableEntry;
 
 	nofStr: INTEGER;
 	linkTable*: LONGINT;
@@ -557,6 +568,8 @@ References:
 		link [7].mod := 0; link [7].entry := LockEntryNr; link [7].offset := Nil; (* Kernel.Lock *)
 		link [8].mod := 0; link [8].entry := UnlockEntryNr; link [8].offset := Nil; (* Kernel.Unlock *)
 		nofLinks := InitLinks;
+		exTableLen := 0;
+		exTable := NIL;
 	END Init;
 
 (* register part *)
@@ -1982,6 +1995,26 @@ ASSERT(~loaded(instr.dest));
 		FreeReg (EAX)
 	END FloatCmp;
 
+	PROCEDURE AddExceptionHandler(pcFrom, pcTo, pcHandler: LONGINT);
+	VAR
+		entry: ExTableEntry;
+	BEGIN
+		NEW(entry);
+		entry.pcFrom := pcFrom; entry.pcTo := pcTo; entry.pcHandler := pcHandler;
+		IF exTable = NIL THEN exTable := entry
+		ELSE entry.next := exTable; exTable := entry;
+		END;
+		INC(exTableLen);
+	END AddExceptionHandler;
+
+	PROCEDURE GenFinally(VAR instr: Instruction);
+	BEGIN		
+		(* Procedure offset = instr.node.obj.linkadr *)
+		(* Handler at instr.pc *);
+		AddExceptionHandler(instr.node.obj.linkadr, instr.pc, instr.pc);
+	END GenFinally;
+	
+
 	PROCEDURE GenEntier (VAR instr: Instruction);
 		VAR dest, src, reg, dummy: SHORTINT;
 	(*
@@ -2616,6 +2649,7 @@ ASSERT(~loaded(instr.dest));
 				  | Short: GenShort (Instr [i])
 				  | Entier: GenEntier (Instr [i])
 				  | Label: (* only used for jumps *)
+  				  | FinLabel: (* FINALLY *) GenFinally(Instr[i]);
 				  | FLoad, Fild: Fload (Instr [i])
 				  | FStore, Fist: Fstore (Instr [i])
 				  | Fabs, Fchs: FloatGen1 (Instr [i])
@@ -2661,7 +2695,7 @@ ASSERT(~loaded(instr.dest));
 
 (* object file *)
 
-	PROCEDURE NewVarCons* (mod, entry: INTEGER; VAR index: LONGINT);
+	PROCEDURE NewVarCons* (mod: LONGINT; entry: INTEGER; VAR index: LONGINT);
 	VAR i: LONGINT;  var: VarConsTable;
 	BEGIN
 		IF nofVarCons >= LEN(varConsLink) THEN
@@ -3069,8 +3103,8 @@ ASSERT(~loaded(instr.dest));
 				Use(obj.right);
 			END					
 		END
-	END Use;
-
+	END Use;					
+		
 	PROCEDURE OutCode*(VAR modName: ARRAY OF CHAR);
 		VAR
 			i, k, pos: LONGINT;
@@ -3079,7 +3113,7 @@ ASSERT(~loaded(instr.dest));
 			typ, btyp: OPT.Struct;
 			commandTab: ARRAY MaxCommands OF OPT.Object;
 			newMthTab: ARRAY MaxEntry OF OPT.Object;
-			modMap: ARRAY 128 OF SHORTINT;
+			modMap: ARRAY 4096 OF SHORTINT;
 
 		PROCEDURE WriteName (VAR name: ARRAY OF CHAR);
 			VAR i: INTEGER; ch: CHAR;
@@ -3204,6 +3238,7 @@ ASSERT(~loaded(instr.dest));
 		OPM.ObjWInt (nofImp);
 		OPM.ObjWInt (nofVarCons); OPM.ObjWInt (nofLinks-linkCorrection);
 		OPM.ObjWBytes (OPO.dsize, 4); OPM.ObjWInt (SHORT (OPO.csize)); OPM.ObjWInt (SHORT (OPO.pc));
+		OPM.ObjWLInt(exTableLen);
 		WriteName (modName);
 	(* entry block *)
 		OPM.ObjW (EntryTag);
@@ -3331,7 +3366,18 @@ ASSERT(~loaded(instr.dest));
 			END;
 			INC (i)
 		END;
-	(* ref block *)
+		
+		(* exTable *)
+		OPM.ObjW(8EX);
+		WHILE exTable # NIL DO
+			OPM.ObjW(0FEX);
+			OPM.ObjWNum(exTable.pcFrom);
+			OPM.ObjWNum(exTable.pcTo);
+			OPM.ObjWNum(exTable.pcHandler);							
+			exTable := exTable.next;
+		END;
+		
+		(* ref block *)
 		(* written in OPM.CloseRefObj *)
 		OPM.CloseObj
 	END OutCode;

@@ -73,6 +73,24 @@ CONST
 	KsMetaR* = 0FFE8H;	(** Right meta, Right Windows *)
 	KsAltL* = 0FFE9H;	(** Left alt *)
 	KsAltR* = 0FFEAH;	(** Right alt *)
+	
+		(** HID Consumer Keys**)
+	KsScanPreviousTrack*=	0FF0000H;
+	KsScanNextTrack*= 		0FF0001H;
+	KsALConsumerControl*= 	0FF0002H;
+	KsMute*= 				0FF0003H;
+	KsVolumeDecrement*= 	0FF0004H;
+	KsVolumeIncrement*= 	0FF0005H;
+	KsPlayPause*= 			0FF0006H;
+	KsStopOSC*=			0FF0007H;
+	KsALEmailReader*=		0FF0008H;
+	KsALCalculator*=		0FF0009H;
+	KsACSearch*=			0FF000AH;
+	KsACHome*=			0FF000BH;
+	KsACBack*=				0FF000CH;
+	KsACForward*=			0FF000DH;
+	KsACBookmarks*=		0FF000EH;
+	KsConsumerButtons*=	0FFF000H;
 
 TYPE
 	Message* = RECORD END;	(** generic message. *)

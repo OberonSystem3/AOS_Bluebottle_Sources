@@ -1,9 +1,9 @@
 (* ETH Oberon, Copyright 2001 ETH Zuerich Institut fuer Computersysteme, ETH Zentrum, CH-8092 Zuerich.
 Refer to the "General ETH Oberon System Source License" contract available at: http://www.oberon.ethz.ch/ *)
 
-MODULE LPRPrinter;	(** portable *)  (* ejz  , LPR Version of PSPrinter, RFC 1179 *)
+MODULE LPRPrinter;	(** portable *)  (* ejz , LPR Version of PSPrinter, RFC 1179 *)
 	
-	IMPORT Files, Modules, Texts, Strings, Oberon, Printer, PSPrinter, NetSystem;
+	IMPORT Files, Modules, Texts, Strings, Oberon, Printer, PSPrinter, AosIP, NetSystem;
 
 	CONST
 		InstallCmd = "LPRPrinter.Install";
@@ -42,7 +42,7 @@ MODULE LPRPrinter;	(** portable *)  (* ejz  , LPR Version of PSPrinter, RFC 1179
 			locport: INTEGER;
 	BEGIN
 		NetSystem.GetIP(host, adr);
-		IF adr = NetSystem.anyIP THEN
+		IF AosIP.AdrsEqual(adr, NetSystem.anyIP) THEN
 			res := -1;
 			RETURN FALSE
 		END;

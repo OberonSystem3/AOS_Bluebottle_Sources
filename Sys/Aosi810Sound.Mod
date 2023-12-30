@@ -4,7 +4,7 @@
 MODULE Aosi810Sound; (** AUTOR "krijo210@student.liu.se"; PURPOSE "Intel 810 Sound driver for AosSound"; *)
 	
 	IMPORT PCI, AosMemory, SYSTEM, AosKernel, AosActive, AosInterrupts, AosModules, AosPlugins, 
-		AosSound, AosOut, AosFS, AosIO;
+		AosSound, AosOut;
 	
 	CONST
 		(* PCI Audio Control register offsets *)
@@ -192,9 +192,7 @@ MODULE Aosi810Sound; (** AUTOR "krijo210@student.liu.se"; PURPOSE "Intel 810 Sou
 				is granted. If 1 is returned AC97 Codec is blocked. Then retry until timer
 				of 2 ms times out. *)
 			PROCEDURE BusyWait() : BOOLEAN;
-			VAR 
-				t: AosKernel.MilliTimer;
-				temp : LONGINT;
+			VAR t: AosKernel.MilliTimer;
 			BEGIN
 				AosKernel.SetTimer(t, 2);
 				WHILE ~AosKernel.Expired(t) DO
@@ -266,7 +264,6 @@ TYPE
 				res : LONGINT;
 				DMAInPhysAdr, DMAOutPhysAdr, DMAMicPhysAdr : LONGINT;
 				i : LONGINT;
-				buffer : AosSound.Buffer;
 			BEGIN
 				SELF.base := base;
 				SELF.irq := irq;
@@ -376,9 +373,6 @@ TYPE
 			END Constr;
 			
 			PROCEDURE Finalize;
-			VAR
-				playChannel : PlayChannelList;
-				recChannel : RecChannelList;
 			BEGIN
 				Disable;
 				
@@ -397,7 +391,6 @@ TYPE
 			
 			PROCEDURE HandleInterrupt;
 			VAR
-				item : PlayChannelList;
 				status : LONGINT;
 				interrupt : LONGINT;
 			BEGIN
@@ -468,8 +461,6 @@ TYPE
 				item : PlayChannelList;
 				buffer : AosSound.Buffer;
 				silent : BOOLEAN;
-				mix : HUGEINT;
-				i : LONGINT;
 			BEGIN
 				playCurrentBufferIndex := playLastValidIndex;
 				
@@ -654,7 +645,6 @@ TYPE
 				nofSubChannels, format : LONGINT; VAR res : LONGINT);
 			VAR
 				playChannel : PlayChannel;
-				item : PlayChannelList;
 				sResolution : LONGINT;
 			BEGIN {EXCLUSIVE}
 				channel := NIL;
@@ -859,7 +849,7 @@ TYPE
 					RETURN;
 				END;
 				
-				WHILE (item.next # NIL) & (item.mixerChangedProc # mixChangeProc) DO
+				WHILE (item.next # NIL) & (item.next.mixerChangedProc # mixChangeProc) DO
 					item := item.next
 				END;
 				
@@ -915,7 +905,7 @@ TYPE
 				driver : Driver;
 				name, desc : POINTER TO ARRAY OF CHAR;
 				volumeReg : LONGINT;
-				volume : LONGINT;
+				volume, muteVol : LONGINT;
 				volBits : LONGINT;
 				mute : BOOLEAN;
 			
@@ -988,10 +978,12 @@ TYPE
 				volume : LONGINT;
 			BEGIN {EXCLUSIVE}
 				SELF.mute := mute;
-				volume := driver.AC97.RegRead16(volumeReg);
+				IF mute THEN muteVol := volume; volume := 0
+				ELSE volume := muteVol END;
+(*				volume := driver.AC97.RegRead16(volumeReg);
 				SetBit(volume, 15);
 				driver.AC97.RegWrite16(volume, volumeReg);
-				CallMixerListeners
+*)				CallMixerListeners
 			END SetMute;
 			
 			PROCEDURE GetIsMute*() : BOOLEAN;
@@ -1056,7 +1048,6 @@ TYPE
 			(* Linear volume *)
 			PROCEDURE SampleSetVolume(VAR sample : Sample);
 			VAR
-				shifts : LONGINT;
 				left, right : LONGINT;
 				volume : LONGINT;
 			BEGIN
@@ -1127,7 +1118,7 @@ TYPE
 			PROCEDURE Stop*;
 			BEGIN
 				state := StateStoped;
-				ReturnAllBuffers
+				ReturnAllBuffers;
 			END Stop;
 			
 			PROCEDURE Close*;
@@ -1154,13 +1145,14 @@ TYPE
 			PROCEDURE ReturnAllBuffers;
 			VAR
 				item : BufferList;
-			BEGIN
+			BEGIN {EXCLUSIVE}
 				IF bufferListener = NIL THEN RETURN END;
 				item := firstBuffer;
 				WHILE item # NIL DO
 					bufferListener(item.buffer);
 					item := item.next
-				END
+				END;
+				firstBuffer := NIL
 			END ReturnAllBuffers;
 			
 		END Channel;
@@ -1177,7 +1169,7 @@ TYPE
 			BEGIN
 				ASSERT(state # StateClosed);
 				state := StatePlaying;
-				driver.Enable
+				driver.Enable;
 			END Start;
 			
 			PROCEDURE Close*;
@@ -1202,7 +1194,7 @@ TYPE
 				playRecBufferPos : LONGINT;
 				sample : Sample;
 				srate : LONGINT;
-			BEGIN
+			BEGIN {EXCLUSIVE}
 				srate := 0;
 				
 				WHILE (firstBuffer # NIL) & (playRecBufferPos < BufferSize) DO
@@ -1434,16 +1426,13 @@ TYPE
 
 
 	PROCEDURE SetBit(VAR a : LONGINT; n : LONGINT);
-	VAR 
-		t : SET;
 	BEGIN
 		ASSERT((n >= 0) & (n < 32));
 		INCL(SYSTEM.VAL(SET, a), n)
 	END SetBit;
 	
 	PROCEDURE ClearBit(VAR a : LONGINT; n : LONGINT);
-	VAR
-		t : SET;
+	VAR t : SET;
 	BEGIN
 		ASSERT((n >= 0) & (n < 32));
 		t := SYSTEM.VAL(SET, a);
@@ -1479,7 +1468,7 @@ TYPE
 	(* Scan after PCI card and install it if found *)
 	PROCEDURE ScanPCI(vendid, devid : LONGINT);
 	VAR 
-		index, res, i, j : LONGINT;
+		index, res, i : LONGINT;
 		CmdReg : LONGINT;
 		bus, dev, fkt : LONGINT;
 		nambar, nabmbar, irq : LONGINT;
@@ -1559,6 +1548,7 @@ END ScanPCI;
 			(* TODO - extend this list *)
 			ScanPCI(8086H,2485H);
 			ScanPCI(8086H, 24C5H);
+			ScanPCI(8086H, 266EH); (* Intel 915 chipset *)
 			
 			(* These chips should work, but it hasn't been tested! *)
 			(* This list could probaly be further extended *)
@@ -1633,3 +1623,4 @@ Aos.Call PlayRecWave.Play x.wav ~
 Aos.Call MP3Player.Play DATA:/SomeMp3File.Mp3 ~
 
 System.Free Aosi810Sound ~
+S.Free Aosi810Sound~

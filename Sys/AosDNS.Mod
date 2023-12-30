@@ -1,6 +1,6 @@
 (* Aos, Copyright 2001, Pieter Muller, ETH Zurich *)
 
- MODULE AosDNS; (** AUTHOR "pjm, mvt"; PURPOSE "DNS client"; *)
+MODULE AosDNS; (** AUTHOR "pjm, mvt"; PURPOSE "DNS client"; *)
 
 (* Portions based on NetDNS.Mod by mg et al. *)
 
@@ -11,16 +11,17 @@ CONST
 	Ok* = 0;
 	NotFound* = 3601;
 	BadName* = 3602;
+	MaxNofServer* = 10; (* max. number registered of DNS servers *)
 		
 	UDPTimeout = 1000; (* time per server query in ms *)
 	Tries = 5; (* number of tries per server *)
-	MaxNofServer = 10; (* max. number registered of DNS servers *)
 	
 	BadNameTimeout = 30; (* how many seconds to cache a bad name *)
 
 	ArpaDomain = "IN-ADDR.ARPA";
 
 	TypeA = 1;
+	TypeAAAA = 28;
 	TypeMX = 15;
 	TypePTR = 12;
 	TypeIN = 1;
@@ -120,7 +121,7 @@ VAR
 	serverlist: ServerList;
 
 	(* Statistic variables *)
-	NDNSReceived, NDNSSent, NDNSMismatchID, NDNSError: LONGINT;
+	NDNSReceived-, NDNSSent-, NDNSMismatchID-, NDNSError-: LONGINT;
 
 PROCEDURE CacheCleanup;
 VAR c, p: Cache; now: LONGINT;
@@ -149,7 +150,7 @@ BEGIN {EXCLUSIVE}
 	ELSE timeout := timeout * AosKernel.second
 	END;
 	expire := AosKernel.GetTimer() + timeout; c := cache.next;
-	WHILE (c # NIL) & ((name # c.name) OR (adr # c.adr)) DO c := c.next END;
+	WHILE (c # NIL) & ((name # c.name) OR (~AosIP.AdrsEqual(adr, c.adr))) DO c := c.next END;
 	IF c = NIL THEN
 		IF Trace THEN AosOut.String(" added "); AosOut.Int(timeout, 1) END;
 		NEW(c); COPY(name, c.name); COPY(domain, c.domain); c.adr := adr;
@@ -195,7 +196,7 @@ VAR c: Cache;
 BEGIN
 	CacheCleanup;
 	c := cache.next;
-	WHILE (c # NIL) & (adr # c.adr) DO c := c.next END;
+	WHILE (c # NIL) & (~AosIP.AdrsEqual(adr, c.adr)) DO c := c.next END;
 	IF Trace THEN
 		IF c = NIL THEN AosOut.String(" not") END;
 		AosOut.String(" in cache");
@@ -287,7 +288,11 @@ BEGIN
 END Domain;
 
 PROCEDURE RetrieveInfo(qtype: LONGINT; VAR adr: AosIP.Adr; VAR buf, hname: ARRAY OF CHAR; VAR len, timeout, res: LONGINT);
-VAR name0: Name; adr0: AosIP.Adr; i, k, l, id0, flags, qd, an, ns, ar, type, class, ttl1, ttl0, ttl: LONGINT;
+VAR 
+	name0: Name; 
+	adr0: AosIP.Adr; 
+	c, i, k, l, id0, flags, qd, an, ns, ar, type, class, ttl1, ttl0, ttl: LONGINT;
+	
 BEGIN
 	k := 0; timeout := 0; res := NotFound; hname[0] := 0X;
 	PickW(k, buf, id0);
@@ -323,9 +328,17 @@ BEGIN
 				IF type = qtype THEN
 					CASE type OF
 						TypeA:
-							adr0 := AosNet.Get4(buf, k); (* get IP address *)
-							IF adr = AosIP.NilAdr THEN adr := adr0; timeout := ttl; res := Ok END;
+							adr0.ipv4Adr := AosNet.Get4(buf, k); (* get IPv4 address *)
+							adr0.usedProtocol := AosIP.IPv4;
+							IF AosIP.IsNilAdr(adr) THEN adr := adr0; timeout := ttl; res := Ok END;
 							INC(k, 4)
+						|TypeAAAA:
+							adr0.usedProtocol := AosIP.IPv6;
+							FOR c := 0 TO 15 DO
+								adr0.ipv6Adr[c] := buf[k+c];
+							END;
+							IF AosIP.IsNilAdr(adr) THEN adr := adr0; timeout := ttl; res := Ok END;
+							INC(k,16);							
 						|TypePTR:
 							IF hname[0] = 0X THEN
 								i := 0; GetName(k, i, buf, hname); timeout := ttl; res := Ok
@@ -371,7 +384,7 @@ END SendQuery;
 
 PROCEDURE ReceiveReply(pcb: AosUDP.Socket; VAR buf: ARRAY OF CHAR; VAR len, res: LONGINT);
 VAR radr: AosIP.Adr; rport: LONGINT;
-BEGIN
+BEGIN		
 	REPEAT
 		pcb.Receive(buf, 0, LEN(buf), UDPTimeout, radr, rport, len, res)
 	UNTIL (rport = DNSPort) & (len > 0) OR (res # Ok);
@@ -400,12 +413,12 @@ BEGIN
 			END;	(* can not reach this server *)
 			REPEAT	(* read replies *)
 				ReceiveReply(pcb, buf, len, res);
-				IF (res = Ok) & (len > 0) THEN
+				IF (res = Ok) & (len > 0) THEN						
 					RetrieveInfo(type, adr, buf, hname, len, timeout, res);
-					IF (res = Ok) OR (res = BadName) THEN
+					IF (res = Ok) OR (res = BadName) THEN							
 						pcb.Close();
 						RETURN;
-					END;
+					END;							
 				END
 			UNTIL res # Ok;
 			pcb.Close();
@@ -455,18 +468,34 @@ VAR
 BEGIN
 	dummy[0] := 0X;
 	adr := AosIP.StrToAdr(hostname);
-	IF adr = AosIP.NilAdr THEN
+
+	IF AosIP.IsNilAdr (adr) THEN
 		IF Trace THEN AosOut.String("HostByName: "); AosOut.String(hostname) END;
 		COPY(hostname, name); Domain(name, domain, FALSE); Lower(name);
 		IF Trace THEN AosOut.Char(" "); AosOut.String(name) END;
 		c := CacheFindName(name);
 		IF c # NIL THEN
 			adr := c.adr;
-			IF adr # AosIP.NilAdr THEN res := Ok ELSE res := BadName END
+			IF ~AosIP.IsNilAdr (adr) THEN res := Ok ELSE res := BadName END
 		ELSE
 			adr := AosIP.NilAdr;
-			QueryDNS(TypeA, buf, name, dummy, adr, timeout, res);
-			IF (res = Ok) OR (res = BadName) THEN CacheAdd(name, adr, dummy, timeout) END
+			(* Query first preferred protocol family *)
+			IF AosIP.preferredProtocol = AosIP.IPv4 THEN
+				QueryDNS(TypeA, buf, name, dummy, adr, timeout, res);
+			ELSE
+				QueryDNS(TypeAAAA, buf, name, dummy, adr, timeout, res);
+			END;
+			IF (res = Ok) OR (res = BadName) THEN 
+				CacheAdd(name, adr, dummy, timeout) 
+			ELSIF AosIP.preferredProtocol = AosIP.IPv4 THEN
+				(* If a error occured query not preferred protocol family *)
+				QueryDNS(TypeAAAA, buf, name, dummy, adr, timeout, res);
+			ELSE
+				QueryDNS(TypeA, buf, name, dummy, adr, timeout, res);
+			END;
+			IF (res = Ok) OR (res = BadName) THEN
+				CacheAdd(name, adr, dummy, timeout);
+			END;
 		END;
 		IF Trace THEN AosOut.String(" res="); AosOut.Int(res, 1); AosOut.Ln END
 	ELSE
@@ -482,34 +511,38 @@ VAR
 	name: Name;
 	i, j, k, timeout: LONGINT;
 	c: Cache;
+	int: AosIP.Interface;
 BEGIN
-	IF (adr # AosIP.NilAdr) & (adr # AosIP.BroadcastAdr) THEN
-		AosIP.AdrToStr(adr, buf);
-		IF Trace THEN AosOut.String("HostByNumber: "); AosOut.String(buf) END;
-		c := CacheFindAdr(adr);
-		IF c # NIL THEN
-			COPY(c.name, hostname);
-			res := Ok;
-		ELSE
-			hostname[0] := 0X;
-			i := 0; WHILE buf[i] # 0X DO INC(i) END;
-			j := 0;
-			REPEAT
-				WHILE (i # 0) & (buf[i] # ".") DO DEC(i) END;
-				k := i;
-				IF buf[i] = "." THEN INC(i) END;
-				WHILE (buf[i] # ".") & (buf[i] # 0X) DO name[j] := buf[i]; INC(j); INC(i) END;
-				name[j] := "."; INC(j);
-				i := k-1
-			UNTIL i < 0;
-			name[j] := 0X;
-			Domain(name, ArpaDomain, TRUE);
-			IF Trace THEN AosOut.Char(" "); AosOut.String(name) END;
-			QueryDNS(TypePTR, buf, name, hostname, adr, timeout, res);
-			IF (res = Ok) OR (res = BadName) THEN CacheAdd(hostname, adr, "", timeout) END
+	IF ~AosIP.IsNilAdr(adr) THEN
+		int := AosIP.InterfaceByDstIP(adr);	
+		IF ~int.IsBroadcast(adr) THEN		
+			AosIP.AdrToStr(adr, buf);
+			IF Trace THEN AosOut.String("HostByNumber: "); AosOut.String(buf) END;
+			c := CacheFindAdr(adr);
+			IF c # NIL THEN
+				COPY(c.name, hostname);
+				res := Ok;
+			ELSE
+				hostname[0] := 0X;
+				i := 0; WHILE buf[i] # 0X DO INC(i) END;
+				j := 0;
+				REPEAT
+					WHILE (i # 0) & (buf[i] # ".") DO DEC(i) END;
+					k := i;
+					IF buf[i] = "." THEN INC(i) END;
+					WHILE (buf[i] # ".") & (buf[i] # 0X) DO name[j] := buf[i]; INC(j); INC(i) END;
+					name[j] := "."; INC(j);
+					i := k-1
+				UNTIL i < 0;
+				name[j] := 0X;
+				Domain(name, ArpaDomain, TRUE);
+				IF Trace THEN AosOut.Char(" "); AosOut.String(name) END;
+				QueryDNS(TypePTR, buf, name, hostname, adr, timeout, res);
+				IF (res = Ok) OR (res = BadName) THEN CacheAdd(hostname, adr, "", timeout) END
+			END;
+			IF (res = Ok) & (hostname[0] = 0X) THEN res := BadName END;
+			IF Trace THEN AosOut.String(" res="); AosOut.Int(res, 1); AosOut.Ln END
 		END;
-		IF (res = Ok) & (hostname[0] = 0X) THEN res := BadName END;
-		IF Trace THEN AosOut.String(" res="); AosOut.Int(res, 1); AosOut.Ln END
 	ELSE
 		hostname[0] := 0X;
 		res := BadName;
@@ -534,4 +567,5 @@ History:
 02.11.2003	mvt	Adapted for new interfaces of AosNet, AosIP and AosUDP.
 03.11.2003	mvt	Added support for MX queries (mail exchange).
 21.11.2003	mvt	Support for concurrent queries.
+02.05.2005	eb	Type AAAA supported
 *)

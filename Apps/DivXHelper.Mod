@@ -7,7 +7,7 @@ MODULE DivXHelper;
 IMPORT
 	AosFS,AosIO, AosCommands, Raster, WM := WMWindowManager, List := TFClasses, 
 	Messages := WMMessages, Rectangles := WMRectangles, AosModules, AosOut, Util := Utilities, SYSTEM,
-	Math, Reals, DT := DivXTypes, AVI;
+	Math, Reals, DT := DivXTypes, AVI, AosCodecs, idct := IDCT, AosBoot; 
 	
 	CONST
 		(* Const for idct *)
@@ -31,18 +31,17 @@ IMPORT
 	VAR
 		block*: DT.PointerToArrayOfLONGINT;
 		mp4State: DT.MP4State;
-		r: AVI.AVIStream;
 		dcScaler: LONGINT;
 		saiAcLeftIndex: ARRAY 8 OF LONGINT;
 		vld: VLD;
 		log: AosIO.Writer;
+		srcBlock, dstBlock*: POINTER TO ARRAY 68 OF INTEGER;
 					
-	PROCEDURE & init( state: DT.MP4State;  reader: AVI.AVIStream; logWriter: AosIO.Writer );
+	PROCEDURE & init( state: DT.MP4State; logWriter: AosIO.Writer );
 	BEGIN
 		log := logWriter;
-		NEW( vld, reader, log );
+		NEW(vld, log);
 		mp4State := state;
-		r := reader;
 		
 		saiAcLeftIndex[0] := 0;
 		saiAcLeftIndex[1] := 8;
@@ -53,15 +52,14 @@ IMPORT
 		saiAcLeftIndex[6] := 48;
 		saiAcLeftIndex[7] := 56;
 		
-		NEW( block, 64 )
+		NEW( block, 64 );
+		NEW(srcBlock); NEW(dstBlock);
 	END init;
 	
 	PROCEDURE ClearBlock();
 	BEGIN
-		IF DT.EnableMMX THEN
-			ClearBlockMMX( SYSTEM.ADR( block[0] ) );
-		ELSE
-			ClearBlockGeneric();
+		IF DT.EnableMMX THEN ClearBlockMMX( SYSTEM.ADR( block[0] ) );
+		ELSE ClearBlockGeneric();
 		END;
 	END ClearBlock;
 	
@@ -72,22 +70,20 @@ IMPORT
 		adr: LONGINT;
 	BEGIN
 		adr := SYSTEM.ADR( block[0] );
-
 		FOR i := 0 TO 63 DO
 			SYSTEM.PUT32( adr, 0 );
 			adr := adr + SIZE( LONGINT )
-		END;
-	
+		END;	
 	END ClearBlockGeneric;
 	
 	PROCEDURE ClearBlockMMX( dst: LONGINT );
 	CODE{ SYSTEM.MMX, SYSTEM.PentiumPro }
-		MOV		EDX, -32		; clear loop counter
+		MOV		EDX, -32				; clear loop counter
 		MOV		ESI, dst[EBP]			; capture block address
 
-		PXOR  MM0, MM0		; mm0 = 0
+		PXOR  MM0, MM0					; mm0 = 0
 	loop:
-		MOVQ	[ESI], MM0		; clear memory location
+		MOVQ	[ESI], MM0					; clear memory location
 		ADD		ESI, 8
 		INC		EDX
 		JNZ		loop
@@ -95,7 +91,7 @@ IMPORT
 	END ClearBlockMMX;
 
 	(* Decode an intracoded macroblock *)
-	PROCEDURE BlockIntra*( blockNum: LONGINT; coded:BOOLEAN ): LONGINT;
+	PROCEDURE BlockIntra*( blockNum: LONGINT; coded:BOOLEAN; VAR r: DT.VideoBuffer ): LONGINT;
 	VAR 
 		i, dctDcSize, dctDcDiff, temp: LONGINT;
 		event: Event;
@@ -104,29 +100,29 @@ IMPORT
 		ClearBlock();
 
 		(* dc coeff *)
-		SetDCScaler(blockNum); 	(* calculate DC scaler *)
+		SetDCScaler(blockNum); 							(* calculate DC scaler *)
 
 		IF blockNum < 4 THEN
-			dctDcSize := GetDCSizeLum();
+			dctDcSize := GetDCSizeLum(r);
 			IF dctDcSize # 0 THEN 
-				dctDcDiff := GetDCDiff( dctDcSize )
+				dctDcDiff := GetDCDiff( dctDcSize, r )
 			ELSE
 				dctDcDiff := 0
 			END;
 			
 			IF dctDcSize > 8 THEN
-				temp := r.GetBits( 1 ) (* marker bit *)
+				temp := AVI.GetBits(1, r.data^ , r.index);	(* marker bit *)
 			END;
 		ELSE
-			dctDcSize := GetDCSizeChr();
+			dctDcSize := GetDCSizeChr(r);
 			IF dctDcSize # 0 THEN
-				dctDcDiff := GetDCDiff( dctDcSize )
+				dctDcDiff := GetDCDiff( dctDcSize, r )
 			ELSE 
 				dctDcDiff := 0
 			END;
 			
 			IF dctDcSize > 8 THEN
-				temp := r.GetBits( 1 )	(* marker bit *)
+				temp := AVI.GetBits(1, r.data^, r.index );	(* marker bit *)
 			END;
 		END;
 		block[0] := dctDcDiff;
@@ -152,11 +148,9 @@ IMPORT
 			(* VLD Decoding *)
 			i := 1;
 			REPEAT (* event vld *)
-				vld.VldIntraDCT( event );
+				vld.VldIntraDCT( event, r );
 				ASSERT( event.run # -1 );
-
 				i := i + event.run;
-
 				block[zigzag[i]] := event.level;
 				
 				IF DT.Debug THEN
@@ -178,10 +172,8 @@ IMPORT
 		ACStore(blockNum, block );
 
 		(* Inverse quantization *)
-		IF mp4State.hdr.quantType = 0 THEN
-			IQuant( block, TRUE )
-		ELSE
-			IQuantTypeFirst( block )
+		IF mp4State.hdr.quantType = 0 THEN IQuant( block, TRUE )
+		ELSE IQuantTypeFirst( block )
 		END;
 
 		(* inverse dct *)
@@ -191,7 +183,7 @@ IMPORT
 	END BlockIntra;
 
 	(* Decode an intercoded macroblock *)
-	PROCEDURE BlockInter*( blockNum: LONGINT; coded: BOOLEAN ): LONGINT;
+	PROCEDURE BlockInter*( blockNum: LONGINT; coded: BOOLEAN; VAR r: DT.VideoBuffer ): LONGINT;
 	VAR
 		event: Event;
 		zigzag: DT.PointerToArrayOfLONGINT;
@@ -206,23 +198,19 @@ IMPORT
 		IF mp4State.hdr.quantType = 0 THEN
 			qScale := mp4State.hdr.quantizer;
 			q2Scale := qScale * 2;
-			IF ( qScale MOD 2 ) > 0 THEN
-				qAdd := qScale
-			ELSE
-				qAdd := qScale - 1
+			IF ( qScale MOD 2 ) > 0 THEN qAdd := qScale
+			ELSE qAdd := qScale - 1
 			END;
 			
 			(* VLD Decoding *)
 			i := 0;
 			REPEAT (* event vld *)
-				vld.VldInterDCT( event );
+				vld.VldInterDCT( event, r );
 				ASSERT( i # -1 );
 								
 				i := i + event.run;
-				IF event.level > 0 THEN
-					block[zigzag[i]] := ( q2Scale * event.level ) + qAdd
-				ELSE
-					block[zigzag[i]] := ( q2Scale * event.level ) - qAdd
+				IF event.level > 0 THEN block[zigzag[i]] := ( q2Scale * event.level ) + qAdd
+				ELSE block[zigzag[i]] := ( q2Scale * event.level ) - qAdd
 				END;
 				
 				IF DT.Debug THEN
@@ -237,14 +225,11 @@ IMPORT
 
 			(* event vld *)
 			REPEAT
-				vld.VldInterDCT( event );
-
+				vld.VldInterDCT( event, r );
 				i := i + event.run;
 	
-				IF event.level > 0 THEN
-					k := 1
-				ELSE
-					k := -1
+				IF event.level > 0 THEN k := 1
+				ELSE k := -1
 				END;
 				
 				block[zigzag[i]] := ( ( 2 * event.level + k ) * mp4State.hdr.quantizer * 
@@ -285,61 +270,61 @@ IMPORT
 	END DumpMacroBlock;
 
 	(* Get size of the vld code used to derive the luminance DC coefficients *)
-	PROCEDURE GetDCSizeLum(): LONGINT;
+	PROCEDURE GetDCSizeLum(VAR r: DT.VideoBuffer): LONGINT;
 	VAR
 		code: LONGINT;
 	BEGIN
-		IF r.ShowBits( 11 ) = 1 THEN
-			r.SkipBits( 11 );
+		IF AVI.ShowBits(11, r.data^, r.index ) = 1 THEN
+			AVI.SkipBits(11, r.index );
 			RETURN 12
 		END;
-		IF r.ShowBits( 10 ) = 1 THEN
-			r.SkipBits( 10 );
+		IF AVI.ShowBits(10, r.data^, r.index ) = 1 THEN
+			AVI.SkipBits(10, r.index );
 			RETURN 11
 		END;
-		IF r.ShowBits( 9 ) = 1 THEN
-			r.SkipBits( 9 );
+		IF AVI.ShowBits(9, r.data^, r.index ) = 1 THEN
+			AVI.SkipBits(9, r.index );
 			RETURN 10
 		END;
-		IF r.ShowBits( 8 ) = 1 THEN
-			r.SkipBits( 8 );
+		IF AVI.ShowBits(8, r.data^, r.index ) = 1 THEN
+			AVI.SkipBits(8, r.index );
 			RETURN 9
 		END;
-		IF r.ShowBits( 7 ) = 1 THEN
-			r.SkipBits( 7 );
+		IF AVI.ShowBits(7, r.data^, r.index ) = 1 THEN
+			AVI.SkipBits(7, r.index );
 			RETURN 8
 		END;
-		IF r.ShowBits( 6 ) = 1 THEN
-			r.SkipBits( 6 );
+		IF AVI.ShowBits(6, r.data^, r.index ) = 1 THEN
+			AVI.SkipBits(6, r.index );
 			RETURN 7
 		END;
-		IF r.ShowBits( 5 ) = 1 THEN
-			r.SkipBits( 5 );
+		IF AVI.ShowBits(5, r.data^, r.index ) = 1 THEN
+			AVI.SkipBits(5, r.index );
 			RETURN 6
 		END;
-		IF r.ShowBits( 4 ) = 1 THEN
-			r.SkipBits( 4 );
+		IF AVI.ShowBits(4, r.data^, r.index ) = 1 THEN
+			AVI.SkipBits(4, r.index );
 			RETURN 5
 		END;
 
-		code := r.ShowBits( 3 );
+		code := AVI.ShowBits(3, r.data^, r.index);
 		IF code = 1 THEN
-			r.SkipBits( 3 );
+			AVI.SkipBits(3, r.index);
 			RETURN 4
 		ELSIF code = 2 THEN
-			r.SkipBits( 3 );
+			AVI.SkipBits(3, r.index);
 			RETURN 3
 		ELSIF code = 3 THEN
-			r.SkipBits( 3 );
+			AVI.SkipBits(3, r.index);
 			RETURN 0
 		END;
 
-		code := r.ShowBits( 2 );
+		code := AVI.ShowBits(2, r.data^, r.index);
 		IF code = 2 THEN
-			r.SkipBits( 2 );
+			AVI.SkipBits(2, r.index);
 			RETURN 2
 		ELSIF code = 3 THEN
-			r.SkipBits( 2 );
+			AVI.SkipBits(2, r.index);
 			RETURN 1
 		END;
 
@@ -347,58 +332,58 @@ IMPORT
 	END GetDCSizeLum;
 	
 	(* Get ize of the vld code used to derive the chrominance DC coefficients *)
-	PROCEDURE GetDCSizeChr():LONGINT;
+	PROCEDURE GetDCSizeChr(VAR r: DT.VideoBuffer):LONGINT;
 	BEGIN
-		IF r.ShowBits( 12 ) = 1 THEN 
-			r.SkipBits( 12 );
+		IF AVI.ShowBits(12, r.data^, r.index ) = 1 THEN 
+			AVI.SkipBits(12, r.index);
 			RETURN 12
 		END;
-		IF r.ShowBits( 11 ) = 1 THEN 
-			r.SkipBits( 11 );
+		IF AVI.ShowBits(11, r.data^, r.index ) = 1 THEN 
+			AVI.SkipBits(11, r.index);
 			RETURN 11
 		END;
-		IF r.ShowBits( 10 ) = 1 THEN 
-			r.SkipBits( 10 );
+		IF AVI.ShowBits(10, r.data^, r.index ) = 1 THEN 
+			AVI.SkipBits(10, r.index);
 			RETURN 10
 		END;
-		IF r.ShowBits( 9 ) = 1 THEN 
-			r.SkipBits( 9 );
+		IF AVI.ShowBits(9, r.data^, r.index ) = 1 THEN 
+			AVI.SkipBits(9, r.index);
 			RETURN 9
 		END;
-		IF r.ShowBits( 8 ) = 1 THEN 
-			r.SkipBits( 8 );
+		IF AVI.ShowBits(8, r.data^, r.index ) = 1 THEN 
+			AVI.SkipBits(8, r.index);
 			RETURN 8
 		END;
-		IF r.ShowBits( 7 ) = 1 THEN 
-			r.SkipBits( 7 );
+		IF AVI.ShowBits(7, r.data^, r.index ) = 1 THEN 
+			AVI.SkipBits(7, r.index);
 			RETURN 7
 		END;
-		IF r.ShowBits( 6 ) = 1 THEN 
-			r.SkipBits( 6 );
+		IF AVI.ShowBits(6, r.data^, r.index ) = 1 THEN 
+			AVI.SkipBits(6, r.index);
 			RETURN 6
 		END;
-		IF r.ShowBits( 5 ) = 1 THEN 
-			r.SkipBits( 5 );
+		IF AVI.ShowBits(5, r.data^, r.index ) = 1 THEN 
+			AVI.SkipBits(5, r.index);
 			RETURN 5
 		END;
-		IF r.ShowBits( 4 ) = 1 THEN 
-			r.SkipBits( 4 );
+		IF AVI.ShowBits(4, r.data^, r.index ) = 1 THEN 
+			AVI.SkipBits(4, r.index);
 			RETURN 4
 		END;
-		IF r.ShowBits( 3 ) = 1 THEN 
-			r.SkipBits( 3 );
+		IF AVI.ShowBits(3, r.data^, r.index ) = 1 THEN 
+			AVI.SkipBits(3, r.index);
 			RETURN 3
 		END;
 		
-		RETURN 3 - r.GetBits( 2 )
+		RETURN 3 - AVI.GetBits(2, r.data^, r.index);
 	END GetDCSizeChr;
 
 	(* Used to derive the value of the differential DC coefficients in intra macroblocks *)
-	PROCEDURE GetDCDiff( dctDCSize: LONGINT ): LONGINT;
+	PROCEDURE GetDCDiff( dctDCSize: LONGINT; VAR r: DT.VideoBuffer ): LONGINT;
 	VAR
 		code, msb: LONGINT;
 	BEGIN
-		code := r.GetBits( dctDCSize );
+		code := AVI.GetBits(dctDCSize, r.data^, r.index );
 		msb := SYSTEM.LSH( code, -(dctDCSize - 1) );
 
 		IF msb = 0 THEN
@@ -776,26 +761,170 @@ IMPORT
 				mp4State.coeffPred.acTopChr[1][mbYPos][mbXPos + 1][i] := 0
 			END;
 		END
-	END RescuePredict;
+	END RescuePredict;	
+	
+	PROCEDURE FastCopy(from, sizefrom, offsetfrom, to, sizeto, offsetto: LONGINT);
+	BEGIN
+		
+	END FastCopy;
+	
 	
 	(* two dimensional inverse discrete cosine transform - not optimized *)
 	PROCEDURE IDCT( block: DT.PointerToArrayOfLONGINT );
-	VAR
-		i: LONGINT;
-	BEGIN
+	VAR i: LONGINT;
+	BEGIN				
+		srcBlock[4] := SHORT(block[0]);
+		srcBlock[5] := SHORT(block[1]);
+		srcBlock[6] := SHORT(block[2]);
+		srcBlock[7] := SHORT(block[3]);
+		srcBlock[8] := SHORT(block[4]);
+		srcBlock[9] := SHORT(block[5]);
+		srcBlock[10] := SHORT(block[6]);
+		srcBlock[11] := SHORT(block[7]);
 		
-		FOR i:= 0 TO 7 DO
-			IDCTRow( block, 8 * i )
-		END;
+		srcBlock[12] := SHORT(block[8]);
+		srcBlock[13] := SHORT(block[9]);
+		srcBlock[14] := SHORT(block[10]);
+		srcBlock[15] := SHORT(block[11]);
+		srcBlock[16] := SHORT(block[12]);
+		srcBlock[17] := SHORT(block[13]);
+		srcBlock[18] := SHORT(block[14]);
+		srcBlock[19] := SHORT(block[15]);
+	
+		srcBlock[20] := SHORT(block[16]);
+		srcBlock[21] := SHORT(block[17]);
+		srcBlock[22] := SHORT(block[18]);
+		srcBlock[23] := SHORT(block[19]);
+		srcBlock[24] := SHORT(block[20]);
+		srcBlock[25] := SHORT(block[21]);
+		srcBlock[26] := SHORT(block[22]);
+		srcBlock[27] := SHORT(block[23]);
 		
-		FOR i:= 0 TO 7 DO
-			IDCTCol( block, i )
-		END;
+		srcBlock[28] := SHORT(block[24]);
+		srcBlock[29] := SHORT(block[25]);
+		srcBlock[30] := SHORT(block[26]);
+		srcBlock[31] := SHORT(block[27]);
+		srcBlock[32] := SHORT(block[28]);
+		srcBlock[33] := SHORT(block[29]);
+		srcBlock[34] := SHORT(block[30]);
+		srcBlock[35] := SHORT(block[31]);
+	
+		
+		srcBlock[36] := SHORT(block[32]);
+		srcBlock[37] := SHORT(block[33]);
+		srcBlock[38] := SHORT(block[34]);
+		srcBlock[39] := SHORT(block[35]);
+		srcBlock[40] := SHORT(block[36]);
+		srcBlock[41] := SHORT(block[37]);
+		srcBlock[42] := SHORT(block[38]);
+		srcBlock[43] := SHORT(block[39]);
+		
+		srcBlock[44] := SHORT(block[40]);
+		srcBlock[45] := SHORT(block[41]);
+		srcBlock[46] := SHORT(block[42]);
+		srcBlock[47] := SHORT(block[43]);
+		srcBlock[48] := SHORT(block[44]);
+		srcBlock[49] := SHORT(block[45]);
+		srcBlock[50] := SHORT(block[46]);
+		srcBlock[51] := SHORT(block[47]);
+	
+		srcBlock[52] := SHORT(block[48]);
+		srcBlock[53] := SHORT(block[49]);
+		srcBlock[54] := SHORT(block[50]);
+		srcBlock[55] := SHORT(block[51]);
+		srcBlock[56] := SHORT(block[52]);
+		srcBlock[57] := SHORT(block[53]);
+		srcBlock[58] := SHORT(block[54]);
+		srcBlock[59] := SHORT(block[55]);
+		
+		srcBlock[60] := SHORT(block[56]);
+		srcBlock[61] := SHORT(block[57]);
+		srcBlock[62] := SHORT(block[58]);
+		srcBlock[63] := SHORT(block[59]);
+		srcBlock[64] := SHORT(block[60]);
+		srcBlock[65] := SHORT(block[61]);
+		srcBlock[66] := SHORT(block[62]);
+		srcBlock[67] := SHORT(block[63]);
+
+		idct.Transform(SYSTEM.ADR(srcBlock[4]), SYSTEM.ADR(dstBlock[4]));
+
+(*		block[0] := LONG(dstBlock[4]);
+		block[1] := LONG(dstBlock[5]);
+		block[2] := LONG(dstBlock[6]);
+		block[3] := LONG(dstBlock[7]);
+		block[4] := LONG(dstBlock[8]);
+		block[5] := LONG(dstBlock[9]);
+		block[6] := LONG(dstBlock[10]);
+		block[7] := LONG(dstBlock[11]);
+		block[8] := LONG(dstBlock[12]);
+		block[9] := LONG(dstBlock[13]);
+		block[10] := LONG(dstBlock[14]);
+		block[11] := LONG(dstBlock[15]);
+		
+		block[12] := LONG(dstBlock[16]);
+		block[13] := LONG(dstBlock[17]);
+		block[14] := LONG(dstBlock[18]);
+		block[15] := LONG(dstBlock[19]);
+		block[16] := LONG(dstBlock[20]);
+		block[17] := LONG(dstBlock[21]);
+		block[18] := LONG(dstBlock[22]);
+		block[19] := LONG(dstBlock[23]);
+	
+		block[20] := LONG(dstBlock[24]);
+		block[21] := LONG(dstBlock[25]);
+		block[22] := LONG(dstBlock[26]);
+		block[23] := LONG(dstBlock[27]);
+		block[24] := LONG(dstBlock[28]);
+		block[25] := LONG(dstBlock[29]);
+		block[26] := LONG(dstBlock[30]);
+		block[27] := LONG(dstBlock[31]);
+		
+		block[28] := LONG(dstBlock[32]);
+		block[29] := LONG(dstBlock[33]);
+		block[30] := LONG(dstBlock[34]);
+		block[31] := LONG(dstBlock[35]);
+		block[32] := LONG(dstBlock[36]);
+		block[33] := LONG(dstBlock[37]);
+		block[34] := LONG(dstBlock[38]);
+		block[35] := LONG(dstBlock[39]);
+	
+		
+		block[36] := LONG(dstBlock[40]);
+		block[37] := LONG(dstBlock[41]);
+		block[38] := LONG(dstBlock[42]);
+		block[39] := LONG(dstBlock[43]);
+		block[40] := LONG(dstBlock[44]);
+		block[41] := LONG(dstBlock[45]);
+		block[42] := LONG(dstBlock[46]);
+		block[43] := LONG(dstBlock[47]);
+		
+		block[44] := LONG(dstBlock[48]);
+		block[45] := LONG(dstBlock[49]);
+		block[46] := LONG(dstBlock[50]);
+		block[47] := LONG(dstBlock[51]);
+		block[48] := LONG(dstBlock[52]);
+		block[49] := LONG(dstBlock[53]);
+		block[50] := LONG(dstBlock[54]);
+		block[51] := LONG(dstBlock[55]);
+	
+		block[52] := LONG(dstBlock[56]);
+		block[53] := LONG(dstBlock[57]);
+		block[54] := LONG(dstBlock[58]);
+		block[55] := LONG(dstBlock[59]);
+		block[56] := LONG(dstBlock[60]);
+		block[57] := LONG(dstBlock[61]);
+		block[58] := LONG(dstBlock[62]);
+		block[59] := LONG(dstBlock[63]);
+		
+		block[60] := LONG(dstBlock[64]);
+		block[61] := LONG(dstBlock[65]);
+		block[62] := LONG(dstBlock[66]);
+		block[63] := LONG(dstBlock[67]);							
+*)
 		
 		IF DT.Debug THEN
 			DumpMacroBlock()
-		END;
-	
+		END;	
 	END IDCT;
 	
 	(* row (horizontal) IDCT
@@ -1034,15 +1163,13 @@ IMPORT
 		tableB171: ARRAY 112 OF DT.TabType;
 		tableB172: ARRAY 96 OF DT.TabType;
 		tableB173: ARRAY 120 OF DT.TabType;
-		r: AVI.AVIStream;
 		log: AosIO.Writer;
 
-	PROCEDURE &init( stream: AVI.AVIStream; logWriter:AosIO.Writer );
+	PROCEDURE &init(logWriter:AosIO.Writer );
 	VAR
 		i: LONGINT;
 	BEGIN
 		log := logWriter;
-		r := stream;
 				
 		(* tables to decode Table B16 VLC - 112 values *)
 		tableB161[0].val := 4353; tableB161[0].len := 7; tableB161[1].val := 4289; tableB161[1].len := 7;
@@ -1372,7 +1499,7 @@ IMPORT
 	END init;
 	
 	(* Variable length codes decoding for intra blocks *)
-	PROCEDURE VldIntraDCT( VAR event: Event  );
+	PROCEDURE VldIntraDCT( VAR event: Event; VAR r: DT.VideoBuffer  );
 	VAR
 		tab: DT.TabType;
 		lMax, rMax: LONGINT;
@@ -1383,7 +1510,7 @@ IMPORT
 		event.level := -1;
 		event.last := -1;
 
-		tab := VldTableB16( r.ShowBits(12) );
+		tab := VldTableB16( AVI.ShowBits(12, r.data^, r.index), r );
 		
 		IF tab.len = -1  THEN (* bad code *)
 			event.run   := -1; 
@@ -1396,14 +1523,14 @@ IMPORT
 			event.run := ( tab.val DIV 64 ) MOD 64;
 			event.level :=  tab.val MOD 64;
 			event.last := ( tab.val DIV 4096 ) MOD 2;
-			IF r.GetBits( 1 ) > 0 THEN event.level := -event.level END;
+			IF AVI.GetBits(1, r.data^, r.index ) > 0 THEN event.level := -event.level END;
 		ELSE
 			(* this value is escaped - see para 7.4.1.3 *)
 			(* assuming shortVideoHeader == 0 *)
-			CASE r.ShowBits( 2 ) OF
+			CASE AVI.ShowBits(2, r.data^, r.index ) OF
 				0 .. 1: (* Type 1 *)
-					r.SkipBits( 1 );
-					tab := VldTableB16( r.ShowBits( 12 ) );  (* use table B-16 *)
+					AVI.SkipBits( 1, r.index );
+					tab := VldTableB16( AVI.ShowBits( 12, r.data^, r.index ), r );  (* use table B-16 *)
 					IF tab.len = -1 THEN (* bad code *)
 						event.run := -1;
 						event.level := -1;
@@ -1416,10 +1543,10 @@ IMPORT
 					event.last := ( tab.val DIV 4096 ) MOD 2;
 					lMax := VldTableB19( event.last, event.run );  (* use table B-19 *)
 					event.level := event.level + lMax;
-					IF r.GetBits( 1 ) > 0 THEN event.level := -event.level END; 
+					IF AVI.GetBits(1, r.data^, r.index ) > 0 THEN event.level := -event.level END; 
 				| 2:  (* Type 2 *)
-					r.SkipBits( 2 );
-					tab := VldTableB16( r.ShowBits( 12 ) );  (* use table B-16 *)
+					AVI.SkipBits( 2, r.index );
+					tab := VldTableB16( AVI.ShowBits( 12, r.data^, r.index ), r );  (* use table B-16 *)
 					IF tab.len = -1 THEN (* bad code *)
 						event.run := -1;
 						event.level := -1;
@@ -1430,21 +1557,21 @@ IMPORT
 						event.last := ( tab.val DIV 4096 ) MOD 2;
 						rMax := VldTableB21( event.last, event.level ); (* use table B-21 *)
 						event.run := event.run + rMax + 1;
-						IF r.GetBits( 1 ) > 0 THEN event.level := -event.level END; 
+						IF AVI.GetBits( 1, r.data^, r.index ) > 0 THEN event.level := -event.level END; 
 					END;
 				| 3:  (* Type 3  - fixed length codes *)
-					r.SkipBits( 2 );
-					event.last := r.GetBits( 1 );
-					event.run := r.GetBits( 6 );  (* table B-18 *)
-					temp := r.GetBits( 1 ); (* marker bit *)
-					event.level := r.GetBits( 12 ); (* table B-18 *)
+					AVI.SkipBits(2, r.index );
+					event.last := AVI.GetBits( 1, r.data^, r.index );
+					event.run := AVI.GetBits(6, r.data^, r.index );  (* table B-18 *)
+					temp := AVI.GetBits( 1, r.data^, r.index ); (* marker bit *)
+					event.level := AVI.GetBits( 12, r.data^, r.index ); (* table B-18 *)
 					(* sign extend level... *)
 					(* event.level = (event.level & 0x800) ? (event.level | (-1 ^ 0xfff)) : event.level; *)
 					IF 11 IN SYSTEM.VAL( SET, event.level )  THEN 
 						 event.level := SYSTEM.VAL( LONGINT, 
 						 	SYSTEM.VAL( SET, event.level ) + SYSTEM.VAL( SET, -4096  ) )
 					END;
-					temp := r.GetBits( 1 ); (* marker bit *)
+					temp := AVI.GetBits( 1, r.data^, r.index ); (* marker bit *)
 			END;
 		END;
 
@@ -1452,7 +1579,7 @@ IMPORT
 	END VldIntraDCT;
 	
 	(* Variable length codes decoding for interblocks *)
-	PROCEDURE VldInterDCT( VAR event: Event );
+	PROCEDURE VldInterDCT( VAR event: Event; VAR r: DT.VideoBuffer );
 	VAR
 		tab :DT.TabType;
 		lMax, rMax,  temp: LONGINT;
@@ -1461,7 +1588,7 @@ IMPORT
 		event.level := -1;
 		event.last := -1;
 
-		tab := VldTableB17( r.ShowBits( 12 ) );
+		tab := VldTableB17( AVI.ShowBits( 12, r.data^, r.index ), r );
 		IF tab.len = -1 THEN (* bad code *)
 			event.run := -1;
 			event.level := -1;
@@ -1473,14 +1600,14 @@ IMPORT
 			event.run := (tab.val DIV 16 ) MOD 256;
 			event.level :=  tab.val MOD 16;
 			event.last  := (tab.val DIV 4096 ) MOD 2;
-			IF r.GetBits( 1 ) > 0 THEN event.level := -event.level END;
+			IF AVI.GetBits( 1, r.data^, r.index ) > 0 THEN event.level := -event.level END;
 		ELSE
 			(* this value is escaped - see para 7.4.1.3 *)
 			(* assuming short_video_header == 0 *)
-			CASE r.ShowBits( 2 ) OF
+			CASE AVI.ShowBits( 2, r.data^, r.index ) OF
 			  0 .. 1: (* Type 1 *)
-					r.SkipBits( 1 );
-					tab := VldTableB17( r.ShowBits( 12 ) );  (* use table B-17 *)
+					AVI.SkipBits(1, r.index );
+					tab := VldTableB17( AVI.ShowBits( 12, r.data^, r.index ), r );  (* use table B-17 *)
 					IF tab.len = -1 THEN
 						event.run := -1;
 						event.level := -1;
@@ -1493,10 +1620,10 @@ IMPORT
 					event.last := ( tab.val DIV 4096 ) MOD 2;
 					lMax := VldTableB20( event.last, event.run );  (* use table B-20 *)
 					event.level := event.level + lMax;
-					IF r.GetBits( 1 ) > 0 THEN event.level := -event.level END;
+					IF AVI.GetBits(1, r.data^, r.index ) > 0 THEN event.level := -event.level END;
 				| 2:  (* Type 2 *)
-					r.SkipBits( 2 );
-					tab := VldTableB17( r.ShowBits( 12 ) );  (* use table B-16 *)
+					AVI.SkipBits( 2, r.index );
+					tab := VldTableB17( AVI.ShowBits( 12, r.data^, r.index ), r );  (* use table B-16 *)
 					IF tab.len = -1 THEN (* bad code *)
 						event.run := -1;
 						event.level := -1;
@@ -1507,33 +1634,33 @@ IMPORT
 						event.last  := ( tab.val DIV 4096 ) MOD 2;
 						rMax := VldTableB22( event.last, event.level );  (* use table B-22 *)
 						event.run := event.run + rMax + 1;
-						IF r.GetBits( 1 ) > 0 THEN event.level := -event.level END;
+						IF AVI.GetBits( 1, r.data^, r.index ) > 0 THEN event.level := -event.level END;
 					END;
 				| 3:  (* Type 3  - fixed length codes *)
-					r.SkipBits( 2 );
-					event.last := r.GetBits( 1 );
-					event.run := r.GetBits( 6 ); (* table B-18 *)
-					temp := r.GetBits( 1 ); (* marker bit *)
-					event.level := r.GetBits( 12 ); (* table B-18 *)
+					AVI.SkipBits( 2, r.index );
+					event.last := AVI.GetBits( 1, r.data^, r.index );
+					event.run := AVI.GetBits( 6, r.data^, r.index ); (* table B-18 *)
+					temp := AVI.GetBits( 1, r.data^, r.index ); (* marker bit *)
+					event.level := AVI.GetBits( 12, r.data^, r.index ); (* table B-18 *)
 					(* sign extend level... *)
 					(* event.level = (event.level & 0x800) ? (event.level | (-1 ^ 0xfff)) : event.level; *)
 					IF 11 IN SYSTEM.VAL( SET, event.level ) THEN 
 						 event.level := SYSTEM.VAL( LONGINT, 
 						 	SYSTEM.VAL( SET, event.level ) + ( SYSTEM.VAL( SET, -4096 ) ) )
 					END;
-					temp := r.GetBits( 1 ); (* marker bit *)
+					temp := AVI.GetBits( 1, r.data^, r.index ); (* marker bit *)
 			END;
 		END;
 		RETURN
 	END VldInterDCT;
 	
 	(* GEet variable length code event *)
-	PROCEDURE VldEvent( intraFlag: BOOLEAN; VAR event: Event );
+	PROCEDURE VldEvent( intraFlag: BOOLEAN; VAR event: Event; VAR r: DT.VideoBuffer);
 	BEGIN
 		IF intraFlag THEN 
-			VldIntraDCT( event );
+			VldIntraDCT( event, r );
 		ELSE
-			VldInterDCT( event );
+			VldInterDCT( event,  r);
 		END;
 	END VldEvent;
 
@@ -1642,7 +1769,7 @@ IMPORT
 	END VldTableB22;
 	
 	
-	PROCEDURE VldTableB16(code: LONGINT): DT.TabType;
+	PROCEDURE VldTableB16(code: LONGINT; VAR r: DT.VideoBuffer): DT.TabType;
 	VAR 
 		tab: DT.TabType;
 	BEGIN
@@ -1657,11 +1784,11 @@ IMPORT
 			tab.len := -1;
 			RETURN tab;
 		END;
-		r.SkipBits( tab.len );
+		AVI.SkipBits( tab.len, r.index );
 		RETURN tab;
 	END VldTableB16;
 
-	PROCEDURE VldTableB17( code: LONGINT ): DT.TabType;
+	PROCEDURE VldTableB17( code: LONGINT; VAR r: DT.VideoBuffer ): DT.TabType;
 	VAR
 		tab: DT.TabType;
 	BEGIN
@@ -1677,7 +1804,7 @@ IMPORT
 			RETURN tab;
 		END;
 		
-		r.SkipBits( tab.len );
+		AVI.SkipBits( tab.len, r.index );
 		RETURN tab;
 	END VldTableB17;
 

@@ -16,9 +16,22 @@ CONST
 	EnterPassword = 330; NeedPassword = 331; PathNameCreated = 257; UserLoggedIn = 230; 
 	
 	ActvTimeout = 60 * 1000; 
-
+	Debug = FALSE;
 
 TYPE
+	FTPEntry* = OBJECT
+	VAR
+		full* : ARRAY 331 OF CHAR;
+		flags* : ARRAY 11 OF CHAR;
+		type* : ARRAY 4 OF CHAR;
+		user*, group*, size* : ARRAY 9 OF CHAR;
+		d0*, d1*, d2* : ARRAY 13 OF CHAR;
+		filename* : ARRAY 256 OF CHAR;
+		visible* : BOOLEAN;
+	END FTPEntry;
+			
+	FTPListing* = POINTER TO ARRAY OF FTPEntry;
+
 	(** FTP client object must be used by a single process *)
 	FTPClient* = OBJECT
 	VAR
@@ -35,6 +48,9 @@ TYPE
 		passiveTransfer : BOOLEAN;
 		actvListener : AosTCP.Connection;
 		actvTimeout : AosActive.Timer;
+		
+		listing- : FTPListing;
+		nofEntries- : LONGINT;
 		
 		PROCEDURE &Init;
 		BEGIN
@@ -91,16 +107,21 @@ TYPE
 		END Login;
 		
 		PROCEDURE ReadResponse(VAR code : LONGINT; VAR reply : ARRAY OF CHAR);
-		VAR t : LONGINT;
+		VAR temp : ARRAY 256 OF CHAR; tcode: ARRAY 4 OF CHAR; i, t : LONGINT;
+			stop : BOOLEAN;
 		BEGIN
-			r.Int(code, FALSE);
+			r.Int(code, FALSE); COPY("", reply);
 			IF r.Peek() = "-" THEN (* multi line response *)
+				stop := FALSE;
 				REPEAT
-					r.SkipLn;
-					r.Int(t, FALSE)
-				UNTIL (t = code) OR (r.res # 0)
+					r.Ln(temp); Utilities.Append(reply, temp); Utilities.Append(reply, CHR(10));
+					tcode[0] := temp[0]; tcode[1] := temp[1]; tcode[2] := temp[2]; tcode[3] := 0X;
+					Utilities.StrToInt(tcode, t);
+					IF (t = code) & (temp[3] # "-") THEN stop := TRUE END;
+				UNTIL stop OR (r.res # 0)
+			ELSE			
+				r.Ln(temp); Utilities.Append(reply, temp);
 			END;
-			r.Ln(reply)
 		END ReadResponse;
 		
 		PROCEDURE Close*(VAR res : LONGINT);
@@ -111,6 +132,14 @@ TYPE
 			connection.Close; w := NIL; r := NIL;
 			open := FALSE
 		END Close;
+		
+		PROCEDURE IsAlive*() : BOOLEAN;
+		VAR state, i : LONGINT; res : LONGINT;
+		BEGIN
+			state := connection.state;
+			IF (state IN AosTCP.ClosedStates) OR (state = 5) THEN RETURN FALSE
+			ELSE RETURN TRUE END
+		END IsAlive;
 		
 		PROCEDURE IsNum(ch : CHAR) : BOOLEAN;
 		BEGIN
@@ -130,8 +159,10 @@ TYPE
 			IF passiveTransfer THEN
 				w.String("PASV"); w.Ln; w.Update;
 				r.Int(code, FALSE);
-				AosOut.String("PASV"); 
-				AosOut.String("code = "); AosOut.Int(code, 0); AosOut.Ln; 
+				IF Debug THEN
+					AosOut.String("PASV"); 
+					AosOut.String("code = "); AosOut.Int(code, 0); AosOut.Ln; 
+				END;	
 			END;	
 	
 			IF passiveTransfer & (code >= 200) & (code < 300) THEN
@@ -146,7 +177,9 @@ TYPE
 					IF j < 4 THEN ipstr[i] := ch; INC(i); ch := r.Get()  END
 				END;
 				ipstr[i] := 0X; 
-				AosOut.String("ipstr = "); AosOut.String(ipstr); AosOut.Ln; 
+				IF Debug THEN
+					AosOut.String("ipstr = "); AosOut.String(ipstr); AosOut.Ln; 
+				END;	
 				IF r.res # 0 THEN Fail; RETURN END;
 				
 				(* read the port *)
@@ -155,8 +188,10 @@ TYPE
 				r.Int(p1, FALSE); 
 				r.SkipLn;
 				port := p0 * 256 + p1;
-				AosOut.String(ipstr); AosOut.Ln;
-				AosOut.Int(port, 0); AosOut.Ln; 
+				IF Debug THEN
+					AosOut.String(ipstr); AosOut.Ln;
+					AosOut.Int(port, 0); AosOut.Ln; 
+				END;
 				dataIP := AosIP.StrToAdr(ipstr);
 				dataPort := port;
 			ELSE
@@ -175,8 +210,10 @@ TYPE
 				w.Int(actvListener.lport MOD 100H, 0);
 				w.Ln; w.Update;
 				ReadResponse(code, msg);
-				AosOut.String("code = "); AosOut.Int(code, 0); AosOut.Ln; 
-				AosOut.String("msg = "); AosOut.String(msg); AosOut.Ln; 			
+				IF Debug THEN
+					AosOut.String("code = "); AosOut.Int(code, 0); AosOut.Ln; 
+					AosOut.String("msg = "); AosOut.String(msg); AosOut.Ln; 			
+				END;	
 			END
 		END GetDataConnection;
 		
@@ -203,29 +240,37 @@ TYPE
 			ELSE
 				AosActive.SetTimeout(actvTimeout, ActvTimeoutHandler, ActvTimeout);
 				actvListener.Accept(connection, res);
-				AosOut.String("res = "); AosOut.Int(res, 0); AosOut.Ln; 
+				IF Debug THEN
+					AosOut.String("res = "); AosOut.Int(res, 0); AosOut.Ln;
+				END; 
 				AosActive.CancelTimeout(actvTimeout);
 				actvListener.Close;
 				WaitEstablished(connection);
-				AosOut.String("Active connection established"); AosOut.Ln; 
+				IF Debug THEN
+					AosOut.String("Active connection established"); AosOut.Ln;
+				END 
 			END	
 		END OpenDataConnection;
 		
 		PROCEDURE OpenPut*(remoteName : ARRAY OF CHAR; VAR outw : AosIO.Writer; VAR res : LONGINT);
 		BEGIN 
 			IF ~open OR busy THEN res := -2; RETURN END;
-			busy := TRUE;
 			GetDataConnection(res);
 			IF res # 0 THEN RETURN END;
 
 			w.String("STOR "); w.String(remoteName); w.Ln; w.Update;
 			ReadResponse(code, msg);
-			AosOut.String("code = "); AosOut.Int(code, 0); AosOut.Ln; 
-			AosOut.String("msg = "); AosOut.String(msg); AosOut.Ln; 
+			IF Debug THEN
+				AosOut.String("code = "); AosOut.Int(code, 0); AosOut.Ln; 
+				AosOut.String("msg = "); AosOut.String(msg); AosOut.Ln; 
+			END;	
 			IF (code = FileStatusOk) OR (code = FileActionOk) OR (code = DataConnectionOpen)  THEN
 				OpenDataConnection(dataCon, res);
-				AosOut.String("ODC");  AosOut.String("res = "); AosOut.Int(res, 0); AosOut.Ln; 
+				IF Debug THEN
+					AosOut.String("ODC");  AosOut.String("res = "); AosOut.Int(res, 0); AosOut.Ln; 
+				END;	
 				IF res = 0 THEN
+					busy := TRUE;
 					AosIO.OpenWriter(outw, dataCon.Send)
 				END
 			ELSE res := -1
@@ -241,9 +286,11 @@ TYPE
 			END;
 			ReadResponse(code, msg);
 			IF (code >= 200) & (code < 300) THEN res := 0 ELSE res := code END;	
-			AosOut.String("Result after close put"); AosOut.Ln; 
-			AosOut.String("code = "); AosOut.Int(code, 0); AosOut.Ln; 
-			AosOut.String("msg = "); AosOut.String(msg); AosOut.Ln 
+			IF Debug THEN
+				AosOut.String("Result after close put"); AosOut.Ln; 
+				AosOut.String("code = "); AosOut.Int(code, 0); AosOut.Ln; 
+				AosOut.String("msg = "); AosOut.String(msg); AosOut.Ln 
+			END	
 		END ClosePut;
 
 		PROCEDURE OpenGet*(remoteName : ARRAY OF CHAR; VAR r : AosIO.Reader; VAR res : LONGINT);
@@ -255,11 +302,15 @@ TYPE
 
 			w.String("RETR "); w.String(remoteName); w.Ln; w.Update;
 			ReadResponse(code, msg);
-			AosOut.String("code = "); AosOut.Int(code, 0); AosOut.Ln; 
-			AosOut.String("msg = "); AosOut.String(msg); AosOut.Ln; 
+			IF Debug THEN
+				AosOut.String("code = "); AosOut.Int(code, 0); AosOut.Ln; 
+				AosOut.String("msg = "); AosOut.String(msg); AosOut.Ln; 
+			END;	
 			IF (code = FileStatusOk) OR (code = FileActionOk) OR (code = DataConnectionOpen)  THEN
 				OpenDataConnection(dataCon, res);
-				AosOut.String("ODC");  AosOut.String("res = "); AosOut.Int(res, 0); AosOut.Ln; 
+				IF Debug THEN
+					AosOut.String("ODC");  AosOut.String("res = "); AosOut.Int(res, 0); AosOut.Ln; 
+				END;	
 				IF res = 0 THEN
 					AosIO.OpenReader(r, dataCon.Receive)
 				END
@@ -276,9 +327,11 @@ TYPE
 			busy := FALSE;
 			ReadResponse(code, msg);
 			IF (code >= 200) & (code < 300) THEN res := 0 ELSE res := code END;	
-			AosOut.String("Result after close get"); AosOut.Ln; 
-			AosOut.String("code = "); AosOut.Int(code, 0); AosOut.Ln; 
-			AosOut.String("msg = "); AosOut.String(msg); AosOut.Ln 
+			IF Debug THEN
+				AosOut.String("Result after close get"); AosOut.Ln; 
+				AosOut.String("code = "); AosOut.Int(code, 0); AosOut.Ln; 
+				AosOut.String("msg = "); AosOut.String(msg); AosOut.Ln 
+			END	
 		END CloseGet;
 		
 		PROCEDURE DeleteFile*(remoteName : ARRAY OF CHAR; VAR res : LONGINT);
@@ -328,7 +381,7 @@ TYPE
 			END
 		END RenameFile;
 		
-		PROCEDURE EnumerateDir*;
+		PROCEDURE EnumerateNames*;
 		VAR  res : LONGINT;
 			r : AosIO.Reader; s, filename : ARRAY 256 OF CHAR;
 			flags : ARRAY 11 OF CHAR;
@@ -336,6 +389,7 @@ TYPE
 			user, group, size : ARRAY 9 OF CHAR;
 			d0, d1, d2: ARRAY 13 OF CHAR;
 			sr : AosIO.StringReader;
+			entry : FTPEntry;
 			
 			PROCEDURE FixLengthStr(r : AosIO.Reader; len : LONGINT; VAR s : ARRAY OF CHAR);
 			VAR i : LONGINT;
@@ -345,77 +399,226 @@ TYPE
 					DEC(len); INC(i)
 				END;
 				s[i] := 0X
-			END FixLengthStr;
-			
-			
+			END FixLengthStr;				
 			
 		BEGIN
 			IF ~open OR busy THEN res := -2; RETURN END;
-			AosOut.String("Enumerate Dir"); AosOut.Ln; 
+			IF Debug THEN
+				AosOut.String("Enumerate Dir"); AosOut.Ln; 
+			END;	
 			GetDataConnection(res);
 			IF res # 0 THEN RETURN END;
-			w.String("LIST");  w.Ln; w.Update;
+			w.String("NLST"); w.Ln; w.Update;
 			ReadResponse(code, msg);
-			AosOut.String("code = "); AosOut.Int(code, 0); AosOut.Ln; 
-			AosOut.String("msg = "); AosOut.String(msg); AosOut.Ln; 
+			IF Debug THEN
+				AosOut.String("code = "); AosOut.Int(code, 0); AosOut.Ln; 
+				AosOut.String("msg = "); AosOut.String(msg); AosOut.Ln; 
+			END;
 			IF (code = FileStatusOk) OR (code = FileActionOk) OR (code = DataConnectionOpen)  THEN
-				AosOut.String("Open data connection"); AosOut.Ln; 
+				IF Debug THEN
+					AosOut.String("Open data connection"); AosOut.Ln; 
+				END;	
 				OpenDataConnection(dataCon, res);
-				AosOut.String("ODC");  AosOut.String("res = "); AosOut.Int(res, 0); AosOut.Ln; 
+				IF Debug THEN
+					AosOut.String("ODC");  AosOut.String("res = "); AosOut.Int(res, 0); AosOut.Ln; 
+				END;	
 				IF res = 0 THEN
 					AosIO.OpenReader(r, dataCon.Receive);
-					NEW(sr, 256);
+					NEW(sr, 256); NEW(listing, 16); nofEntries := 0;
 					REPEAT
 						r.Ln(s);
 						IF r.res = 0 THEN
-							sr.Set(s);
-							AosOut.String("s = "); AosOut.String(s); AosOut.Ln; 
+							sr.Set(s); NEW(entry);
+
+							COPY("", flags);
+							COPY("", type);
+							COPY("", user);
+							COPY("", group);
+							COPY("", size);
+							COPY("", d0);
+							COPY("", d1);
+							COPY("", d2);
+							sr.Ln(filename);		
 							
-(*							FixLengthStr(sr, 10, flags); sr.SkipBytes(1);
-							FixLengthStr(sr, 3, type); sr.SkipBytes(1);
-							FixLengthStr(sr, 8, user); sr.SkipBytes(1);
-							FixLengthStr(sr, 8, group); sr.SkipBytes(1);
-							FixLengthStr(sr, 8, size); sr.SkipBytes(1);
-							FixLengthStr(sr, 12, date); sr.SkipBytes(1); *)
-							sr.Token(flags); sr.SkipWhitespace;
-							sr.Token(type); sr.SkipWhitespace;
-							sr.Token(user); sr.SkipWhitespace;
-							sr.Token(group); sr.SkipWhitespace;
-							sr.Token(size); sr.SkipWhitespace;
-							sr.Token(d0); sr.SkipWhitespace;
-							sr.Token(d1); sr.SkipWhitespace;
-							sr.Token(d2); sr.SkipWhitespace;
+							COPY(flags, entry.flags);
+							COPY(type, entry.type);
+							COPY(user, entry.user);
+							COPY(group, entry.group);
+							COPY(size, entry.size);
+							COPY(d0, entry.d0);
+							COPY(d1, entry.d1);
+							COPY(d2, entry.d2);
+							COPY(filename, entry.filename);
+							COPY(s, entry.full);
+							AddFTPEntryToListing(entry);
 							
-							sr.Ln(filename);
-							
-							AosOut.String("flags = "); AosOut.String(flags); AosOut.Ln; 
-							AosOut.String("type = "); AosOut.String(type); AosOut.Ln; 
-							AosOut.String("user = "); AosOut.String(user); AosOut.Ln; 
-							AosOut.String("group = "); AosOut.String(group); AosOut.Ln; 
-							AosOut.String("size = "); AosOut.String(size); AosOut.Ln; 
-							AosOut.String("date = "); AosOut.String(d0); AosOut.String(d1);AosOut.String(d2);AosOut.Ln; 
-							AosOut.String("filename = "); AosOut.String(filename); AosOut.Ln; 
-							AosOut.Ln; 
-						END	
+(*							IF Debug THEN
+								AosOut.String("flags = "); AosOut.String(flags); AosOut.Ln; 
+								AosOut.String("type = "); AosOut.String(type); AosOut.Ln; 
+								AosOut.String("user = "); AosOut.String(user); AosOut.Ln; 
+								AosOut.String("group = "); AosOut.String(group); AosOut.Ln; 
+								AosOut.String("size = "); AosOut.String(size); AosOut.Ln; 
+								AosOut.String("date = "); AosOut.String(d0); AosOut.String(d1);AosOut.String(d2);AosOut.Ln; 
+								AosOut.String("filename = "); AosOut.String(filename); AosOut.Ln; 
+								AosOut.Ln; 
+							END	
+*)						END	
 					UNTIL r.res # 0
 				END;
 				dataCon.Close;
 				
 				ReadResponse(code, msg);
-				AosOut.String("Result after Dir"); AosOut.Ln; 
+				IF Debug THEN
+					AosOut.String("Result after Dir"); AosOut.Ln; 
+					AosOut.String("code = "); AosOut.Int(code, 0); AosOut.Ln; 
+					AosOut.String("msg = "); AosOut.String(msg); AosOut.Ln; 
+				END	
+			ELSE res := ResFailed 
+			END;
+			dataCon := NIL	
+		END EnumerateNames;
+			
+		PROCEDURE EnumerateDir*(args : ARRAY OF CHAR);
+		VAR  res : LONGINT;
+			r : AosIO.Reader; s, filename : ARRAY 256 OF CHAR;
+			flags : ARRAY 11 OF CHAR;
+			type : ARRAY 4 OF CHAR;
+			user, group, size : ARRAY 9 OF CHAR;
+			d0, d1, d2: ARRAY 13 OF CHAR;
+			sr : AosIO.StringReader;
+			entry : FTPEntry;
+			ch : CHAR;
+			
+			PROCEDURE FixLengthStr(r : AosIO.Reader; len : LONGINT; VAR s : ARRAY OF CHAR);
+			VAR i : LONGINT;
+			BEGIN
+				WHILE (len > 0) & (r.res = 0) DO
+					s[i] := r.Get();
+					DEC(len); INC(i)
+				END;
+				s[i] := 0X
+			END FixLengthStr;				
+			
+		BEGIN
+			IF ~open OR busy THEN res := -2; RETURN END;
+			IF Debug THEN
+				AosOut.String("Enumerate Dir"); AosOut.Ln; 
+			END;	
+			GetDataConnection(res);
+			IF res # 0 THEN RETURN END;
+			w.String("LIST"); 
+			IF args # "" THEN w.String(" "); w.String(args) END;
+			w.Ln; w.Update;
+			ReadResponse(code, msg);
+			IF Debug THEN
 				AosOut.String("code = "); AosOut.Int(code, 0); AosOut.Ln; 
 				AosOut.String("msg = "); AosOut.String(msg); AosOut.Ln; 
+			END;
+			IF (code = FileStatusOk) OR (code = FileActionOk) OR (code = DataConnectionOpen)  THEN
+				IF Debug THEN
+					AosOut.String("Open data connection"); AosOut.Ln; 
+				END;	
+				OpenDataConnection(dataCon, res);
+				IF Debug THEN
+					AosOut.String("ODC");  AosOut.String("res = "); AosOut.Int(res, 0); AosOut.Ln; 
+				END;	
+				IF res = 0 THEN
+					AosIO.OpenReader(r, dataCon.Receive);
+					NEW(sr, 256); NEW(listing, 16); nofEntries := 0;
+					REPEAT
+						r.Ln(s);
+						IF r.res = 0 THEN
+							sr.Set(s); NEW(entry);
+(*							AosOut.String("s = "); AosOut.String(s); AosOut.Ln; 
+							
+							FixLengthStr(sr, 10, flags); sr.SkipBytes(1);
+							FixLengthStr(sr, 3, type); sr.SkipBytes(1);
+							FixLengthStr(sr, 8, user); sr.SkipBytes(1);
+							FixLengthStr(sr, 8, group); sr.SkipBytes(1);
+							FixLengthStr(sr, 8, size); sr.SkipBytes(1);
+							FixLengthStr(sr, 12, date); sr.SkipBytes(1); *)
+							
+							ch := sr.Peek();
+							IF  (ch = "-") OR (ch = "d") OR (ch = "l") THEN (* unix *)							
+								sr.Token(flags); sr.SkipWhitespace;
+								sr.Token(type); sr.SkipWhitespace;
+								sr.Token(user); sr.SkipWhitespace;
+								sr.Token(group); sr.SkipWhitespace;
+								sr.Token(size); sr.SkipWhitespace;
+								sr.Token(d0); sr.SkipWhitespace;
+								sr.Token(d1); sr.SkipWhitespace;
+								sr.Token(d2); sr.SkipWhitespace;
+								
+								sr.Ln(filename);
+							ELSE (* windows *)
+								COPY("", type);
+								COPY("", user);
+								COPY("", group);
+								COPY("", size);
+								COPY("", d2);
+								sr.Token(d0); sr.SkipWhitespace;
+								sr.Token(d1); sr.SkipWhitespace;							
+								sr.Token(flags); sr.SkipWhitespace;
+								sr.Ln(filename);
+								IF flags # "<DIR>" THEN COPY(flags, size); COPY("", flags)	END			
+							END;
+							
+							COPY(flags, entry.flags);
+							COPY(type, entry.type);
+							COPY(user, entry.user);
+							COPY(group, entry.group);
+							COPY(size, entry.size);
+							COPY(d0, entry.d0);
+							COPY(d1, entry.d1);
+							COPY(d2, entry.d2);
+							COPY(filename, entry.filename);
+							COPY(s, entry.full);
+							AddFTPEntryToListing(entry);
+							
+(*							IF Debug THEN
+								AosOut.String("flags = "); AosOut.String(flags); AosOut.Ln; 
+								AosOut.String("type = "); AosOut.String(type); AosOut.Ln; 
+								AosOut.String("user = "); AosOut.String(user); AosOut.Ln; 
+								AosOut.String("group = "); AosOut.String(group); AosOut.Ln; 
+								AosOut.String("size = "); AosOut.String(size); AosOut.Ln; 
+								AosOut.String("date = "); AosOut.String(d0); AosOut.String(d1);AosOut.String(d2);AosOut.Ln; 
+								AosOut.String("filename = "); AosOut.String(filename); AosOut.Ln; 
+								AosOut.Ln; 
+							END	
+*)						END	
+					UNTIL r.res # 0
+				END;
+				dataCon.Close;
+				
+				ReadResponse(code, msg);
+				IF Debug THEN
+					AosOut.String("Result after Dir"); AosOut.Ln; 
+					AosOut.String("code = "); AosOut.Int(code, 0); AosOut.Ln; 
+					AosOut.String("msg = "); AosOut.String(msg); AosOut.Ln; 
+				END	
 			ELSE res := ResFailed 
 			END;
 			dataCon := NIL
 		END EnumerateDir;
 		
+		PROCEDURE AddFTPEntryToListing(entry : FTPEntry);
+		VAR newList : FTPListing;
+			i : LONGINT;
+		BEGIN
+			INC(nofEntries);
+			IF (nofEntries > LEN(listing)) THEN
+				NEW(newList, LEN(listing)*2);
+				FOR i := 0 TO LEN(listing)-1 DO newList[i] := listing[i] END;
+				listing := newList;				
+			END;
+			listing[nofEntries-1] := entry;
+		END AddFTPEntryToListing;		
 		
 		PROCEDURE GetCurrentDir*(VAR dir : ARRAY OF CHAR; VAR res : LONGINT);
 		VAR p : LONGINT;
 		BEGIN 
 			IF ~open OR busy THEN res := -2; RETURN END;
-			w.String("PWD "); w.Ln; w.Update;
+			w.String("PWD"); w.Ln; w.Update;
 			ReadResponse(code, msg);
 			AosOut.String("msg = "); AosOut.String(msg); AosOut.Ln; 
 			IF code = PathNameCreated THEN 
@@ -430,10 +633,38 @@ TYPE
 			ELSE COPY("", dir); res := ResFailed
 			END;
 		END GetCurrentDir;
+		
+		PROCEDURE Raw*(cmd : ARRAY OF CHAR; VAR res : LONGINT);
+		VAR p : LONGINT; extMsg : ARRAY 4096 OF CHAR;
+			command : ARRAY 32 OF CHAR; arguments : ARRAY 512 OF CHAR; 
+		BEGIN 
+			IF ~open OR busy THEN res := -2; RETURN END;
+			SplitCommand(cmd, command, arguments);
+			Utilities.LowerCase(command);
+			IF command = "list" THEN EnumerateDir(arguments)
+			ELSE
+				w.String(cmd); w.Ln; w.Update;
+				ReadResponse(code, extMsg);
+				AosOut.String("code = "); AosOut.Int(code, 0); 
+				AosOut.String(" , msg = "); AosOut.String(extMsg); AosOut.Ln
+			END;
+			res := 0
+		END Raw;
+		
+		PROCEDURE SplitCommand(cmd : ARRAY OF CHAR; VAR command, args : ARRAY OF CHAR);
+		VAR sr : AosIO.StringReader;
+		BEGIN
+			NEW(sr, 512); 
+			sr.Set(cmd);
+			sr.Token(command); sr.SkipWhitespace;
+			sr.Ln(args);
+		END SplitCommand;			
 	
 	END FTPClient;
 
 END AosFTPClient.
+
+S.Free AosFTPClient~
 
 Color Codes
 Highlight
@@ -444,3 +675,5 @@ Unsafe / Temporary / Stupid / requires attention
 Permanent Comment 
 Assertion
 Debug
+
+

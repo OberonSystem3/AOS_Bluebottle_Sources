@@ -2,7 +2,7 @@ MODULE WMPinyinIME; (** AUTHOR "tf"; PURPOSE "Pinyin input mode editor"; *)
 
 IMPORT
 	AosOut, AosModules, Utilities, AosFS, AosIO, AosTexts, AosTextUtilities, UTF8Strings,
-	WMInputModes, WMMessages, 
+	WMInputMethods, WMMessages, 
 	(* visual part *)
 	WMRectangles, WMWindowManager, WMComponents, WMStandardComponents, WMTextView, WMEditors, 
 	WMGraphics, WMStringGrids, WMGrids;
@@ -130,7 +130,6 @@ TYPE
 				INC(i)
 			END
 		END LoadPhrases;
-		
 		
 		PROCEDURE FindMatches(s : ARRAY OF CHAR; resultList : ResultList; VAR nofResults : LONGINT);
 		VAR i, pos : LONGINT;
@@ -263,6 +262,7 @@ TYPE
 			list.Acquire;
 			list.defaultRowHeight.Set(25);
 			list.cellDist.Set(0);
+			list.clCell.Set(0FFFFFFA0H);
 			list.SetColSpacings(spacings);
 			list.SetFont(WMGraphics.GetFont("Single", 20, {}));
 			list.Release;
@@ -404,7 +404,7 @@ TYPE
 		PROCEDURE FocusLost;
 		BEGIN
 			FocusLost^;
-			ScheduleHide
+			ScheduleHide 
 		END FocusLost;
 		
 		PROCEDURE Hide;
@@ -427,12 +427,11 @@ TYPE
 	END IMEWindow;
 
 TYPE
-	IME* = OBJECT(WMInputModes.IME)
+	IME* = OBJECT(WMInputMethods.IME)
 	VAR name : Utilities.String;
 		w : IMEWindow;
 		table : Table;
 
-	
 		PROCEDURE &Init;
 		BEGIN
 			NEW(table); table.LoadCharacters; table.LoadPhrases;
@@ -444,11 +443,6 @@ TYPE
 			RETURN name
 		END GetName;	
 		
-		PROCEDURE Hide*;
-		BEGIN
-			IF w # NIL THEN w.ScheduleHide END
-		END Hide;
-				
 		PROCEDURE SetCurrentText*(text : AosTexts.Text; tv : WMTextView.TextView);
 		BEGIN
 			SELF.text := text;
@@ -476,9 +470,7 @@ TYPE
 		BEGIN
 			IF (cap[ucs MOD 256] >= "A") & (cap[ucs MOD 256] <= "Z") THEN
 				tv.Acquire;
-				AosOut.String("text.AcquireRead"); AosOut.Ln;
 				text.AcquireRead;
-				AosOut.String("BusinessLogic"); AosOut.Ln;
 				IF tv.FindScreenPos(tv.cursor.GetPosition(), x, y) THEN END;
 				tv.ToWMCoordinates(x, y, x, y);
 				text.ReleaseRead;
@@ -491,9 +483,7 @@ TYPE
 		
 		PROCEDURE Finalize;
 		BEGIN
-
 		END Finalize;
-		
 		
 	END IME;
 	
@@ -541,13 +531,13 @@ BEGIN
 	RETURN match
 END MatchPinyinFirstChars;
 
-PROCEDURE Test*(par : ANY) : ANY;
+PROCEDURE Install*(par : ANY) : ANY;
 VAR ime : IME;
 BEGIN
 	NEW(ime);
-	WMInputModes.defaultIME := ime;
+	WMInputMethods.defaultIME := ime;
 	RETURN NIL
-END Test;
+END Install;
 
 (** Merge-sort a single-linked list. The root element is a dummy node *)
 (* Algorithm by Simon Tatham *)
@@ -611,10 +601,10 @@ END InitLookup;
 
 PROCEDURE Cleanup;
 BEGIN
-	IF WMInputModes.defaultIME # NIL THEN 
-		WMInputModes.defaultIME(IME).Finalize
+	IF WMInputMethods.defaultIME # NIL THEN 
+		WMInputMethods.defaultIME(IME).Finalize
 	END;
-	WMInputModes.defaultIME := NIL
+	WMInputMethods.defaultIME := NIL
 END Cleanup;
 
 BEGIN
@@ -623,4 +613,4 @@ BEGIN
 END WMPinyinIME.
 
 S.Free WMPinyinIME ~
-WMPinyinIME.Test ~
+WMPinyinIME.Install ~

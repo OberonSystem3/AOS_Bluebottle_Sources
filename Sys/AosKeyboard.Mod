@@ -4,7 +4,7 @@ MODULE AosKeyboard; (** AUTHOR "pjm"; PURPOSE "PC keyboard driver"; *)
 
 (* temporary Native-based version *)
 
-IMPORT SYSTEM, AosBoot, AosOut, AosInterrupts, AosModules, AosKernel, AosActive, AosInputs, AosFS;
+IMPORT SYSTEM, AosBoot, AosOut, AosInterrupts, AosModules, AosKernel, AosActive, AosInputs, AosIO, AosCommands, AosFS;
 
 CONST
 		(* do not change these values, as they are used in the keyboard tables from Native *)
@@ -47,7 +47,7 @@ TYPE
 				last := msg; AosInputs.keyboard.Handle(msg)
 			END
 		END HandleInterrupt;
-	
+		
 		PROCEDURE &Init;
 		BEGIN
 			last.ch := 0X; (*last.key := 0X;*) last.flags := {0..31};
@@ -128,6 +128,20 @@ L1:
 	DB 1EX, "ä", "Ä", 0A4X,	12X, "ë", 0FFX, 0A0X,	17X, "ï", 0FFX, 0A0X,	18X, "ö", "Ö", 0A4X
 	DB 16X, "ü", "Ü", 0A4X,	31X, "ñ", 0FFX, 80X *)
 	
+	DB 1EX, 83X, 80X, 0CX,	12X, 91X, 0FFX, 0CX,	18X, 84X, 81X, 0CX,	16X, 85X, 82X, 0CX
+	DB 17X, 92X, 0FFX, 0CX,	1FX, 96X, 0FFX, 0CX,	2EX, 93X, 0FFX, 0CX,	31X, 95X, 0FFX, 0CX
+	DB 1EX, 83X, 80X, 14X,	12X, 91X, 0FFX, 14X,	18X, 84X, 81X, 14X,	16X, 85X, 82X, 14X
+	DB 17X, 92X, 0FFX, 14X,	1FX, 96X, 0FFX, 14X,	2EX, 93X, 0FFX, 14X,	31X, 95X, 0FFX, 14X
+		(* dead keys (LAlt & RAlt) *)
+	DB 07X, 0FFX, 1X, 9X,	28X, 2X, 5X, 9X,	29X, 3X, 4X, 9X,
+	DB 07X, 0FFX, 1X, 11X,	28X, 2X, 5X, 11X,	29X, 3X, 4X, 11X,
+		(* following keys *)
+	DB 1EX, 86X, 0FFX, 20X,	12X, 87X, 0FFX, 20X,	17X, 88X, 0FFX, 20X,	18X, 89X, 0FFX, 20X
+	DB 16X, 8AX, 0FFX, 20X,	1EX, 8BX, 0FFX, 60X,	12X, 8CX, 0FFX, 60X,	17X, 8DX, 0FFX, 60X
+	DB 18X, 8EX, 0FFX, 60X,	16X, 8FX, 0FFX, 60X,	1EX, 94X, 0FFX, 40X,	12X, 90X, 0FFX, 40X
+	DB 1EX, 83X, 80X, 0A4X,	12X, 91X, 0FFX, 0A0X,	17X, 92X, 0FFX, 0A0X,	18X, 84X, 81X, 0A4X
+	DB 16X, 85X, 82X, 0A4X,	31X, 95X, 0FFX, 80X
+	
 	DB 1EX, "a", "A", 0CX,	12X, "e", 0FFX, 0CX,	18X, "o", "O", 0CX,	16X, "u", "U", 0CX
 	DB 17X, "i", 0FFX, 0CX,	1FX, "s", 0FFX, 0CX,	2EX, "c", 0FFX, 0CX,	31X, "n", 0FFX, 0CX
 	DB 1EX, "a", "A", 14X,	12X, "e", 0FFX, 14X,	18X, "o", "O", 14X,	16X, "u", "U", 14X
@@ -202,7 +216,7 @@ END TableUS;
 PROCEDURE TableFromFile(name: ARRAY OF CHAR): LONGINT;
 VAR f: AosFS.File; r: AosFS.Rider; len: LONGINT;
 BEGIN
-	AosOut.String("AosInput: "); AosOut.String(name);
+	AosOut.String("AosKeyboard: "); AosOut.String(name);
 	f := AosFS.Old(name);
 	IF f # NIL THEN
 		len := f.Length();
@@ -210,7 +224,7 @@ BEGIN
 			NEW(keytable, len+1);
 			f.Set(r, 0); f.ReadBytes(r, keytable^, 0, len);
 			IF r.res = 0 THEN
-				AosOut.Ln;
+				AosOut.String(" loaded."); AosOut.Ln;
 				keytable[len] := 0FFX;
 				RETURN SYSTEM.ADR(keytable[0])
 			ELSE
@@ -220,7 +234,7 @@ BEGIN
 			AosOut.String(" len="); AosOut.Int(len, 1)
 		END
 	ELSE
-		AosOut.String(" not found")
+		AosOut.String(" not found.")
 	END;
 	AosOut.Ln;
 	RETURN TableUS()
@@ -232,7 +246,7 @@ PROCEDURE Translate(flags: SET; c: CHAR): INTEGER;
 CONST
 	Alt = {LAlt, RAlt}; Ctrl = {LCtrl, RCtrl}; Shift = {LShift, RShift};
 VAR a: LONGINT; s1: CHAR; s: SET; k: INTEGER; dkn: SHORTINT;
-BEGIN
+BEGIN {EXCLUSIVE}
 	IF (c = 46X) & (flags * Ctrl # {}) THEN RETURN -2 END;	(* Ctrl-Break - break *)
 	IF (c = 44X) & (flags * Ctrl # {}) THEN RETURN 0FFH END;	(* Ctrl-F10 - exit *)
 	IF (c = 53X) & (flags * Ctrl # {}) & (flags * Alt # {}) THEN RETURN 0A1H END;	(* Ctrl-Alt-Del - Del *)
@@ -494,29 +508,44 @@ BEGIN
 	SendByte(60H, 0F3X)	(* settypedel, will cause Ack from keyboard *)
 END InitKeyboard;
 
-PROCEDURE Install*;
+PROCEDURE SetLayout*(par : ANY) : ANY; (** KeyboardLayoutFile ~ *)
+VAR layoutFilename : ARRAY 256 OF CHAR; r : AosIO.StringReader;
+BEGIN {EXCLUSIVE}
+	IF (keyboard # NIL) THEN
+		AosCommands.PosPar(par, r);
+		r.String(layoutFilename);
+		table := TableFromFile(layoutFilename);
+	ELSE
+		AosOut.String("AosKeyboard: No keyboard found."); AosOut.Ln;
+	END;
+	RETURN NIL
+END SetLayout;
+
+PROCEDURE Install*(par : ANY) : ANY;
 BEGIN
-	IF keyboard = NIL THEN InitKeyboard END
+	RETURN NIL;
 END Install;
 
-PROCEDURE Remove*;
+PROCEDURE Cleanup;
 BEGIN
 	IF (keyboard # NIL) & (AosModules.shutdown = AosModules.None) THEN
 		keyboard.Finalize; keyboard := NIL
 	END
-END Remove;
+END Cleanup;
 
 BEGIN
-	keyboard := NIL;
-	Install;
-	AosModules.InstallTermHandler(Remove)
+	InitKeyboard;
+	AosModules.InstallTermHandler(Cleanup)
 END AosKeyboard.
 
 (*
 19.08.1999	pjm	Split from Aos.Input
+20.09.2006	Added SetLayout (staubesv)
 *)
 
-AosKeyboard.Install
-AosKeyboard.Remove
+AosKeyboard.Install ~
 
-System.Free AosKeyboard ~
+AosKeyboard.SetLayout KeyCH.Bin ~
+AosKeyboard.SetLayout KeyUS.Bin ~
+
+S.Free AosKeyboard ~

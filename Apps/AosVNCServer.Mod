@@ -1,7 +1,7 @@
 MODULE AosVNCServer;	(** AUTHOR "TF"; PURPOSE "New VNC Server"; *)
 
 IMPORT
-	AosIO, AosTCP, AosIP, AosModules, Graphics := WMGraphics, WMRectangles, 
+	AosIO, AosTCP, AosIP, AosModules, WMRectangles, 
 	AosOut, AosDES, AosRandom, AosKernel, AosInputs, Raster, 
 	Utilities, SYSTEM;
 
@@ -34,7 +34,7 @@ TYPE
 	RectBuf = POINTER TO ARRAY OF Rectangle;
 	WorkBuf = POINTER TO ARRAY OF CHAR;
 	String = Utilities.String;
-	VNCMouseListener* = PROCEDURE {DELEGATE} (x, y : LONGINT; keys : SET);
+	VNCMouseListener* = PROCEDURE {DELEGATE} (x, y, dz : LONGINT; keys : SET);
 	VNCKeyboardListener* = PROCEDURE {DELEGATE} (ucs : LONGINT; flags : SET; keysym : LONGINT);
 	VNCClipboardListener* = PROCEDURE {DELEGATE} (text : String);
 	VNCNofClientsActiveListener* = PROCEDURE {DELEGATE} (nofClients : LONGINT);
@@ -158,7 +158,6 @@ TYPE
 		drawRectBuffer : RectBuf; (* declared as field to avoid stack clearing *)
 		workBuffer : WorkBuf; 
 		allowUpdate : BOOLEAN;
-		fullUpdate: BOOLEAN;
 		mode : Raster.Mode; (* chached mode to avoid bind *)
 		pfHextile : PFHextile;
 
@@ -196,8 +195,12 @@ TYPE
 			des : AosDES.DES; seq : AosRandom.Sequence;
 			i, len : LONGINT; ok : BOOLEAN;
 		BEGIN
-			IF vncInfo.password = "" THEN out.Net32(AuthNone); out.Update; RETURN out.res = AosIO.Ok
+			AosKernel.AtomicInc(NnofAuthenticate);
+			IF vncInfo.password = "" THEN
+				AosKernel.AtomicInc(NnofAuthNone); 
+				out.Net32(AuthNone); out.Update; RETURN out.res = AosIO.Ok
 			ELSE
+				AosKernel.AtomicInc(NnofAuthVNC);
 				out.Net32(AuthVNC);
 				(* initialize random number generator for challenge *)
 				NEW(seq); seq.InitSeed(AosKernel.GetTimer());
@@ -214,9 +217,11 @@ TYPE
 				(* inform client *)
 				IF ~ok THEN
 					IF TraceAuthentication IN Trace THEN AosOut.String("Authentication error."); AosOut.Ln END;
+					AosKernel.AtomicInc(NnofAuthFailed);
 					out.Net32(AuthFailed)
 				ELSE
 					IF TraceAuthentication IN Trace THEN AosOut.String("Authenticated."); AosOut.Ln END;
+					AosKernel.AtomicInc(NnofAuthOk);
 					out.Net32(AuthOk)
 				END;
 				out.Update;
@@ -255,7 +260,6 @@ TYPE
 		END Setup;
 		
 		PROCEDURE SetPixelFormat; (* 5.2.1 *)
-		VAR ch : CHAR;
 		BEGIN
 			(* skip padding *)
 			in.SkipBytes(3);
@@ -437,16 +441,16 @@ TYPE
 		
 		(* 5.2.6 *)
 		PROCEDURE PointerEvent;
-		VAR buttons : LONGINT; keys : SET; x, y : LONGINT;
+		VAR buttons : LONGINT; keys : SET; x, y, dz : LONGINT;
 		BEGIN
 			buttons := ORD(in.Get()); x := in.Net16(); y := in.Net16();
 			keys := {}; 
 			IF buttons MOD 2 = 1 THEN INCL(keys, 0) END;
 			IF buttons DIV 2 MOD 2 = 1 THEN INCL(keys, 1) END;
 			IF buttons DIV 4 MOD 2 = 1 THEN INCL(keys, 2) END;
-			IF buttons DIV 8 MOD 2 = 1 THEN AosOut.String("Button 4?"); END;
-			IF buttons DIV 16 MOD 2 = 1 THEN AosOut.String("Button 5?"); END;
-			IF vncInfo.ml # NIL THEN vncInfo.ml(x, y, keys) END
+			IF buttons DIV 8 MOD 2 = 1 THEN dz := -1 END;
+			IF buttons DIV 16 MOD 2 = 1 THEN dz := +1 END;
+			IF vncInfo.ml # NIL THEN vncInfo.ml(x, y, dz, keys) END
 		END PointerEvent;
 		
 		(* 5.2.7 *)
@@ -512,10 +516,14 @@ TYPE
 		END Serve;
 		
 	BEGIN {ACTIVE}
-		IF SendVersion() & Authenticate() & Setup() THEN Serve END;
+		IF SendVersion() & Authenticate() & Setup() THEN 
+			AosKernel.AtomicInc(NnofEnteredServe); 
+			Serve;
+			AosKernel.AtomicInc(NnofLeftServer);
+		END;
 		client.Close;
 		updateQ.Close;
-		s.Remove(SELF)
+		s.Remove(SELF);
 	END VNCAgent;
 	
 	(** Wait for new TCP connections, start a VNC agent as soon as needed *)
@@ -602,6 +610,12 @@ TYPE
 		END;
 		BEGIN {EXCLUSIVE} stopped := TRUE END
 	END Server;
+	
+VAR
+	NnofAuthenticate-,
+	NnofAuthNone-, 
+	NnofAuthVNC-, NnofAuthOk-, NnofAuthFailed-,
+	NnofEnteredServe-, NnofLeftServer- : LONGINT;
 
 PROCEDURE SendPixel(out : AosIO.Writer; pix : LONGINT; VAR pf : PixelFormat);
 BEGIN
@@ -617,7 +631,7 @@ BEGIN
 END SendPixel;
 
 PROCEDURE SendRawRect(out : AosIO.Writer; img : Raster.Image; VAR mode : Raster.Mode; VAR pf : PixelFormat; buf : WorkBuf; r : Rectangle);
-VAR i, j, rh, rw : LONGINT; pix, sr, sg, sb, cb, cg, cr, t : LONGINT;
+VAR i, j, rh, rw : LONGINT; cb, cg, cr : LONGINT;
 BEGIN
 	rh := r.b - r.t; rw := r.r - r.l;
 (*	AosOut.String("w/h"); AosOut.Int(rw, 5); AosOut.Int(rh, 5);
@@ -796,4 +810,4 @@ BEGIN
 END OpenService;
 
 END AosVNCServer.
- 
+

@@ -1,7 +1,7 @@
 (* ETH Oberon, Copyright 2001 ETH Zuerich Institut fuer Computersysteme, ETH Zentrum, CH-8092 Zuerich.
 Refer to the "General ETH Oberon System Source License" contract available at: http://www.oberon.ethz.ch/ *)
 
-MODULE ColorTools; (** portable *)  (** jm 19.1.95 *)
+MODULE ColorTools; (** portable *)	(** jm 19.1.95 *)
 
 (** ColorPicker implementation *)
 (*
@@ -11,7 +11,7 @@ MODULE ColorTools; (** portable *)  (** jm 19.1.95 *)
 *)
 
 IMPORT
-	Objects, Gadgets, Effects, Display, Display3, Oberon, Files, Input, Texts,  Views, Printer, Printer3;
+	Objects, Gadgets, Effects, Display, Display3, Oberon, Files, Input, Texts, Views, Printer, Printer3;
 	
 CONST
 	VersionNo = 2; ModName = "ColorTools";
@@ -48,7 +48,7 @@ BEGIN
 		IF (s[i] >= "0") & (s[i] <= "9") THEN
 			val := 0;
 			WHILE (s[i] >= "0") & (s[i] <= "9") DO val := val * 10 + ORD(s[i]) - ORD("0"); INC(i) END;
-			IF neg  THEN val := -val END;
+			IF neg THEN val := -val END;
 			IF val < -127 THEN val := -127
 			ELSIF val > 255 THEN val := 255
 			END;
@@ -93,11 +93,11 @@ BEGIN
 		END;
 	ELSIF M.id = Objects.set THEN
 		IF M.name = "Cmd" THEN
-			IF  (M.class = Objects.String) THEN COPY(M.s, F.cmd); M.res := 0 END;
+			IF (M.class = Objects.String) THEN COPY(M.s, F.cmd); M.res := 0 END;
 		ELSIF M.name = "Col" THEN
-			IF  (M.class = Objects.Int) THEN F.col := SHORT(M.i); M.res := 0; END
+			IF (M.class = Objects.Int) THEN F.col := SHORT(M.i); M.res := 0; END
 		ELSIF M.name = "Colors" THEN
-			IF  (M.class = Objects.String) THEN
+			IF (M.class = Objects.String) THEN
 				Parse(M.s, n, F.colors);
 				WHILE n < 256 DO F.colors[n] := n; INC(n) END;
 				M.res := 0
@@ -199,7 +199,7 @@ BEGIN
 	Highlight(li + (max - 1 - lj) * max, li, lj);
 	Oberon.RemoveMarks(x, y+ofs, bw4, bw4);
 	Views.RestoreBlock(block);
-	IF (keysum = {1}) & (i >= 0) THEN
+	IF ((keysum = {1}) OR (Oberon.New & (M.keys = {2}))) & (i >= 0) THEN
 		F.col := F.colors[li + (max - 1 - lj) * max];
 		IF F.cmd[0] # 0X THEN
 			Gadgets.Execute(F.cmd, F, M.dlink, NIL, NIL);
@@ -234,7 +234,10 @@ BEGIN
 	c := 0; j := max - 1;
 	WHILE j >= 0 DO
 		 i := 0;
-		 WHILE i < max DO Printer3.ReplConst(R, F.colors[c] , x + P(i * b), y + P(j * b), P(b), P(b), Display.replace); INC(i); INC(c) END;
+		 WHILE i < max DO
+		 	Printer3.ReplConst(R, F.colors[c] , x + P(i * b), y + P(j * b), P(b), P(b), Display.replace);
+		 	INC(i); INC(c)
+		 END;
 		DEC(j);
 	END;
 END PrintColorPicker;
@@ -290,7 +293,7 @@ BEGIN
 				x := M.x + F.X; y := M.y + F.Y; w := F.W; h := F.H; (* calculate actual coordinates *)
 				u := M.x; v := M.y; (* store volatile info *)
 				IF M IS Display.DisplayMsg THEN
-					WITH M: Display.DisplayMsg  DO
+					WITH M: Display.DisplayMsg DO
 						IF M.device = Display.screen THEN
 							IF (M.F = NIL) OR ((M.id = Display.full) & (M.F = F)) THEN
 								Gadgets.MakeMask(F, x, y, M.dlink, R);
@@ -306,7 +309,7 @@ BEGIN
 				ELSIF M IS Oberon.InputMsg THEN
 					WITH M: Oberon.InputMsg DO
 						IF ~(Gadgets.selected IN F.state) THEN
-							IF (M.id = Oberon.track) & (M.keys = {1}) & Gadgets.InActiveArea(F, M) THEN
+							IF (M.id = Oberon.track) & ((M.keys = {1}) OR (Oberon.New & (M.keys = {2}))) & Gadgets.InActiveArea(F, M) THEN
 								PickColor(F, x, y, w, h, M); M.res := 0;
 							ELSE
 								Gadgets.framehandle(F, M);

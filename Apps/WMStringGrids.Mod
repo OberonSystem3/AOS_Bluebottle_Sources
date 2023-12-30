@@ -1,16 +1,23 @@
 MODULE WMStringGrids;	(** AUTHOR "TF"; PURPOSE "String grid  component"; *)
-
+(**
+ * History:
+ *
+ *	12.03.2007	Added StringGridModel.SetCellColors and StringGridModel.GetCellColors (staubesv)
+ *)
+ 
 IMPORT
-		WMWindowManager, AosOut, AosActive, AosModules, WMComponents, WMGraphics, UTF8Strings,
+		WMWindowManager, AosOut, AosActive, AosModules, WMComponents, WMGraphics,
 		WMStandardComponents, WMMessages, WMProperties, WMEvents, WMRectangles, Utilities, 
-		WMGrids, AosInputs, WMGraphicUtilities;
+		WMGrids, WMGraphicUtilities;
 
 TYPE
 	String = Utilities.String;
 	Cell* = OBJECT
 	VAR
 		caption : String;
-		color, textCol, align: LONGINT;
+		usePerCellColors : BOOLEAN;
+		color, textColor : LONGINT;
+		align: LONGINT;
 		img : WMGraphics.Image;
 		data : ANY;
 	END Cell;
@@ -145,6 +152,36 @@ TYPE
 			END	
 		END GetCellText;
 		
+		PROCEDURE SetCellColors*(col, row, color, textColor : LONGINT);
+		BEGIN
+			ASSERT(AosActive.ActiveObject() = lockedBy, 3000);
+			IF (col >= 0) & (row >= 0) & (col < nofCols) & (row < nofRows) THEN
+				IF rows[row].cells[col] = NIL THEN NEW(rows[row].cells[col]) END;
+				rows[row].cells[col].usePerCellColors := TRUE;
+				IF rows[row].cells[col].color # color THEN
+					rows[row].cells[col].color := color;
+					viewChanged := TRUE;
+				END;
+				IF rows[row].cells[col].textColor # textColor THEN
+					rows[row].cells[col].textColor := textColor;
+					viewChanged := TRUE;
+				END;
+			END;
+		END SetCellColors;
+		
+		PROCEDURE GetCellColors*(col, row : LONGINT; VAR color, textColor : LONGINT; VAR valid : BOOLEAN);
+		BEGIN
+			ASSERT(AosActive.ActiveObject() = lockedBy, 3000);
+			valid := FALSE;
+			IF (col >= 0) & (row >= 0) & (col < nofCols) & (row < nofRows) THEN
+				IF (rows[row].cells[col] # NIL) & (rows[row].cells[col].usePerCellColors) THEN
+					valid := TRUE;
+					color := rows[row].cells[col].color;
+					textColor := rows[row].cells[col].textColor;
+				END;
+			END;
+		END GetCellColors;
+		
 		PROCEDURE SetCellData*(col, row : LONGINT; data : ANY);
 		BEGIN
 			ASSERT(AosActive.ActiveObject() = lockedBy, 3000);
@@ -211,12 +248,46 @@ TYPE
 			END	
 		END GetTextAlign;
 		
+		PROCEDURE DeleteRow*(rowNo : LONGINT; viewChanged : BOOLEAN);
+		VAR i : LONGINT;
+		BEGIN
+			ASSERT(AosActive.ActiveObject() = lockedBy, 3000);
+			IF (rowNo >=  0) & (rowNo < nofRows) THEN
+				FOR i := rowNo TO nofRows - 2 DO
+					rows[i] := rows[i + 1]
+				END;
+				DEC(nofRows);
+				SELF.viewChanged := viewChanged
+			END
+		END DeleteRow;
+		
+		PROCEDURE InsertEmptyRow*(atRowNo : LONGINT);
+		VAR i : LONGINT;
+			newRows : RowArray;
+		BEGIN
+			ASSERT(AosActive.ActiveObject() = lockedBy, 3000);
+			IF (atRowNo >= 0) & (atRowNo <= nofRows) THEN
+				NEW(newRows, nofRows + 1);
+				FOR i := 0 TO atRowNo - 1 DO
+					newRows[i] := rows[i]
+				END;
+				NEW(newRows[atRowNo]);
+				AdjustRow(newRows[atRowNo]);
+				FOR i := atRowNo + 1 TO nofRows DO
+					newRows[i] := rows[i - 1]
+				END
+			END;
+			INC(nofRows);
+			rows := newRows;
+			viewChanged := TRUE
+		END InsertEmptyRow;
+		
 	END StringGridModel;
 	
 TYPE StringGrid* = OBJECT(WMGrids.GenericGrid)
 	VAR model- : StringGridModel;
 		cellColor, hoverColor, selectedColor, fixedColor, textHoverColor, textColor, textSelectedColor : LONGINT;
-		clCell, clFixed, clHover, clSelected, clTextDefault, clTextHover, clTextSelected : WMProperties.ColorProperty;
+		clCell-, clFixed-, clHover-, clSelected-, clTextDefault-, clTextHover-, clTextSelected- : WMProperties.ColorProperty;
 		
 		
 		PROCEDURE &Init;
@@ -282,10 +353,18 @@ TYPE StringGrid* = OBJECT(WMGrids.GenericGrid)
 		END CellClicked; *)
 		
 		PROCEDURE DrawCell(canvas : WMGraphics.Canvas; w, h : LONGINT; state : SET; x, y : LONGINT);
-		VAR s : String; font : WMGraphics.Font; left, c, tc: LONGINT; img : WMGraphics.Image;
+		VAR 
+			s : String; font : WMGraphics.Font; left, c, tc: LONGINT; img : WMGraphics.Image;
+			valid : BOOLEAN;
 		BEGIN
 			s := model.GetCellText(x, y);
-			tc := textColor;
+
+			model.GetCellColors(x, y, c, tc, valid);
+			IF ~valid THEN 
+				c := cellColor;
+				tc := textColor;
+			END;
+
 			IF WMGrids.CellFixed IN state THEN 
 				c := fixedColor; 
 				IF WMGrids.CellSelected IN state THEN 
@@ -301,7 +380,7 @@ TYPE StringGrid* = OBJECT(WMGrids.GenericGrid)
 				canvas.Fill(WMRectangles.MakeRect(0, 0, w, h), hoverColor, WMGraphics.ModeSrcOverDst);
 				tc := textHoverColor
 			ELSE 
-				canvas.Fill(WMRectangles.MakeRect(0, 0, w, h), cellColor, WMGraphics.ModeSrcOverDst)		
+				canvas.Fill(WMRectangles.MakeRect(0, 0, w, h), c, WMGraphics.ModeSrcOverDst)		
 			END;
 			
 			font := GetFont();

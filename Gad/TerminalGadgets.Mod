@@ -1,7 +1,7 @@
 (* ETH Oberon, Copyright 2001 ETH Zuerich Institut fuer Computersysteme, ETH Zentrum, CH-8092 Zuerich.
 Refer to the "General ETH Oberon System Source License" contract available at: http://www.oberon.ethz.ch/ *)
 
-MODULE TerminalGadgets;	(** portable *) (* ww 5 Jun 92, dk, März 94, rs 21-Apr-1994*)
+MODULE TerminalGadgets; (** portable *)	(* ww 5 Jun 92, dk, März 94, rs 21-Apr-1994*)
 
 IMPORT Objects, Terminals, Oberon, Texts, Display, Display3, Gadgets, Fonts, Input, Printer, Printer3;
 
@@ -41,10 +41,10 @@ PROCEDURE InvC(F: Frame) : INTEGER;
 BEGIN
 	IF F.col = Display3.textbackC THEN RETURN 1
 	ELSIF (F.col = Display.BG) OR (F.col = Display3.white) THEN RETURN Display3.FG
-	ELSIF F.col > 0  THEN RETURN 15 - F.col
+	ELSIF F.col > 0 THEN RETURN 15 - F.col
 	ELSE RETURN Display3.FG
 	END
-END  InvC;
+END InvC;
 
 
 PROCEDURE NotifyDisplay*(t: Terminals.Terminal; op, fromLine, fromCol, toLine, toCol: INTEGER; oldCur: Terminals.Location);
@@ -256,7 +256,7 @@ BEGIN
 	ELSE
 		NEW(text);
 		Texts.Open(text, "");
-		time := 0; beg := 0
+		time := -1; beg := 0
 	END
 END GetSelection;
 
@@ -455,7 +455,7 @@ BEGIN
 		END;
 		oldTo := from;
 		IF oldTo.col > len THEN
-			oldTo.col  := tw + 1
+			oldTo.col := tw + 1
 		END;
 		IF f.hasSel THEN
 			IF (f.selFrom.line = f.selTo.line)
@@ -640,7 +640,7 @@ BEGIN
 		UNTIL keys = {};
 		IF keySum = {Left, Middle} THEN
 			Oberon.GetSelection(text, beg, end, time);
-			IF time > 0 THEN
+			IF time # -1 THEN
 				Terminals.SendText(f.text, text, beg, end)
 			END
 		END
@@ -867,7 +867,7 @@ BEGIN
 				frameX := M.x + F.X; frameY := M.y + F.Y;
 				IF (M.F = NIL) OR (M.F = F) THEN																 		(* message addressed to this frame *)				
 					IF M IS Display.DisplayMsg THEN
-						WITH M: Display.DisplayMsg  DO
+						WITH M: Display.DisplayMsg DO
 							IF M.device = Display.screen THEN
 								IF (M.id = Display.full) OR (M.F = NIL) THEN
 									Gadgets.MakeMask(F, frameX, frameY, M.dlink, R);
@@ -914,7 +914,7 @@ BEGIN
 					ELSIF M IS Oberon.SelectMsg THEN
 						WITH M: Oberon.SelectMsg DO
 							IF M.id = Oberon.get THEN
-								IF F.hasSel & (M.time < F.selTime) THEN
+								IF F.hasSel & (((M.time-F.selTime) < 0) OR (M.time = -1)) THEN
 									GetSelection(F, M.text, M.beg, M.end, M.time)
 								END
 							END
@@ -938,7 +938,7 @@ BEGIN
 		
 		ELSIF M IS Objects.AttrMsg THEN
 			FrameAttr(F, M(Objects.AttrMsg))
-		ELSIF  M IS Objects.CopyMsg THEN
+		ELSIF M IS Objects.CopyMsg THEN
 			WITH M: Objects.CopyMsg DO
 				IF M.stamp = F.stamp THEN																		(* copy msg arrives again *)
 					 M.obj := F.dlink

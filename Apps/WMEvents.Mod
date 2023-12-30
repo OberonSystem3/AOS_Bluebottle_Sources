@@ -7,7 +7,7 @@ TYPE
 	String = Utilities.String;
 
 	(** Generic Event Listener*)
-	EventListener* = PROCEDURE  { DELEGATE } (sender, par : PTR);
+	EventListener* = PROCEDURE  { DELEGATE } (sender, par : ANY);
 	(** EventListenerFinder searches an EventListener by string in its context and returns the EventListener or NIL *)
 	CompCommandFinder* = PROCEDURE { DELEGATE } (str : String) : EventListener;
 	
@@ -27,7 +27,7 @@ TYPE
 		finder : CompCommandFinder;
 		
 		(** create an EventInfo for a component owner. Report name as the name of this event *)
-		PROCEDURE &New*(owner : PTR; name, info : String; finder : CompCommandFinder);
+		PROCEDURE &New*(owner : ANY; name, info : String; finder : CompCommandFinder);
 		BEGIN
 			SELF.owner := owner; SELF.name := name; SELF.info := info; SELF.finder := finder
 		END New;
@@ -42,11 +42,11 @@ TYPE
 			RETURN info
 		END GetInfo;
 		
-		(** Add a command to this event. Commands can be added more then once. *)
-		PROCEDURE Add*(event : EventListener);
+		(** Add a command to this event. Observers can be added more then once. *)
+		PROCEDURE Add*(observer : EventListener);
 		VAR new : EventListenerLink;
 		BEGIN {EXCLUSIVE}
-			NEW(new); new.event := event; new.next := listeners; listeners := new
+			NEW(new); new.event := observer; new.next := listeners; listeners := new
 		END Add;
 		
 		(** Add an listener to this event. The listener is found by findig the component referenced in the string and then
@@ -60,14 +60,14 @@ TYPE
 		END AddByString;
 		
 		(** Remove the first found entry of event *)
-		PROCEDURE Remove*(event : EventListener);
+		PROCEDURE Remove*(observer : EventListener);
 		VAR cur : EventListenerLink;
 		BEGIN {EXCLUSIVE}
 			IF listeners = NIL THEN RETURN END;
-			IF (listeners # NIL) & (listeners.event = event) THEN listeners := listeners.next; RETURN END;
+			IF (listeners.event = observer) THEN listeners := listeners.next; RETURN END;
 			cur := listeners;
 			WHILE cur.next # NIL DO
-				IF cur.next.event = event THEN cur.next := cur.next.next; RETURN END;
+				IF cur.next.event = observer THEN cur.next := cur.next.next; RETURN END;
 				cur := cur.next
 			END
 		END Remove;
@@ -87,7 +87,7 @@ TYPE
 		(** Call the event with parameter par. The owner of the EventInfo class will be added in the event's sender parameter *)
 		PROCEDURE Call*(par : PTR);
 		VAR cur : EventListenerLink;
-		BEGIN (* { EXCLUSIVE } *) (* TODO : why does the kernel crash if this is exclusive... need a trace cable *)
+		BEGIN 
 			cur := listeners; 
 			WHILE cur # NIL DO 
 				IF cur.event # NIL THEN cur.event(owner, par) 
@@ -263,4 +263,4 @@ TYPE
 	
 
 END WMEvents.
- 
+

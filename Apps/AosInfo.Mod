@@ -1,22 +1,25 @@
 (* Aos, Copyright 2001, Pieter Muller, ETH Zurich *)
 
- MODULE AosInfo; (** AUTHOR "pjm"; PURPOSE "System information"; *)
+MODULE AosInfo; (** AUTHOR "pjm"; PURPOSE "System information"; *)
 
 (**
-Aos system information commands.  All commands output to the Aos log.  In Oberon, execute System.OpenKernelLog to see  the log, or use LogWindow.Open to open a log window.
+Aos system information commands.  All commands output to the Aos log.
+	In Oberon, execute System.OpenKernelLog to see  the log, or use LogWindow.Open to open a log window.
 *)
 
-IMPORT SYSTEM, AosBoot, AosLocks, AosOut, AosMemory, AosHeap, AosModules, AosTrap, AosActive, 
-	AosCommands, AosPlugins, AosIO;
+IMPORT AosCommands, AosIO, AosPlugins,
+	SYSTEM, AosLocks, AosOut, AosMemory, AosHeap, AosModules, AosTrap, AosActive,
+	Utilities;
 
 CONST
 	ArrayBit = 1; FreeBit = 2; SubObjBit = 3;
 	BlockSize = AosHeap.BlockSize;
+	Tab = 9X;
 
 (** List all loaded modules. *)
 
-PROCEDURE Modules*(par: PTR): PTR;
-VAR m: AosModules.Module;
+PROCEDURE Modules*(par : PTR) : PTR;
+VAR m : AosModules.Module;
 BEGIN
 	m := AosModules.root;
 	WHILE m # NIL DO
@@ -32,8 +35,8 @@ BEGIN
 	RETURN NIL
 END Modules;
 
-PROCEDURE WriteB(b: LONGINT);
-VAR shift: LONGINT; suffix: ARRAY 2 OF CHAR;
+PROCEDURE WriteB(b : LONGINT);
+VAR shift : LONGINT; suffix : ARRAY 2 OF CHAR;
 BEGIN
 	IF b < 100*1024 THEN suffix := ""; shift := 0
 	ELSIF b < 100*1024*1024 THEN suffix := "K"; shift := -10
@@ -52,15 +55,15 @@ END WriteB;
 
 (** List all loaded modules, with their sizes. *)
 
-PROCEDURE ModuleSizes*(par: PTR): PTR;
-VAR m: AosModules.Module; tag, size, total, data, const, code, desc, mdescsize: LONGINT;
+PROCEDURE ModuleSizes*(par : PTR) : PTR;
+VAR m : AosModules.Module; tag, size, total, data, const, code, desc, mdescsize : LONGINT;
 BEGIN
 	mdescsize := SYSTEM.GET32(SYSTEM.TYPECODE(AosModules.Module));	(* get size of module descriptor *)
-	AosOut.String("MODULE"); AosOut.Char(9X);
-	AosOut.String("SIZE"); AosOut.Char(9X);
-	AosOut.String("CODE"); AosOut.Char(9X);
-	AosOut.String("DATA"); AosOut.Char(9X);
-	AosOut.String("CONST"); AosOut.Char(9X);
+	AosOut.String("MODULE"); AosOut.Char(Tab);
+	AosOut.String("SIZE"); AosOut.Char(Tab);
+	AosOut.String("CODE"); AosOut.Char(Tab);
+	AosOut.String("DATA"); AosOut.Char(Tab);
+	AosOut.String("CONST"); AosOut.Char(Tab);
 	AosOut.String("DESC"); AosOut.Ln; AosOut.Ln;
 	m := AosModules.root;
 	WHILE m # NIL DO
@@ -72,11 +75,11 @@ BEGIN
 			(* get module size *)
 		SYSTEM.GET(SYSTEM.VAL(LONGINT, m.code)-4, tag);	(* indirect tag *)
 		SYSTEM.GET(tag, size);
-		AosOut.Char(9X); AosOut.Int(size, 1);
-		AosOut.Char(9X); AosOut.Int(m.codeSize, 1);
-		AosOut.Char(9X); AosOut.Int(m.dataSize, 1);
-		AosOut.Char(9X); AosOut.Int(m.constSize, 1);
-		AosOut.Char(9X); AosOut.Int(size-(m.dataSize+m.constSize+m.codeSize), 1);
+		AosOut.Char(Tab); AosOut.Int(size, 1);
+		AosOut.Char(Tab); AosOut.Int(m.codeSize, 1);
+		AosOut.Char(Tab); AosOut.Int(m.dataSize, 1);
+		AosOut.Char(Tab); AosOut.Int(m.constSize, 1);
+		AosOut.Char(Tab); AosOut.Int(size-(m.dataSize+m.constSize+m.codeSize), 1);
 		INC(total, size);
 		INC(data, m.dataSize); INC(const, m.constSize); INC(code, m.codeSize);
 		INC(desc, size-(m.dataSize+m.constSize+m.codeSize));
@@ -84,25 +87,28 @@ BEGIN
 		m := m.next
 	END;
 	AosOut.Ln; AosOut.String("TOTAL");
-	AosOut.Char(9X); WriteB(total);
-	AosOut.Char(9X); WriteB(code);
-	AosOut.Char(9X); WriteB(data);
-	AosOut.Char(9X); WriteB(const);
-	AosOut.Char(9X); WriteB(desc);
+	AosOut.Char(Tab); WriteB(total);
+	AosOut.Char(Tab); WriteB(code);
+	AosOut.Char(Tab); WriteB(data);
+	AosOut.Char(Tab); WriteB(const);
+	AosOut.Char(Tab); WriteB(desc);
 	AosOut.Ln;
 	RETURN NIL
 END ModuleSizes;
 
 (** Show the details of the specified module. *)
 
-PROCEDURE ModuleDetails*(par: PTR): PTR;	(** module *)
+PROCEDURE ModuleDetails*(par : PTR) : PTR;	(** module *)
 VAR
-	m, n: AosModules.Module; i, j, p, k: LONGINT;
-	t: AosModules.TypeDesc; s: AosCommands.Parameters; writer: AosIO.Writer;
+	m, n : AosModules.Module; i, j, p, k : LONGINT;
+	t : AosModules.TypeDesc; writer : AosIO.Writer;
+	modn : ARRAY 33 OF CHAR;
+	sr : AosIO.StringReader;
 BEGIN
-	s := par(AosCommands.Parameters);
+	AosCommands.PosPar(par, sr);
+	AosCommands.GetTok(sr, modn);
 	m := AosModules.root;
-	WHILE (m # NIL) & (m.name # s.str^) DO m := m.next END;
+	WHILE (m # NIL) & (m.name # modn) DO m := m.next END;
 	IF m # NIL THEN
 		AosIO.OpenWriter(writer, AosOut.Send);
 		AosOut.String(m.name);
@@ -161,11 +167,12 @@ END ModuleDetails;
 
 (** Find a procedure, given the absolute PC address. *)
 
-PROCEDURE ModulePC*(par: PTR): PTR;	(** pc *)
-VAR pc, i: LONGINT; s: AosCommands.Parameters; writer: AosIO.Writer;
+PROCEDURE ModulePC*(par : PTR) : PTR;	(** pc *)
+VAR pc : LONGINT; writer : AosIO.Writer;
+	sr : AosIO.StringReader;
 BEGIN
-	s := par(AosCommands.Parameters);
-	i := 0; pc := AosBoot.StrToInt(i, s.str^);
+	AosCommands.PosPar(par, sr);
+	AosCommands.GetInt(sr, pc, FALSE);
 	IF AosModules.ThisModuleByAdr(pc) # NIL THEN
 		AosIO.OpenWriter(writer, AosOut.Send);
 		AosTrap.WriteProc(writer, pc); writer.Update
@@ -176,8 +183,8 @@ BEGIN
 	RETURN NIL
 END ModulePC;
 
-PROCEDURE WriteType(adr: LONGINT);
-VAR m: AosModules.Module;  t: AosModules.TypeDesc;
+PROCEDURE WriteType(adr : LONGINT);
+VAR m : AosModules.Module;  t : AosModules.TypeDesc;
 BEGIN
 	AosModules.ThisTypeByAdr(adr - adr MOD 8, m, t);
 	IF m # NIL THEN
@@ -190,8 +197,8 @@ END WriteType;
 
 (** List all loaded plugins. *)
 
-PROCEDURE Plugins*(par: PTR): PTR;
-VAR r, p: AosPlugins.Table; i, j: LONGINT;
+PROCEDURE Plugins*(par : PTR) : PTR;
+VAR r, p : AosPlugins.Table; i, j : LONGINT;
 BEGIN
 	AosPlugins.main.GetAll(r);
 	IF r # NIL THEN
@@ -202,7 +209,7 @@ BEGIN
 			r[i](AosPlugins.Registry).GetAll(p);
 			IF p # NIL THEN
 				FOR j := 0 TO LEN(p^)-1 DO
-					AosOut.Char(9X); AosOut.Int(j, 1); AosOut.Char(" ");
+					AosOut.Char(Tab); AosOut.Int(j, 1); AosOut.Char(" ");
 					AosOut.String(p[j].name); AosOut.Char(" ");
 					AosOut.String(p[j].desc); AosOut.Ln
 				END
@@ -214,12 +221,12 @@ END Plugins;
 
 (** Show memory details. *)
 
-PROCEDURE Memory*(par: PTR): PTR;
+PROCEDURE Memory*(par : PTR) : PTR;
 VAR
-	p, tag, size, t, blocks, low, high, total: LONGINT;
-	recblks, sysblks, arrblks, typedescs, protrecblks, freeblks, unknowns: LONGINT;
-	recblksize, sysblksize, arrblksize, typedescsize, protrecblksize, freeblksize, unknownsize, heapsize: LONGINT;
-	flag: INTEGER;
+	p, tag, size, t, blocks, low, high, total : LONGINT;
+	recblks, sysblks, arrblks, typedescs, protrecblks, freeblks, unknowns : LONGINT;
+	recblksize, sysblksize, arrblksize, typedescsize, protrecblksize, freeblksize, unknownsize, heapsize : LONGINT;
+	flag : INTEGER;
 BEGIN
 	blocks := 0; recblks := 0; sysblks := 0; arrblks := 0;
 	typedescs := 0; protrecblks := 0; freeblks := 0; unknowns := 0;
@@ -291,11 +298,11 @@ END Memory;
 
 (** Show active and protected objects. *)
 
-PROCEDURE Objects*(par: PTR): PTR;
+PROCEDURE Objects*(par : PTR) : PTR;
 VAR
-	p, tag, size, t, i, n, ptag: LONGINT;
-	type: ARRAY 800 OF RECORD ptag, count, size: LONGINT END;
-	flag: INTEGER;
+	p, tag, size, t, i, n, ptag : LONGINT;
+	type : ARRAY 800 OF RECORD ptag, count, size : LONGINT END;
+	flag : INTEGER;
 BEGIN
 	AosLocks.Acquire(AosLocks.AosHeap);
 	p := AosHeap.beginBlockAdr; n := 0;
@@ -326,8 +333,8 @@ BEGIN
 	FOR i := 0 TO n-1 DO
 		INC(t, type[i].count);
 		AosOut.Int(type[i].count, 5); AosOut.Char(" ");
-		WriteType(type[i].ptag); AosOut.String(" ("); WriteB(type[i].size); AosOut.String(" total "); 
-			WriteB(type[i].size * type[i].count); AosOut.String(")"); AosOut.Ln
+		WriteType(type[i].ptag); AosOut.String(" ("); WriteB(type[i].size); AosOut.String(" total ");
+		WriteB(type[i].size * type[i].count); AosOut.String(")"); AosOut.Ln
 	END;
 	AosOut.Int(t, 1); AosOut.String(" objects of ");
 	AosOut.Int(n, 1); AosOut.String(" unique types found");
@@ -337,12 +344,25 @@ END Objects;
 
 (** Show active and protected objects. *)
 
-PROCEDURE AllObjects*(par: PTR): PTR;
+(*
+AosInfo.AllObjects PET.Window* ~
+AosInfo.AllObjects * ~
+
+*)
+
+PROCEDURE AllObjects*(par : PTR) : PTR;
 VAR
-	p, tag, size, t, i, n, ptag: LONGINT;
-	type: ARRAY 800 OF RECORD ptag, count, size: LONGINT END;
-	flag: INTEGER;
+	p, tag, size, t, i, n, ptag : LONGINT;
+	type : ARRAY 800 OF RECORD ptag, count, size : LONGINT END;
+	flag : INTEGER;
+	module : AosModules.Module;
+	typedesc : AosModules.TypeDesc;
+	mask, string : ARRAY 256 OF CHAR;
+	sr : AosIO.StringReader;
 BEGIN
+	AosCommands.PosPar(par, sr);
+	AosCommands.GetTok(sr, mask);
+
 	AosLocks.Acquire(AosLocks.AosHeap);
 	p := AosHeap.beginBlockAdr; n := 0;
 	WHILE p # AosHeap.endBlockAdr DO
@@ -373,21 +393,34 @@ BEGIN
 		INC(p, size)
 	END;
 	AosLocks.Release(AosLocks.AosHeap);
-	t := 0;
+	AosOut.Char(0EX); (* non-proportional font *)
+
 	FOR i := 0 TO n-1 DO
 		INC(t, type[i].count);
-		AosOut.Int(type[i].count, 5); AosOut.Char(" ");
-		WriteType(type[i].ptag); AosOut.String(" ("); WriteB(type[i].size); AosOut.String(" total "); 
-			WriteB(type[i].size * type[i].count); AosOut.String(")"); AosOut.Ln
+
+		AosModules.ThisTypeByAdr(type[i].ptag - type[i].ptag MOD 8, module, typedesc);
+		IF module # NIL THEN
+			string := ""; Utilities.Append(string,  module.name); Utilities.Append(string, "."); Utilities.Append(string, typedesc.name);
+
+			IF Utilities.Match(mask, string) THEN
+				AosOut.Int(type[i].count, 8); AosOut.Char(" ");
+				AosOut.Int(type[i].size, 6); AosOut.String("B ");
+				AosOut.Int(type[i].size * type[i].count, 10); AosOut.String("B ");
+				WriteType(type[i].ptag);
+				AosOut.String(" (total ");
+				WriteB(type[i].size * type[i].count); AosOut.String(")"); AosOut.Ln
+			END;
+		END;
 	END;
 	AosOut.Int(t, 1); AosOut.String(" dynamic records of ");
 	AosOut.Int(n, 1); AosOut.String(" unique types found");
 	AosOut.Ln;
+	AosOut.Char(0FX); (* proportional font *)
 	RETURN NIL
 END AllObjects;
 
 (*
-info = "[" id mode process obj [ ":" type ] time eip [ optional ] "]" . 
+info = "[" id mode process obj [ ":" type ] time eip [ optional ] "]" .
 id = <process id> .
 mode = "rdy" | "run" | "awl" | "awc" | "awe" | "rip" | "idl" .
 process = <adr of process record> .
@@ -400,18 +433,18 @@ awlinfo = waitobj ("-" modulename | ":" typename ) .
 awcinfo = conditionEIP condFP .
 *)
 
-PROCEDURE TraceProcess(p: AosActive.Process);
-VAR adr: LONGINT; m: AosModules.Module;
+PROCEDURE TraceProcess(p : AosActive.Process);
+VAR adr : LONGINT; m : AosModules.Module;
 BEGIN
 	AosOut.Char(0EX); AosOut.Char("[");
 	AosOut.Int(p.id, 3); AosOut.Char(" ");
 	CASE p.mode OF
-		AosActive.Ready: AosOut.String("rdy")
-		|AosActive.Running: AosOut.String("run")
-		|AosActive.AwaitingLock: AosOut.String("awl")
-		|AosActive.AwaitingCond: AosOut.String("awc")
-		|AosActive.AwaitingEvent: AosOut.String("awe")
-		|AosActive.Terminated: AosOut.String("rip")
+		| AosActive.Ready : AosOut.String("rdy")
+		| AosActive.Running : AosOut.String("run")
+		| AosActive.AwaitingLock : AosOut.String("awl")
+		| AosActive.AwaitingCond : AosOut.String("awc")
+		| AosActive.AwaitingEvent : AosOut.String("awe")
+		| AosActive.Terminated : AosOut.String("rip")
 		ELSE AosOut.Int(p.mode, 1)
 	END;
 	AosOut.Int(p.procID, 2); AosOut.Int(p.priority, 2);
@@ -444,8 +477,8 @@ END TraceProcess;
 
 (** Show active object threads. *)
 
-PROCEDURE Active*(par: PTR): PTR;
-VAR old: AosActive.TraceProcess;
+PROCEDURE Active*(par : PTR) : PTR;
+VAR old : AosActive.TraceProcess;
 BEGIN
 	old := AosActive.traceProcess;
 	AosActive.traceProcess := TraceProcess;	(* ignore race *)
@@ -456,12 +489,12 @@ END Active;
 
 (** Show commands of specified module. *)
 
-PROCEDURE Commands*(par: PTR): PTR;	(** module *)
-VAR s: AosCommands.Parameters; m: AosModules.Module; i: LONGINT; msg: ARRAY 128 OF CHAR;
+PROCEDURE Commands*(par : PTR) : PTR;	(** module *)
+VAR p : AosCommands.Parameters; m : AosModules.Module; i : LONGINT; msg : ARRAY 128 OF CHAR;
 BEGIN
-	s := par(AosCommands.Parameters);
-	i := 0; WHILE (s.str[i] # 0X) & (s.str[i] # ".") DO INC(i) END; s.str[i] := 0X;
-	m := AosModules.ModuleByName(s.str^);
+	p := par(AosCommands.Parameters);
+	i := 0; WHILE (p.str[i] # 0X) & (p.str[i] # ".") DO INC(i); END; p.str[i] := 0X;
+	m := AosModules.ModuleByName(p.str^);
 	IF m # NIL THEN
 		FOR i := 0 TO LEN(m.command)-1 DO
 			AosOut.String(m.name); AosOut.Char(".");
@@ -477,9 +510,9 @@ END Commands;
 (*
 (** Toggle the garbage collector on and off. *)
 
-PROCEDURE ToggleGC*(par: PTR): PTR;	(** for testing only *)
-TYPE Node = POINTER TO RECORD next: Node; filler: ARRAY 1024 OF CHAR END;
-VAR p, q: Node; i: LONGINT;
+PROCEDURE ToggleGC*(par : PTR) : PTR;	(** for testing only *)
+TYPE Node = POINTER TO RECORD next : Node; filler : ARRAY 1024 OF CHAR END;
+VAR p, q : Node; i : LONGINT;
 BEGIN
 	IF AosHeap.gcEnabled THEN	(* make sure enough space is available *)
 		q := NIL;
@@ -501,7 +534,7 @@ END ToggleGC;
 
 (** Toggle thread tracing during garbage collection on and off. *)
 
-PROCEDURE ToggleTrace*(par: PTR): PTR;	(** for testing only *)
+PROCEDURE ToggleTrace*(par : PTR) : PTR;	(** for testing only *)
 BEGIN
 	IF AosActive.traceProcess = NIL THEN	(* ignore race *)
 		AosActive.traceProcess := TraceProcess
@@ -518,15 +551,15 @@ BEGIN
 END ToggleTrace;
 
 (*
-(** Toggle HLT during idle on and off (for single-processor laptops). *)
+(** Toggle HLT during idle on and off (for single-processor laptops). - No doHLT in AosActive.Mod *)
 
-PROCEDURE SetHLT*(par: PTR): PTR;	(** for testing only *)
-VAR s: AosCommands.Parameters;
+PROCEDURE SetHLT*(par : PTR) : PTR;	(** for testing only *)
+VAR p : AosCommands.Parameters;
 BEGIN
-	s := par(AosCommands.Parameters);
-	IF s.str[0] = "1" THEN
+	p := par(AosCommands.Parameters);
+	IF p.str[0] = "1" THEN
 		AosActive.doHLT := TRUE
-	ELSIF s.str[0] = "0" THEN
+	ELSIF p.str[0] = "0" THEN
 		AosActive.doHLT := FALSE
 	ELSE
 		AosActive.doHLT := ~AosActive.doHLT
@@ -548,19 +581,19 @@ to do:
 o module state
 *)
 
-System.Free AosInfo ~
+S.Free AosInfo ~
 
-Aos.Call AosInfo.Modules
-Aos.Call AosInfo.ModuleDetails AosModules
-Aos.Call AosInfo.ModuleSizes
-Aos.Call AosInfo.Memory
-Aos.Call AosInfo.Active
-Aos.Call AosInfo.Commands Aos
-Aos.Call AosInfo.Plugins
-Aos.Call AosInfo.Objects
-Aos.Call AosInfo.AllObjects
+AosInfo.Modules ~						(* List all loaded modules *)
+AosInfo.ModuleDetails AosModules ~
+AosInfo.ModuleSizes ~
+AosInfo.Memory ~
+AosInfo.Active ~							(* List active objects threads *)
+AosInfo.Commands AosInfo.Mod ~		(* List commands of specified module - suffix .Obx or .Mod *)
+AosInfo.Plugins ~
+AosInfo.Objects ~						(* List active and protected objects *)
+AosInfo.AllObjects AosInfo.Module* ~
 
-System.State AosActive ~
+WMModuleState.Open AosActive ~
 
-Aos.Call AosInfo.ToggleGC
-Aos.Call AosInfo.ToggleTrace
+AosInfo.ToggleGC ~
+AosInfo.ToggleTrace ~

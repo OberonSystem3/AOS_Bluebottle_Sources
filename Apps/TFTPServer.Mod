@@ -171,7 +171,7 @@ TYPE
 					LogEnter(3); Log(3, RRQId);
 					IF (res = AosUDP.Timeout) THEN Log(3, "timeout")
 					ELSIF (res = Ok) THEN
-						acked := (res = Ok) & (PacketType(ack) = ACK) & (Get2(ack, 2) = blockNr) & (ip = fip) & (fport = port);
+						acked := (res = Ok) & (PacketType(ack) = ACK) & (Get2(ack, 2) = blockNr) & (AosIP.AdrsEqual(ip, fip)) & (fport = port);
 						IF acked THEN Log(3, "got ack") ELSE Log(3, "ack failed") END
 					ELSE
 						Log(3, "unknown error "); LogInt(3, res)
@@ -235,7 +235,7 @@ TYPE
 				LogExit(3);
 					socket.Receive(buf, 0, LEN(buf), DataTimeout, ip, port, len, res);
 					IF (res = Ok) THEN
-						IF (ip = fip) & (fport = port) THEN
+						IF AosIP.AdrsEqual(ip, fip) & (fport = port) THEN
 							IF (PacketType(buf) = DATA) THEN
 								IF (Get2(buf, 2) = blockNr) THEN
 									file.WriteBytes(r, buf, 4, len-4);
@@ -450,7 +450,7 @@ BEGIN
 	TraceLevel := 2;
 	NEW(generator)
 END TFTPServer.
- 
+
 
 System.Free TFTPServer ~
 

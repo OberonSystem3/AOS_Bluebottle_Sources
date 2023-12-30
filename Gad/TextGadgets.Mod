@@ -20,6 +20,7 @@ MODULE TextGadgets; (** portable *)
 	27.6.96 - added Tabs, Left, Width attributes
 	29.7.96 - fixed bug in Format (printer metrics)
 	22.5.97 - fixed invertC (thanks mad)
+	17.5.2004 - export formatting info of lines and boxes as Frame fields and make them persistent (PH)
 *)
 
 IMPORT Display3, TextGadgets0, Objects, Display, Gadgets, Texts, Oberon, Fonts, Files, Printer, Effects, Printer3, Input, Strings;
@@ -36,7 +37,7 @@ CONST
 	MaxTabs = 32;
 	
 	markerH = 4;
-	boxdsr = 3; (* standard descender for boxes *)
+	(*boxdsr = 3;*) (* standard descender for boxes now in FrameGadgets0.Frame integrated *)
 	
 TYPE
 	Style* = POINTER TO StyleDesc;
@@ -263,7 +264,8 @@ BEGIN
 	IF (org < 0) OR (org > F.text.len) THEN HALT(99) END;
 	WITH F: Frame DO
 		L.obj := FindStyle(F.text, org);
-		L.asr := 10; L.dsr := 3; L.h := 13; L.w := 0; L.len := 0; L.eot := FALSE; (*L.box := NIL; do not! see below! *)
+		L.asr := F.asr (*10*); L.dsr := F.dsr (*3*); L.h := F.h (*13*);
+		L.w := 0; L.len := 0; L.eot := FALSE; (*L.box := NIL; do not! see below! *)
 		box := NIL; L.extra := 0;
 		lastlen := -1; lastw := 0; lastasr := L.asr; lastdsr := L.dsr; L.spaces := 0; lastbox := NIL;
 		CurStyle(F, L, style, leftM, maxW); pmaxW := Dev(maxW); pw := 0; lastfnt := NIL;
@@ -289,7 +291,7 @@ BEGIN
 
 						IF R.lib # lastfnt THEN
 							L.dsr := Max(L.dsr, -R.lib(Fonts.Font).minY);
-							L.asr := Max(L.asr, R.lib(Fonts.Font).maxY * 120 DIV 100);
+							L.asr := Max(L.asr, R.lib(Fonts.Font).maxY *  F.linespacing DIV 100 );
 							lastfnt := R.lib;
 							L.h := L.dsr + L.asr;
 							Lookup(R.lib(Fonts.Font), ch, d, d, odx, d, d) (* get printer size *)
@@ -373,7 +375,7 @@ BEGIN
 							box.x := F.left + L.w;
 						*)
 						INC(L.w, objw); INC(pw, devw); box.voff := R.voff + Voff(obj);
-						L.dsr := Max(L.dsr, Below(box.voff, 0) + boxdsr);
+						L.dsr := Max(L.dsr, Below(box.voff, 0) +  F.boxdsr);
 						L.asr := Max(L.asr, Above(box.voff + obj.H, 0));
 						L.h := L.dsr + L.asr;
 						
@@ -423,7 +425,7 @@ BEGIN
 	WITH F: Frame DO
 		break := FALSE;
 		L.obj := FindStyle(F.text, org);
-		L.asr := Dev(10); L.dsr := Dev(3); L.h := L.asr + L.dsr; L.w := 0; L.len := 0; L.eot := FALSE; (*L.box := NIL; do not! see below! *)
+		L.asr :=  Dev(F.asr); (*Dev(10)*) L.dsr:=Dev(F.dsr); L.h := L.asr + L.dsr; L.w := 0; L.len := 0; L.eot := FALSE; (*L.box := NIL; do not! see below! *)
 		box := NIL; L.extra := 0;
 		lastlen := -1; lastw := 0; lastasr := L.asr; lastdsr := L.dsr; L.spaces := 0; lastbox := NIL;
 		CurStyle(F, L, style, leftM, maxW); pmaxW := Dev(maxW); sw := 0;
@@ -503,7 +505,7 @@ BEGIN
 							*)
 							INC(L.w, Dev(obj.W)); INC(sw, dx);
 							box.voff := Dev(R.voff + Voff(obj));
-							L.dsr := Max(L.dsr, Below(box.voff, 0) + Dev(boxdsr));
+							L.dsr := Max(L.dsr, Below(box.voff, 0) + Dev(F.boxdsr));
 							L.asr := Max(L.asr, Above(box.voff + Dev(obj.H), 0));
 							L.h := L.dsr + L.asr;
 							
@@ -1078,7 +1080,7 @@ BEGIN
 	Texts.OpenFinder(f, F.text, 0);
 	Texts.FindObj(f, obj);
 	WHILE ~f.eot DO
-		IF obj IS Style THEN AdjustStyle(F, obj(Style), W) END;
+		IF (obj#NIL) & (obj IS Style) THEN AdjustStyle(F, obj(Style), W) END;
 		Texts.FindObj(f, obj)
 	END
 END AdjustStyles;
@@ -1128,7 +1130,7 @@ ELSIF M IS Display.FrameMsg THEN
 						ELSE
 							F.handle(F, M) (* change *)
 						END
-					ELSIF (beg < F.org) & (FindStyle(F.text, F.org) # F.trailer.next.obj) THEN
+					ELSIF (beg < F.org) & (F.trailer # NIL) & (F.trailer.next # NIL) &  (FindStyle(F.text, F.org) # F.trailer.next.obj) THEN
 						pos := TextGadgets0.LinesUp(F.text, F.org, 1);
 						NEW(L);
 						LOOP

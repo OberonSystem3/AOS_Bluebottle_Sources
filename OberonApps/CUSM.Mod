@@ -3,7 +3,7 @@ Refer to the "General ETH Oberon System Source License" contract available at: h
 
 MODULE CUSM;	(** portable *)   (* CU-SeeMe video receiver  /  Luca Balestra 13.7.95 *)
 	(* ejz 29.8.95, DOS version *)
-IMPORT NetSystem, Texts, Oberon, Out, Objects, Gadgets, BasicGadgets, Pictures, SYSTEM, RembrandtDocs, Display,
+IMPORT NetSystem, AosIP, Texts, Oberon, Out, Objects, Gadgets, BasicGadgets, Pictures, SYSTEM, RembrandtDocs, Display,
 	Math, Modules;
 
 (* pjm 01.07.96 - seems to assume Oberon.Time returns ms? *)
@@ -1083,7 +1083,7 @@ END Connect;
 PROCEDURE GetHostAdr;
 	VAR ipAdr: ARRAY 16 OF CHAR;
 BEGIN
-	IF NetSystem.hostIP # NetSystem.anyIP THEN
+	IF AosIP.AdrsEqual(NetSystem.hostIP, NetSystem.anyIP) THEN
 		SYSTEM.MOVE(SYSTEM.ADR(NetSystem.hostIP), SYSTEM.ADR(hostAdr), 4);
 		ConvIpAdrLtoS(hostAdr,ipAdr);
 		Out.String("Host address: "); Out.String(ipAdr); Out.Ln
@@ -1106,7 +1106,7 @@ PROCEDURE SetReflAdr*;
 		ipAdr: ARRAY 16 OF CHAR;
 BEGIN
 	NetSystem.GetIP(reflAdrStr.val, adr);
-	IF adr # NetSystem.anyIP THEN
+	IF ~AosIP.IsNilAdr(adr) THEN
 		SYSTEM.MOVE(SYSTEM.ADR(adr), SYSTEM.ADR(reflAdr), 4);
 		ConvIpAdrLtoS(reflAdr, ipAdr);
 		Out.String("Reflector address: "); Out.String(ipAdr); Out.Ln
@@ -1127,7 +1127,7 @@ BEGIN
 	Texts.Scan(s);
 	IF s.class = Texts.String THEN
 		NetSystem.GetIP(s.s, adr);
-		IF adr # NetSystem.anyIP THEN
+		IF ~AosIP.IsNilAdr(adr) THEN
 			SYSTEM.MOVE(SYSTEM.ADR(adr), SYSTEM.ADR(reflAdr), 4);
 			COPY(s.s,reflAdrStr.val);
 			Gadgets.Update(reflAdrStr);
@@ -1157,7 +1157,7 @@ BEGIN
 	Texts.Scan(s);
 	IF s.class = Texts.String THEN
 		NetSystem.GetIP(s.s, adr);
-		IF adr # NetSystem.anyIP THEN
+		IF ~AosIP.IsNilAdr(adr) THEN
 			SYSTEM.MOVE(SYSTEM.ADR(adr), SYSTEM.ADR(reflAdr), 4);
 			con:=SearchConnection(reflAdr);
 			IF con # NIL THEN 

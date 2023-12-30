@@ -7,6 +7,7 @@ CONST
 	MaxPingSize = 65535-20-8; (* maximum packet data size allowed *)
 	PingHdrSize = 4; (* sequence number and identifier *)
 	Timeout = 1000; (* default echo reply timeout in ms *)
+	DEBUG = FALSE;
 
 VAR
 	running: BOOLEAN; (* is traceroute currently running? *)
@@ -52,9 +53,11 @@ BEGIN
 		AosOut.String("AosTraceRoute: Resolving host name: "); AosOut.String(hostname); AosOut.Ln;
 		AosDNS.HostByName(hostname, fip, res);
 		IF res = AosDNS.Ok THEN
-			AosICMP.InstallReceiver(AosICMP.TypeEchoReply, GetReply, res);
+			AosICMP.InstallReceiver(AosICMP.TypeEchoReplyv4, GetReply, res);
+			AosICMP.InstallReceiver(AosICMP.TypeEchoReplyv6, GetReply, res);
 			IF res = AosICMP.Ok THEN
-				AosICMP.InstallReceiver(AosICMP.TypeTimeExceeded, GetReply, res);
+				AosICMP.InstallReceiver(AosICMP.TypeTimeExceededv4, GetReply, res);
+				AosICMP.InstallReceiver(AosICMP.TypeTimeExceededv6, GetReply, res);
 			END;
 			IF res = AosICMP.Ok THEN
 				AosOut.String("AosTraceRoute: Starting traceroute for host "); AosIP.OutAdr(fip); AosOut.String(" with ");
@@ -66,14 +69,16 @@ BEGIN
 						replyIP := AosIP.NilAdr;
 						sent := AosKernel.GetTimer();
 						SendEchoRequest();
-						AWAIT(timeout OR (replyIP # AosIP.NilAdr));
+						AWAIT(timeout OR (~AosIP.IsNilAdr(replyIP)));
 					END;
 					IF timeout THEN
 						AosOut.String("AosTraceRoute: ["); AosOut.Int(TTL, 0); AosOut.String("] Timeout! No reply received within ");
 						AosOut.Int(timeoutMS, 0); AosOut.String("ms."); AosOut.Ln;
 						AosOut.String("AosTraceRoute: Finished."); AosOut.Ln;
-						AosICMP.RemoveReceiver(AosICMP.TypeEchoReply, res);
-						AosICMP.RemoveReceiver(AosICMP.TypeTimeExceeded, res);
+						AosICMP.RemoveReceiver(AosICMP.TypeEchoReplyv4, res);
+						AosICMP.RemoveReceiver(AosICMP.TypeEchoReplyv6, res);
+						AosICMP.RemoveReceiver(AosICMP.TypeTimeExceededv4, res);
+						AosICMP.RemoveReceiver(AosICMP.TypeTimeExceededv6, res);
 						EXIT;
 					ELSE
 						now := AosKernel.GetTimer();
@@ -95,8 +100,10 @@ BEGIN
 							END;
 						ELSE
 							AosOut.String("AosTraceRoute: Finished."); AosOut.Ln;
-							AosICMP.RemoveReceiver(AosICMP.TypeEchoReply, res);
-							AosICMP.RemoveReceiver(AosICMP.TypeTimeExceeded, res);
+							AosICMP.RemoveReceiver(AosICMP.TypeEchoReplyv4, res);
+							AosICMP.RemoveReceiver(AosICMP.TypeEchoReplyv6, res);
+							AosICMP.RemoveReceiver(AosICMP.TypeTimeExceededv4, res);
+							AosICMP.RemoveReceiver(AosICMP.TypeTimeExceededv6, res);
 							EXIT;
 						END;
 					END;
@@ -128,7 +135,15 @@ BEGIN
 	FOR i := 0 TO pingSize-1 DO
 		data[PingHdrSize+i] := CHR(i MOD 256);
 	END;
-	AosICMP.Send(fip, data, 0, PingHdrSize+pingSize, AosICMP.TypeEchoRequest, 0, TTL);
+	IF fip.usedProtocol = AosIP.IPv4 THEN
+		AosICMP.Send(NIL, fip, data, 0, PingHdrSize+pingSize, AosICMP.TypeEchoRequestv4, 0, TTL);
+	ELSIF fip.usedProtocol = AosIP.IPv6 THEN
+		AosICMP.Send(NIL, fip, data, 0, PingHdrSize + pingSize, AosICMP.TypeEchoRequestv6, 0, TTL);
+	ELSE
+		IF DEBUG THEN
+			ASSERT(TRUE);
+		END;
+	END;
 	AosActive.SetTimeout(timer, TimeoutHandler, timeoutMS);
 END SendEchoRequest;
 
@@ -140,10 +155,10 @@ END TimeoutHandler;
 PROCEDURE GetReply(int: AosIP.Interface; type, code: LONGINT; fip, lip: AosIP.Adr; buffer: AosNet.Buffer);
 BEGIN {EXCLUSIVE}
 	AosActive.CancelTimeout(timer);
-	IF type = AosICMP.TypeTimeExceeded THEN
+	IF (type = AosICMP.TypeTimeExceededv4) OR (type = AosICMP.TypeTimeExceededv6) THEN
 		replyIP := fip;
 		replyExceed := TRUE;
-	ELSIF type = AosICMP.TypeEchoReply THEN
+	ELSIF (type = AosICMP.TypeEchoReplyv4) OR (type = AosICMP.TypeEchoReplyv6) THEN
 		replyIP := fip;
 		replyExceed := FALSE;
 	ELSE

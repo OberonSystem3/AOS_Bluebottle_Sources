@@ -573,7 +573,7 @@ END FPrintObj;
 
 (* ========== Symbol File Saver ============== *)
 
-PROCEDURE Export*(VAR r: PCM.Rider; M: PCT.Module; new, extend: BOOLEAN; VAR msg: ARRAY OF CHAR);
+PROCEDURE Export*(VAR r: PCM.Rider; M: PCT.Module; new, extend, skipImport: BOOLEAN; VAR msg: ARRAY OF CHAR);
 	VAR rIn: PCM.Rider; name: StringBuf; ver: CHAR;
 		oldM: PCT.Module; nofstruct: LONGINT;
 		newsym, changed, extended: BOOLEAN; MAttr: Module;
@@ -596,7 +596,7 @@ PROCEDURE Export*(VAR r: PCM.Rider; M: PCT.Module; new, extend: BOOLEAN; VAR msg
 	END TypeChanged;
 	
 	PROCEDURE CompareSymbol(new: PCT.Symbol; e, s: BOOLEAN);
-		VAR	old: PCT.Symbol;  newsym: Symbol;
+		VAR old: PCT.Symbol;  newsym: Symbol;
 	BEGIN
 		IF Trace THEN PCM.LogWLn; PCM.LogWStr("PCOM.Compare "); PCM.LogWStr0(new.name) END;
 		FPrintObj(new, M);	(*always compute the fp, will be used by other compiler components*)
@@ -604,13 +604,13 @@ PROCEDURE Export*(VAR r: PCM.Rider; M: PCT.Module; new, extend: BOOLEAN; VAR msg
 		IF old # NIL THEN	(* an old version exists .... *)
 			FPrintObj(old, M);
 			(* operators are not checked for changes *)
-			IF ~(PCT.Operator IN new.flags) THEN
+			IF ~(PCT.Operator IN new.flags) THEN				
 				IF  (old.sym(Symbol).fp # newsym.fp) OR
 					((new IS PCT.Type) OR (new.type IS PCT.Record) & (new.type.owner = NIL)) & TypeChanged(new.type, old.type) THEN
 					changed:=TRUE; PCM.ErrorN(402, -1, new.name)
 				END
 			END
-		ELSIF (new.vis#PCT.Internal) THEN	(*new export*)
+		ELSIF new.vis # PCT.Internal THEN	(*new export*)
 			extended:=TRUE; PCM.ErrorN(403, -1, new.name)
 		END
 	END CompareSymbol;
@@ -619,6 +619,9 @@ PROCEDURE Export*(VAR r: PCM.Rider; M: PCT.Module; new, extend: BOOLEAN; VAR msg
 	(* export procedure parameters. Methods: self is already exported *)
 	BEGIN
 		WHILE  (p # NIL) & (p.name # PCT.SelfName)  DO
+			IF PCM.CParam IN p.flags THEN (* ejz *)
+				PCM.SymWNum(r, SFobjflag); PCM.SymWNum(r, PCM.CParam)
+			END;
 			IF  p.ref  THEN  PCM.SymWNum(r, SFvar)  END;
 			OutObj(p);
 			p := p.nextPar
@@ -683,10 +686,16 @@ PROCEDURE Export*(VAR r: PCM.Rider; M: PCT.Module; new, extend: BOOLEAN; VAR msg
 				IF  mth.vis = PCT.Internal  THEN PCM.SymWString(r, "") END;
 				IF  mth = scope.initproc  THEN  PCM.SymW(r, "&")  END;
 				StringPool.GetString(mth.name, str); PCM.SymWString(r, str);
+				
 				IF mth.self.ref THEN  PCM.SymWNum(r, SFvar) END;
 				OutStruct(mth.self.type);
 				PCM.SymWString(r, PCT.SelfNameStr);
-				OutParList(mth.scope.firstPar)
+				OutParList(mth.scope.firstPar);
+				(* Indlined methods: only meant for Indexer *)
+				IF (PCT.Inline IN mth.flags) & (PCT.Indexer IN mth.flags) THEN 
+					PCM.SymWNum(r, InlineMarker); 
+					OutInline(mth.scope.code); 					
+				END;
 			END;
 			mth := mth.nextMeth
 		END;
@@ -743,8 +752,9 @@ PROCEDURE Export*(VAR r: PCM.Rider; M: PCT.Module; new, extend: BOOLEAN; VAR msg
 			
 			IF  typ IS PCT.Delegate  THEN
 				ptyp := typ(PCT.Delegate);
-				IF ~(PCT.StaticMethodsOnly IN ptyp.flags) THEN PCM.SymWNum(r, SFsysflag); PCM.SymWNum(r, SFdelegate)  END;
+				IF ~(PCT.StaticMethodsOnly IN ptyp.flags) THEN PCM.SymWNum(r, SFsysflag); PCM.SymWNum(r, SFdelegate)  END;				
 				PCM.SymWNum(r, SFtypProcTyp);  OutStruct(ptyp.return);  PCM.SymWString(r, name);
+				IF PCT.CParam IN ptyp.flags THEN  PCM.SymW(r, SYSTEM.VAL(CHAR, PCT.CParam))  END;
 				OutParList(ptyp.scope.firstPar)
 			ELSIF  typ IS PCT.Record  THEN
 				WITH typ: PCT.Record DO
@@ -755,7 +765,7 @@ PROCEDURE Export*(VAR r: PCM.Rider; M: PCT.Module; new, extend: BOOLEAN; VAR msg
 						FOR i := 0 TO LEN(typ.intf)-1 DO OutStruct(typ.intf[i]) END
 					END;
 					OutStruct(typ.btyp);
-					PCM.SymWString(r, name);
+					PCM.SymWString(r, name);					
 					OutRecord(typ)
 				END
 			ELSIF  typ IS PCT.Array  THEN
@@ -814,7 +824,7 @@ PROCEDURE Export*(VAR r: PCM.Rider; M: PCT.Module; new, extend: BOOLEAN; VAR msg
 		VAR first: BOOLEAN; i, j: LONGINT; str: StringBuf;
 			mm: Module; scope: PCT.ProcScope;
 			v: PCT.Variable; p: PCT.Proc; t: PCT.Type; c: PCT.Value; p1, p2, pTmp, t1: PCT.Symbol;
-	BEGIN
+	BEGIN			
 		ASSERT(m.scope.state >= PCT.procdeclared);
 		
 		nofstruct := 0;
@@ -850,19 +860,20 @@ PROCEDURE Export*(VAR r: PCM.Rider; M: PCT.Module; new, extend: BOOLEAN; VAR msg
 			IF ~newsym THEN CompareSymbol(c, extend, new) ELSIF c.vis # PCT.Internal THEN  FPrintObj(c, M)  END;
 			IF c.vis # PCT.Internal THEN
 				IF first THEN PCM.SymWNum(r, SFconst); first := FALSE END;
-				OutObj(c);  OutConst(c.const)
+				OutObj(c);  OutConst(c.const)		
 			END;
 			c := c.nextVal
 		END;
 		v := m.scope.firstVar; first := TRUE;
-		WHILE v # NIL DO
+		WHILE v # NIL DO					
 			IF ~newsym THEN CompareSymbol(v, extend, new) ELSIF v.vis # PCT.Internal THEN  FPrintObj(v, M)  END;
 			IF v.vis # PCT.Internal THEN
 				IF first THEN PCM.SymWNum(r, SFvar); first := FALSE END;
-				OutObj(v)
+				OutObj(v)			
 			END;
 			v := v.nextVar
 		END;
+		(* ug: hidden variables are not written to the symbol file, scope.firstHiddenVar is not traversed. *)
 		p := m.scope.firstProc; first := TRUE;
 		WHILE p # NIL DO
 			IF ~newsym THEN CompareSymbol(p, extend, new) ELSIF p.vis # PCT.Internal THEN  FPrintObj(p, M)  END;
@@ -915,7 +926,7 @@ PROCEDURE Export*(VAR r: PCM.Rider; M: PCT.Module; new, extend: BOOLEAN; VAR msg
 			IF t.vis # PCT.Internal THEN
 				IF t # t.type.owner THEN	(*alias*)
 					IF first THEN PCM.SymWNum(r, SFalias); first := FALSE END;
-					OutObj(t)
+					OutObj(t)	
 				ELSE
 					t.dlink := t1; t1 := t
 				END
@@ -959,13 +970,17 @@ BEGIN
 	COPY("", msg);
 	IF PCM.error THEN RETURN END;
 	StringPool.GetString(M.name, name);
-	newsym:=FALSE; changed:=FALSE;
-	Import(M, oldM, M.name);	(* import self, to check for changes *)
-	IF oldM # NIL THEN
+	newsym := FALSE; 
+	changed := FALSE;
+	oldM := NIL;
+	IF ~skipImport THEN
+		Import(M, oldM, M.name);	(* import self, to check for changes *)
+	END;
+	IF oldM # NIL THEN 
 		changed := M.sym(Module).changed
 	ELSE
 		IF M.sym = NIL THEN NEW(MAttr); M.sym := MAttr; MAttr := NIL END;
-		newsym:=TRUE
+		newsym := TRUE
 	END;
 	(*export*)
 	ASSERT(M.flags - ImportedModuleFlag = {});	(*export overrides only if allowed*)
@@ -974,9 +989,9 @@ BEGIN
 	PCM.CloseSym(r);		(*commit file*)
 	IF changed OR extended  THEN
 		IF changed THEN
-			IF newsym OR  new THEN  COPY("  new symbol file", msg)  ELSE  PCM.Error(155, -1, "")  END
+			IF newsym OR new THEN COPY("  new symbol file", msg) ELSE PCM.Error(155, -1, "") END
 		ELSIF extended THEN  
-			IF  extend OR  new  THEN  COPY("  extended symbol file", msg)  ELSE  PCM.Error(155, -1, "")  END
+			IF extend OR new THEN COPY("  extended symbol file", msg) ELSE PCM.Error(155, -1, "") END
 		END
 	END
 END Export;
@@ -1234,18 +1249,23 @@ PROCEDURE Import*(self: PCT.Module; VAR M: PCT.Module; modname: StringPool.Index
 		END InConst;
 
 		PROCEDURE InParList(upper: PCT.Scope): PCT.ProcScope;
-			VAR	s: PCT.ProcScope;  svar, var: BOOLEAN;  name: PCS.Name; styp, str: PCT.Struct;
+			VAR	s: PCT.ProcScope;  svar, var: BOOLEAN;  name: PCS.Name; styp, str: PCT.Struct; f: LONGINT; flags: SET; (* ejz *)
 		BEGIN
 			styp := NIL;
 			NEW(s); PCT.InitScope(s, upper, {}, TRUE); PCT.SetOwner(s);
 			R.RawNum(tag);
 			WHILE  tag#SFend  DO
+				flags := {}; (* ejz *)
+				IF tag = SFobjflag THEN
+					R.RawNum(f); R.RawNum(tag); ASSERT(f = PCM.CParam);
+					INCL(flags, PCM.CParam)
+				END;
 				IF  tag=SFvar  THEN var:=TRUE; R.RawNum(tag)  ELSE  var:=FALSE  END;
 				InStruct(str); ReadStrIndex(R, readString, name);
 				IF (name = PCT.SelfName) OR (name = altSelf) THEN	(*move SELF to the end of the list / method only*)
 					styp := str; svar := var
 				ELSE
-					s.CreatePar(PCT.Public, var, name, {}, str, res); (* ASSERT(res = PCT.Ok) *)
+					s.CreatePar(PCT.Public, var, name, flags, str, res); (* ASSERT(res = PCT.Ok) *) (* ejz *)
 					Assert(res = PCT.Ok);
 				END;
 				R.RawNum(tag)
@@ -1259,7 +1279,7 @@ PROCEDURE Import*(self: PCT.Module; VAR M: PCT.Module; modname: StringPool.Index
 		
 		PROCEDURE InRecord(rec: PCT.Record; btyp: PCT.Struct; intf: PCT.Interfaces);
 			VAR	mode, vis: SET;  typ: PCT.Struct;  name: PCS.Name;
-				mscope: PCT.ProcScope; s: PCT.RecScope;  flags: SET; ch: CHAR;
+				mscope: PCT.ProcScope; s: PCT.RecScope;  flags: SET; ch: CHAR; 
 		BEGIN
 			NEW(s);
 			PCT.SetOwner(s);
@@ -1277,7 +1297,7 @@ PROCEDURE Import*(self: PCT.Module; VAR M: PCT.Module; modname: StringPool.Index
 			WHILE  tag < SFtproc  DO	(*read fields*)
 				InObj(name, vis, flags, typ);
 				IF  name = empty  THEN vis := PCT.Internal; name := PCT.Anonymous END;
-				s.CreateVar(name, vis, flags, typ, res);
+				s.CreateVar(name, vis, flags, typ, 0, (* fof *)NIL, res);
 				(* ASSERT(res = PCT.Ok); *)
 				Assert(res = PCT.Ok);
 				R.RawNum(tag);
@@ -1288,10 +1308,20 @@ PROCEDURE Import*(self: PCT.Module; VAR M: PCT.Module; modname: StringPool.Index
 					InObj(name, vis, flags, typ);
 					IF  name = empty  THEN  vis := PCT.Internal; ReadStrIndex(R, readString, name)  END;
 					mscope := InParList(s);
-					s.CreateProc(name, vis, flags, mscope, typ, res); (* ASSERT(res = PCT.Ok); *)
+					s.CreateProc(name, vis, flags, mscope, typ, 0, (* fof *) res); (* ASSERT(res = PCT.Ok); *)
 					Assert(res = PCT.Ok);
+
+					(* This identifies a inlined Indexer *)
+					R.RawNum(tag);		
+					IF tag = InlineMarker THEN
+						INCL(flag, PCT.Inline);
+						INCL(flag, PCT.Indexer);
+						INCL(flag, PCT.Operator);
+						mscope.code := InCProc();										
+						R.RawNum(tag)					
+					END;
+					
 					PCT.ChangeState(mscope, PCT.structdeclared, -1);
-					R.RawNum(tag)
 				END
 			END;
 			IF ~selfimport THEN PCT.AddRecord(M.scope, rec) END;
@@ -1303,7 +1333,7 @@ PROCEDURE Import*(self: PCT.Module; VAR M: PCT.Module; modname: StringPool.Index
 				ptr: PCT.Pointer;
 				modAttr: Module; tAttr: Struct;
 				sysflag: LONGINT; sf: SET;
-				intf: ARRAY 32 OF PCT.Interface;
+				intf: ARRAY 32 OF PCT.Interface; c: CHAR;
 			(*!!! when loading the user structures, no fix is used, but dummy elements !!!*)
 		BEGIN
 			IF tag <= 0 THEN	(*oldstruct*)
@@ -1365,7 +1395,7 @@ PROCEDURE Import*(self: PCT.Module; VAR M: PCT.Module; modname: StringPool.Index
 				| SFtypProcTyp:
 						NEW(proc); typ := proc
 				END;
-				ASSERT((sysflag = 0) OR (sysflag = SFdelegate));
+				(* ASSERT((sysflag = 0) OR (sysflag = SFdelegate)); *)
 				MAttr.struct[strref] := typ;
 				NEW(tAttr, M); typ.sym:=tAttr; tAttr.strref := strref;
 (*
@@ -1428,8 +1458,10 @@ PROCEDURE Import*(self: PCT.Module; VAR M: PCT.Module; modname: StringPool.Index
 							IF name # empty THEN  PCM.LogWStr0(name) END
 						END
 				| SFtypProcTyp:
-						ReadStrIndex(R, readString, name);
-						IF sysflag = SFdelegate THEN sf := {} ELSE sf := {PCT.StaticMethodsOnly} END;
+
+						ReadStrIndex(R, readString, name);						
+						IF sysflag = SFdelegate THEN sf := {} ELSE sf := {PCT.StaticMethodsOnly} END;						
+						IF R.Peek() = SYSTEM.VAL(CHAR, PCT.CParam) THEN R.Char(c); INCL(sf, PCT.CParam) END;
 						PCT.InitDelegate(proc, btyp, InParList(scope), sf, res); (* ASSERT(res = PCT.Ok); *)
 						Assert(res = PCT.Ok);
 						PCT.ChangeState(proc.scope, PCT.structdeclared, -1);
@@ -1440,7 +1472,7 @@ PROCEDURE Import*(self: PCT.Module; VAR M: PCT.Module; modname: StringPool.Index
 				END;
 				IF name # empty THEN
 					IF ~selfimport THEN
-						scope.CreateType(name, vis, typ, res); (* ASSERT(res = PCT.Ok) *)
+						scope.CreateType(name, vis, typ, 0(*fof*), res); (* ASSERT(res = PCT.Ok) *)
 						Assert(res = PCT.Ok);
 					ELSE
 						NEW(type); PCT.InitType(type, name, vis, typ); Insert(scope, type)
@@ -1515,13 +1547,11 @@ BEGIN
 		NEW(MAttr); M.sym:=MAttr
 	END;
 	IF ~selfimport & (self # NIL) THEN self.AddImport(M) END;
-	IF (ver = PCM.OldFileVersion) THEN
-		(* ok *)
-	ELSIF (ver = PCM.NewFileVersion) THEN
+	IF (ver = PCM.FileVersion) THEN (* ug *)
 		R.RawSet(flags);
 	ELSE
-		PCM.Error(151, -1, "");  M := NIL;  RETURN
-	END;
+		PCM.Error(151, -1, ""); M := NIL; RETURN
+	END; (* ug *)
 	
 	GetImports;
 	IF TraceImport THEN PCM.LogWLn; PCM.LogWStr("Import "); PCM.LogWStr(string) END;
@@ -1541,7 +1571,7 @@ BEGIN
 		WHILE	tag < SFvar	DO
 			InObj(name, vis, flag, str);
 			IF ~selfimport THEN
-				scope.CreateValue(name, vis, InConst(), res);
+				scope.CreateValue(name, vis, InConst(), 0, (* fof *) res);
 				Assert(res = PCT.Ok);
 				(* ASSERT(res = PCT.Ok) *)
 			ELSE
@@ -1555,7 +1585,7 @@ BEGIN
 		WHILE	tag < SFxproc	DO
 			InObj(name, vis, flag, str);
 			IF ~selfimport THEN
-				scope.CreateVar(name, vis, flag, str, res);
+				scope.CreateVar(name, vis, flag, str, 0, (* fof *) NIL, res);
 				Assert(res = PCT.Ok);
 				(* ASSERT(res = PCT.Ok)) *)
 			ELSE 
@@ -1571,7 +1601,7 @@ BEGIN
 		WHILE	tag < (*SFcproc*) SFoperator	DO
 			InObj(name, vis, flag, str); pscope := InParList(scope);
 			IF ~selfimport THEN
-				scope.CreateProc(name, vis, flag, pscope, str, res); 
+				scope.CreateProc(name, vis, flag, pscope, str, 0, (* fof *) res); 
 				Assert(res = PCT.Ok);
 				(* ASSERT(res = PCT.Ok) *)
 			ELSE 
@@ -1594,7 +1624,7 @@ BEGIN
 				R.RawNum(tag);
 			END;
 			IF ~selfimport THEN
-				scope.CreateProc(name, vis, flag, pscope, str, res);
+				scope.CreateProc(name, vis, flag, pscope, str, 0, (* fof *)res);
 				Assert(res = PCT.Ok);
 				(* ASSERT(res = PCT.Ok); *)
 			ELSE 
@@ -1612,7 +1642,7 @@ BEGIN
 			InObj(name, vis, flag, str); pscope := InParList(scope);
 			INCL(flag, PCT.Inline);
 			IF ~selfimport THEN
-				scope.CreateProc(name, vis, flag, pscope, str, res);
+				scope.CreateProc(name, vis, flag, pscope, str, 0, (* fof *) res);
 				Assert(res = PCT.Ok);
 				(* ASSERT(res = PCT.Ok) *)
 			ELSE 
@@ -1628,7 +1658,7 @@ BEGIN
 		WHILE	tag < SFtyp	DO
 			InStruct(str); ReadStrIndex(R, readString, name);
 			IF ~selfimport THEN
-				scope.CreateType(name, PCT.Public, str, res);
+				scope.CreateType(name, PCT.Public, str, 0, (* fof *)res);
 				Assert(res = PCT.Ok);
 				(* ASSERT(res = PCT.Ok) *)
 			ELSE 
@@ -1704,6 +1734,7 @@ END PCOM.
 
 
 (*
+	15.11.06	ug	Procedure Export with additional parameter skipImport that suppresses the import of the old symbol file
 	11.06.02	prk	emit modified symbol file message to main log (not kernel log)
 	22.02.02	prk	unicode support
 	08.02.02	prk	use Aos instead of Oberon modules

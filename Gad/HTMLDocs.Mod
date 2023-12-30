@@ -2,6 +2,8 @@
 Refer to the "General ETH Oberon System Source License" contract available at: http://www.oberon.ethz.ch/ *)
 
 MODULE HTMLDocs; (** portable *) (* ejz, Greek & Math support by afi *)
+    (* Check that the index of ISOToOberon does not exceed 255. ple, 2005-05-08. *)
+    
 	IMPORT Objects, Input, Strings, Display, Display3, Fonts, HyperDocs, Texts, Gadgets, Documents, HTTPDocs0, TextDocs,
 		Oberon, TextGadgets, Lists, Attributes, Desktops, Links, Streams, TextStreams;
 
@@ -1267,11 +1269,16 @@ to.elems := from.elems
 		ELSE
 		END;
 						Texts.SetFont (P.W, fnt);
-					ELSE
+                    (* ISOToOberon is an array of 256 characters whereas HTML can 
+                    refer to any of 65536 characters, &#0; .. &#65535;.  Check that i is 
+                    a valid index to ISOToOberon.  *)
+					ELSIF (i < 256) THEN 
 						Texts.Write(P.W, Strings.ISOToOberon[i])
+					ELSE (* The character is not available in ETH Oberon / PC Native. *)
+						Texts.Write(P.W, CHR(0))  (* Make a nul character. *)
 					END
 				END
-			ELSE
+			ELSE (* Faulty HTML character reference. *)
 				Texts.WriteString(P.W, "&#")
 			END
 		ELSE
@@ -1340,9 +1347,13 @@ to.elems := from.elems
 					|189: Strings.Append(str, " 1/2")
 					|190: Strings.Append(str, " 3/4")
 				ELSE
-					Strings.AppendCh(str, Strings.ISOToOberon[i])
+				    IF (i < 256) THEN  
+				        Strings.AppendCh(str, Strings.ISOToOberon[i])
+				    ELSE (* The character is not available in ETH Oberon / PC Native 05.01.2003. *)
+						Strings.AppendCh(str, CHR(0))  (* Make a nul character. *)
+				    END
 				END
-			ELSE
+			ELSE (* Faulty HTML character reference. *)
 				Strings.Append(str, "&#")
 			END
 		ELSIF Strings.IsAlpha(S.ch) THEN
@@ -3388,7 +3399,7 @@ HALT(99)
 
 	PROCEDURE InitEntities();
 	BEGIN
-(*		entityEncoding := "AAAAAAÄCDEEEEIIIINOOOOOÖPUUUÜYáâaà&aaäçéêèdë>iîìï<ñoôòooö ßpuûùüyy"; *)
+	(*	entityEncoding := "AAAAAAÄCDEEEEIIIINOOOOOÖPUUUÜYáâaà&aaäçéêèdë>iîìï<ñoôòooö ßpuûùüyy";  *)
 		entityEncoding[57] := 22X;
 		entityEncoding[66] := 22X;
 		entityEncoding[67] := Strings.Tab;

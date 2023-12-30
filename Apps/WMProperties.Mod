@@ -23,6 +23,11 @@ TYPE
 			BEGIN
 				SELF.prototype := prototype;
 			END SetPrototype;
+			
+			PROCEDURE HasPrototype*() : BOOLEAN;
+			BEGIN
+				RETURN prototype # NIL
+			END HasPrototype;
 
 (** Meta-data *)
 			PROCEDURE GetInfo*() : String;
@@ -44,7 +49,7 @@ TYPE
 			PROCEDURE Reset*;
 			BEGIN 
 				AcquireWrite;
-				IF ~nonDefault THEN nonDefault := TRUE; Changed END;
+				IF nonDefault THEN nonDefault := FALSE; Changed END;
 				ReleaseWrite
 			END Reset;
 			
@@ -95,19 +100,11 @@ TYPE
 			BEGIN
 			END FromXML;
 			
-	(*		PROCEDURE ToStream*(w : AosIO.Writer);
-			BEGIN {EXCLUSIVE}
-				CASE type OF
-					|TypeBoolean : IF int32Values.l = 1 THEN w.String("true") ELSE w.String("false") END;
-					|TypeInt32 : w.Int(int32Values.l, 0);
-					|TypeReal64 : HALT(1234);
-					|TypeString : IF string # NIL THEN w.String(string^) END;
-					|TypeColor : w.Hex(int32Values.l, 8);
-					|TypeInt32Position : w.Int(int32Values.l, 0); w.Char(","); w.Int(int32Values.t, 0);
-					|TypeInt32Rectangle : w.Int(int32Values.l, 0); w.Char(","); w.Int(int32Values.t, 0); w.Char(","); 
-												w.Int(int32Values.r, 0); w.Char(","); w.Int(int32Values.b, 0);
-				END
-			END ToStream; *)
+			PROCEDURE WriteXML*(w : AosIO.Writer; indent : LONGINT);
+			BEGIN
+				
+			END WriteXML;
+			
 		END Property;
 
 TYPE		
@@ -158,14 +155,28 @@ TYPE
 			en := xml.GetContents();
 			p := en.GetNext();
 			value := FALSE; NotDefault;
-			IF p IS XML.CharData THEN
-				s := p(XML.CharData).GetStr();
+			IF p IS XML.Chars THEN
+				s := p(XML.Chars).GetStr();
 				IF s # NIL THEN
 					Utilities.Trim(s^, " "); Utilities.LowerCase(s^);
 					Set(s^ = "true")
 				END
 			END
 		END FromXML;
+		
+		PROCEDURE WriteXML*(w : AosIO.Writer; indent : LONGINT);
+		VAR name : String;
+		BEGIN
+			name := GetName();
+			IF name = NIL THEN AosOut.String("Nameless property encountered. Ignored"); AosOut.Ln; RETURN END;
+				
+			IF nonDefault THEN
+				Indent(w, indent);
+				w.Char("<"); w.String(name^); w.Char(">");
+				IF value THEN w.String("true") ELSE w.String("false") END;
+				w.String("</"); w.String(name^); w.Char(">"); w.Ln;			
+			END
+		END WriteXML;
 		
 	END BooleanProperty;
 			
@@ -174,8 +185,8 @@ TYPE
 	(** Accessor property to an integer value. The range of possible values can be restricted. *)
 	Int32Property* = OBJECT(Property)
 	VAR value : LONGINT;
-		min, max : LONGINT; bounded : BOOLEAN;
-		
+		min, max : LONGINT; bounded, silent : BOOLEAN;
+				
 		(** Confines the possible input values between min and max. Implicitly activates the bounds check. If the current value
 		lies outside the bounds, it is truncated to the nearest and a change notification is sent after the end of the transaction. *)
 		PROCEDURE SetBounds*(min, max : LONGINT);
@@ -198,6 +209,16 @@ TYPE
 			END;
 			ReleaseWrite
 		END SetIsBounded;
+		
+		PROCEDURE SetSilent*(isSilent : BOOLEAN);
+		BEGIN
+			AcquireWrite;
+			IF isSilent # silent THEN
+				silent := isSilent;			
+			END;			
+			ReleaseWrite
+		END SetSilent;
+		
 		
 		PROCEDURE Validate(v : LONGINT) : LONGINT;
 		BEGIN
@@ -236,8 +257,9 @@ TYPE
 		PROCEDURE Set*(value : LONGINT);
 		BEGIN
 			AcquireWrite;
-			IF Validate(value) # SELF.value THEN SELF.value := Validate(value); Changed 
-			ELSIF ~nonDefault THEN Changed
+			IF Validate(value) # SELF.value THEN SELF.value := Validate(value);
+				IF ~silent THEN Changed END 
+			ELSIF ~nonDefault & ~silent THEN Changed
 			END;
 			NotDefault;
 			ReleaseWrite
@@ -257,13 +279,26 @@ TYPE
 			en := xml.GetContents();
 			IF en.HasMoreElements() THEN
 				p := en.GetNext();
-				IF p IS XML.CharData THEN
-					s := p(XML.CharData).GetStr();
+				IF p IS XML.Chars THEN
+					s := p(XML.Chars).GetStr();
 					IF s # NIL THEN Utilities.StrToInt(s^, value); Set(value) END
 				END
 			END;
 			ReleaseWrite
 		END FromXML;
+		
+		PROCEDURE WriteXML*(w : AosIO.Writer; indent : LONGINT);
+		VAR name : String;
+		BEGIN
+			name := GetName();
+			IF name = NIL THEN AosOut.String("Nameless property encountered. Ignored"); AosOut.Ln; RETURN END;
+			IF nonDefault THEN
+				Indent(w, indent);
+				w.Char("<"); w.String(name^); w.Char(">");
+				w.Int(value, 0);
+				w.String("</"); w.String(name^); w.Char(">"); w.Ln		
+			END
+		END WriteXML;
 	END Int32Property;
 	
 TYPE 
@@ -319,12 +354,28 @@ TYPE
 			en := xml.GetContents();
 			p := en.GetNext();
 			IF p # NIL THEN 
-				IF p IS XML.CharData THEN
-					Set(p(XML.CharData).GetStr())
+				IF p IS XML.Chars THEN
+					Set(p(XML.Chars).GetStr())
 				END
+			ELSE
+				Set(NIL)
 			END
 		END FromXML;
-	
+		
+		PROCEDURE WriteXML*(w : AosIO.Writer; indent : LONGINT);
+		VAR name : String;
+		BEGIN
+			name := GetName();
+			IF name = NIL THEN AosOut.String("Nameless property encountered. Ignored "); RETURN END;
+			IF nonDefault THEN		
+				IF value # NIL THEN
+					Indent(w, indent);
+					w.Char("<"); w.String(name^); w.Char(">");
+					w.String(value^);
+					w.String("</"); w.String(name^); w.Char(">"); w.Ln;
+				END;
+			END
+		END WriteXML;	
 	END StringProperty;
 	
 (** Color *)
@@ -380,14 +431,26 @@ TYPE
 			en := xml.GetContents();
 			IF en.HasMoreElements() THEN 
 				p := en.GetNext();
-				IF p IS XML.CharData THEN
-					s := p(XML.CharData).GetStr();
+				IF p IS XML.Chars THEN
+					s := p(XML.Chars).GetStr();
 					IF s # NIL THEN Utilities.HexStrToInt(s^, value, res) END; NotDefault
 				END
 			END;
 			ReleaseWrite
 		END FromXML;
 		
+		PROCEDURE WriteXML*(w : AosIO.Writer; indent : LONGINT);
+		VAR name : String;
+		BEGIN
+			name := GetName();
+			IF name = NIL THEN AosOut.String("Nameless property encountered. Ignored"); AosOut.Ln; RETURN END;
+			IF nonDefault THEN
+				Indent(w, indent);
+				w.Char("<"); w.String(name^); w.Char(">");
+				w.Hex(value, 8);
+				w.String("</"); w.String(name^); w.Char(">"); w.Ln;
+			END
+		END WriteXML;		
 		
 	END ColorProperty;
 	
@@ -438,30 +501,44 @@ TYPE
 		PROCEDURE SetWidth*(w : LONGINT);
 		BEGIN
 			AcquireWrite;
-			IF GetWidth() # w THEN value.r := value.l + w; Changed; NotDefault END;
+			IF GetWidth() # w THEN Changed END; value.r := value.l + w; NotDefault;
 			ReleaseWrite
 		END SetWidth;
 		
 		PROCEDURE SetHeight*(h : LONGINT);
 		BEGIN
 			AcquireWrite;
-			IF GetHeight() # h THEN value.b := value.t + h; Changed; NotDefault END;
+			IF GetHeight() # h THEN  Changed END; value.b := value.t + h; NotDefault;
 			ReleaseWrite
 		END SetHeight;
 		
 		PROCEDURE SetLeft*(l : LONGINT);
 		BEGIN
 			AcquireWrite;
-			IF value.l # l THEN value.r := l + GetWidth(); value.l := l; Changed; NotDefault END;
+			IF value.l # l THEN Changed END; value.r := l + GetWidth(); value.l := l; NotDefault;
 			ReleaseWrite
 		END SetLeft;
 		
 		PROCEDURE SetTop*(t : LONGINT);
 		BEGIN
 			AcquireWrite;
-			IF value.t # t THEN value.b := t + GetHeight(); value.t := t; Changed; NotDefault END;
+			IF value.t # t THEN Changed END; value.b := t + GetHeight(); value.t := t;  NotDefault;
 			ReleaseWrite
 		END SetTop;
+		
+		PROCEDURE SetRight*(r : LONGINT);
+		BEGIN
+			AcquireWrite;
+			IF value.r # r THEN Changed END; value.r := r;  NotDefault;
+			ReleaseWrite
+		END SetRight;
+		
+		PROCEDURE SetBottom*(b : LONGINT);
+		BEGIN
+			AcquireWrite;
+			IF value.b # b THEN Changed END; value.b := b; NotDefault;
+			ReleaseWrite
+		END SetBottom;
 		
 		PROCEDURE SetExtents*(w, h : LONGINT);
 		BEGIN 
@@ -505,6 +582,8 @@ TYPE
 						IF s # NIL THEN 
 							IF s^ = "Left" THEN SetLeft(ReadCharDataInt(p(XML.Element)))
 							ELSIF s^ = "Top" THEN SetTop(ReadCharDataInt(p(XML.Element)))
+							ELSIF s^ = "Right" THEN SetRight(ReadCharDataInt(p(XML.Element)))
+							ELSIF s^ = "Bottom" THEN SetBottom(ReadCharDataInt(p(XML.Element)))
 							ELSIF s^ = "Width" THEN SetWidth(ReadCharDataInt(p(XML.Element)))
 							ELSIF s^ = "Height" THEN SetHeight(ReadCharDataInt(p(XML.Element)))
 							END
@@ -514,6 +593,24 @@ TYPE
 			END;	
 			ReleaseWrite
 		END FromXML;
+
+		PROCEDURE WriteXML*(w : AosIO.Writer; indent : LONGINT);
+		VAR name : String;
+			t : WMRectangles.Rectangle;			
+		BEGIN
+			name := GetName();
+			IF name = NIL THEN AosOut.String("Nameless property encountered. Ignored"); AosOut.Ln; RETURN END;
+			IF nonDefault THEN
+				t := Get();
+				Indent(w, indent);w.Char("<"); w.String(name^); w.Char(">"); w.Ln;
+				Indent(w, indent + 1); w.String("<Left>"); w.Int(t.l, 0); w.String("</Left>"); w.Ln;
+				Indent(w, indent + 1); w.String("<Top>"); w.Int(t.t, 0); w.String("</Top>"); w.Ln;
+				Indent(w, indent + 1); w.String("<Width>"); w.Int(t.r-t.l, 0); w.String("</Width>"); w.Ln;
+				Indent(w, indent + 1); w.String("<Height>"); w.Int(t.b-t.t, 0); w.String("</Height>"); w.Ln;
+				Indent(w, indent); w.String("</"); w.String(name^); w.Char(">"); w.Ln;
+			END
+		END WriteXML;		
+		
 		
 	END RectangleProperty;
 	
@@ -652,6 +749,21 @@ TYPE
 			ReleaseWrite
 		END SetXML;
 		
+		PROCEDURE WriteXML*(w : AosIO.Writer; indent : LONGINT);
+		VAR i : LONGINT;
+		BEGIN
+			w.Ln;
+			Indent(w, indent + 1);
+			w.String("<Properties>"); w.Ln;
+			AcquireRead;
+			FOR i := 0 TO nofProperties - 1 DO
+				properties[i].WriteXML(w, indent + 2)
+			END;
+			Indent(w, indent + 1);
+			w.String("</Properties>");
+			ReleaseRead
+		END WriteXML;
+		
 		PROCEDURE Changed(p : Property);
 		BEGIN (* {EXCLUSIVE} *)
 			IF p # upChanged THEN INC(upNofChanges);  upChanged := p END;
@@ -663,6 +775,13 @@ VAR
 	StringProperties : String;
 	StringPropertiesInfo : String;
 	
+PROCEDURE Indent(w : AosIO.Writer; indent : LONGINT);
+VAR i : LONGINT;
+BEGIN
+	FOR i := 0 TO indent - 1 DO w.Char(9X) END
+END Indent;
+
+	
 PROCEDURE ReadCharDataInt(xml : XML.Element) : LONGINT;
 VAR en : XMLObjects.Enumerator;
 	p : PTR; s : String; value : LONGINT;
@@ -671,8 +790,8 @@ BEGIN
 	en := xml.GetContents();
 	IF en.HasMoreElements() THEN
 		p := en.GetNext();
-		IF p IS XML.CharData THEN
-			s := p(XML.CharData).GetStr();
+		IF p IS XML.Chars THEN
+			s := p(XML.Chars).GetStr();
 			IF s # NIL THEN Utilities.StrToInt(s^, value) END
 		END;
 	END;
@@ -683,4 +802,4 @@ BEGIN
 	StringProperties := Utilities.NewString("PropertyList");
 	StringPropertiesInfo := Utilities.NewString("the event is called if a property in the list is changed")
 END WMProperties.
- 
+

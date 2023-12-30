@@ -69,7 +69,8 @@ CONST
 			END EndModification;
 							
 			PROCEDURE Externalize*() : XML.Content;
-			BEGIN HALT(309)
+			BEGIN HALT(309);
+			RETURN NIL;
 			END Externalize;
 			
 			PROCEDURE Internalize*(xml: XML.Content);
@@ -362,8 +363,10 @@ CONST
 	
 		PROCEDURE GetXMLDocument(file: AosFS.File) : XML.Document;
 		VAR scanner: XMLScanner.Scanner; parser: XMLParser.Parser; doc: XML.Document;
+			reader: AosFS.Reader;
 		BEGIN (* file # NIL *)
-			NEW(scanner, file);
+			NEW(reader, file, 0);
+			NEW(scanner, reader);
 			NEW(parser, scanner);
 			LockParsingScanning;
 			scanner.reportError := ReportXMLParserScannerError;

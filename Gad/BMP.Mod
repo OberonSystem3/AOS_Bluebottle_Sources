@@ -1,7 +1,7 @@
 (* ETH Oberon, Copyright 2001 ETH Zuerich Institut fuer Computersysteme, ETH Zentrum, CH-8092 Zuerich.
 Refer to the "General ETH Oberon System Source License" contract available at: http://www.oberon.ethz.ch/ *)
 
-MODULE BMP;	(** portable *)
+MODULE BMP; (** portable *)
 
 	IMPORT Display, Files, Pictures, Objects, Texts, Oberon;
 
@@ -251,14 +251,14 @@ BEGIN
 	WITH obj: Pictures.Picture DO
 		IF M IS Objects.AttrMsg THEN
 			WITH M: Objects.AttrMsg DO 
-				IF (M.id = Objects.get) & (M.name = "Gen") THEN 
+				IF (M.id = Objects.get) & (M.name = "Gen") THEN
 					M.class := Objects.String; COPY("Pictures.NewPicture", M.s); M.res:=0 
 				END;
 			END;
 		ELSIF M IS Objects.FileMsg THEN
 			WITH M: Objects.FileMsg DO
 				IF (M.id = Objects.load) THEN
-					error := FALSE;  pos := Files.Pos(M.R); LoadBmp(M.R, TRUE, obj);
+					error := FALSE;  pos := Files.Pos(M.R); LoadBmp(M.R, FALSE, obj); (* LoadBmp; TRUE -> FALSE, fof 030904 *) 
 					IF error THEN M.len := 0 ELSE M.len := Files.Pos(M.R) - pos END
 				ELSE
 					Pictures.Handle(obj, M)

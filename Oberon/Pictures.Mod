@@ -212,7 +212,11 @@ END Update;
 PROCEDURE DisplayBlock*(P: Picture; X, Y, W, H, DX, DY, mode: INTEGER);
 VAR screen: Picture; 
 		L, B, R, T, cw, ch: INTEGER;
+		colortable: ARRAY 256 OF LONGINT; i: LONGINT; (* fof *)
 BEGIN
+	FOR i := 0 TO 255 DO  (* fof *)
+		colortable[i] := ASH(ASH(P.ct[i].red, 8) + P.ct[i].green, 8) + P.ct[i].blue
+	END; 
 	Display.GetClip(L,B,cw,ch); R := L + cw; T := B + ch;
 	IF DX + W < R THEN R := DX + W END; IF DY + H < T THEN T := DY + H END;
 	IF DX > L THEN L := DX END; IF DY > B THEN B := DY END;
@@ -221,7 +225,7 @@ BEGIN
 		IF InBoundaries(X, Y, P.width, P.height) THEN
 			IF X+W > P.width THEN W := P.width-X END;
 			IF Y+H > P.height THEN H := P.height-Y END;
-			Bitmaps.DisplayBlock(P.bitmap,X, Y, W, H, L, B, mode)
+			Bitmaps.DisplayBlock(P.bitmap,X, Y, W, H, L, B, mode,colortable (* fof *))
 		END
 	END
 END DisplayBlock;
@@ -493,7 +497,8 @@ END Open;
 PROCEDURE Address*(P: Picture): LONGINT;	(** non-portable *)
 VAR val, x, i, j: INTEGER; w: LONGINT;
 BEGIN 
-	HALT(99)	(* should not be used *)
+	HALT(99);	(* should not be used *)
+	RETURN 0
 END Address;
 
 (** Default picture object handler. *)

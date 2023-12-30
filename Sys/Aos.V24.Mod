@@ -5,42 +5,42 @@ MODULE V24; (** AUTHOR "AFI"; PURPOSE "Backward compatibility module" *)
 	Most of the port control is now displaced to the new driver module
 	AosV24.Obx module (Source AosV24.Mod *)
 
-IMPORT AosV24, SYSTEM;
+IMPORT AosSerials, SYSTEM;
 
 CONST	(* Needed for compatibility *)
 	(** Port aliases (check with NumberOfPorts) *)
-	COM1* = 0;  COM2* = 1;  COM3* = 2;  COM4* = 3;
-	COM5* = 4;  COM6* = 5;  COM7* = 6;  COM8* = 7;
+	COM1* = 1;  COM2* = 2;  COM3* = 3;  COM4* = 4;
+	COM5* = 5;  COM6* = 6;  COM7* = 7;  COM8* = 8;
 	
 	(** Parity *)
-	ParNo* = AosV24.ParNo;  ParOdd* = AosV24.ParOdd;  ParEven* = AosV24.ParEven;
-	ParMark* = AosV24.ParMark;  ParSpace* = AosV24.ParSpace;
+	ParNo* = AosSerials.ParNo;  ParOdd* = AosSerials.ParOdd;  ParEven* = AosSerials.ParEven;
+	ParMark* = AosSerials.ParMark;  ParSpace* = AosSerials.ParSpace;
 
 	(** Stop bits *)
-	Stop1* = AosV24.Stop1;  Stop2* = AosV24.Stop2;  Stop1dot5* = AosV24.Stop1dot5;
+	Stop1* = AosSerials.Stop1;  Stop2* = AosSerials.Stop2;  Stop1dot5* = AosSerials.Stop1dot5;
 
 	(** Modem control lines *)
-	DTR* = AosV24.DTR;  RTS* = AosV24.RTS;	(** output *)
-	Break* = AosV24.Break;	(** input/output - Bit 6 in LCR *)
-	DSR* = AosV24.DSR;  CTS* = AosV24.CTS;  RI* = AosV24.RI;  DCD* = AosV24.DCD;	(** input *)
+	DTR* = AosSerials.DTR;  RTS* = AosSerials.RTS;	(** output *)
+	Break* = AosSerials.Break;	(** input/output - Bit 6 in LCR *)
+	DSR* = AosSerials.DSR;  CTS* = AosSerials.CTS;  RI* = AosSerials.RI;  DCD* = AosSerials.DCD;	(** input *)
 
 	(** Receive error diagnostic *)
-	OE* = AosV24.OE;	(** Overrun Error *)
-	PE* = AosV24.PE;	(** Parity Error *)
-	FE* = AosV24.FE;	(** Framing Error *)
-	BI* = AosV24.BI;	(** Break Interrupt *)
-	termination* = AosV24.termination;	(* Indicates that the port is being closed *)
+	OE* = AosSerials.OverrunError;
+	PE* = AosSerials.ParityError;
+	FE* = AosSerials.FramingError;
+	BI* = AosSerials.BreakInterrupt;
+	termination* = AosSerials.Closed;	(* Indicates that the port is being closed *)
 
-	Ok* =  AosV24.Ok; PortInUse* =  AosV24.PortInUse; NoSuchPort* =  AosV24.NoSuchPort;
-	WrongBPS* =  AosV24.WrongBPS; WrongData* =  AosV24.WrongData; WrongParity* =  AosV24.WrongParity;
-	WrongStop* =  AosV24.WrongStop;
+	Ok* =  AosSerials.Ok; PortInUse* =  AosSerials.PortInUse; NoSuchPort* =  AosSerials.NoSuchPort;
+	WrongBPS* =  AosSerials.WrongBPS; WrongData* =  AosSerials.WrongData; WrongParity* =  AosSerials.WrongParity;
+	WrongStop* =  AosSerials.WrongStop;
 
-VAR ports: ARRAY 8 OF AosV24.Port;
+VAR ports: ARRAY AosSerials.MaxPorts + 1 OF AosSerials.Port; (* ports[0] is unused *)
 
 (** NumberOfPorts - Return number of ports available. *)
 PROCEDURE NumberOfPorts*(): LONGINT;
 BEGIN
-	RETURN AosV24.noOfPorts
+	RETURN AosSerials.MaxPorts;
 END NumberOfPorts;
 
 (** Start - Open a serial port (numbered from 0) connection.  bps is the required bits per second.
@@ -49,9 +49,14 @@ END NumberOfPorts;
 	if ok, or error code on error.  1 means port already in use.  2 means no such port.
 	3 means bad bps value.  4 means bad data/parity/stop.   DTR and RTS are enabled. *)
 PROCEDURE Start*(portNo, bps, data, parity, stop: LONGINT; VAR res: LONGINT);
+VAR port : AosSerials.Port;
 BEGIN
-	ports[portNo] := AosV24.GetPort(portNo);
-	ports[portNo].Open(bps, data, parity, stop, res)
+	res := NoSuchPort;
+	port := AosSerials.GetPort(portNo);
+	IF port # NIL THEN
+		ports[portNo] := port;
+		ports[portNo].Open(bps, data, parity, stop, res)
+	END;
 END Start;
 
 (** Stop - Close the connection of the specified port. Effect on Modem Control lines is undefined. *)
@@ -64,8 +69,7 @@ END Stop;
 (**  Antediluvian: Kept for compatibility. - Use Writer... instead. *)
 PROCEDURE Send*(portNo: LONGINT; x: SYSTEM.BYTE; VAR res: LONGINT);
 BEGIN
-	ports[portNo].SendChar(CHR(x));
-	res := AosV24.Ok
+	ports[portNo].SendChar(CHR(x), res);
 END Send;
 
 (** SendBytes - Send n bytes to the specified port. Waits until buffer space is available. res = Ok iff all ok. *)
@@ -73,8 +77,8 @@ END Send;
 PROCEDURE SendBytes*(portNo: LONGINT; VAR x: ARRAY OF SYSTEM.BYTE; n: LONGINT; VAR res: LONGINT);
 VAR i: LONGINT;
 BEGIN
-	i := 0;  res := AosV24.Ok;
-	WHILE (i # n) & (res = AosV24.Ok) DO
+	i := 0;  res := AosSerials.Ok;
+	WHILE (i # n) & (res = AosSerials.Ok) DO
 		Send(portNo, x[i], res);  INC(i)
 	END
 END SendBytes;
@@ -92,8 +96,8 @@ END Receive;
 PROCEDURE ReceiveBytes*(portNo: LONGINT; VAR x: ARRAY OF SYSTEM.BYTE; n: LONGINT; VAR res: LONGINT);
 VAR i: LONGINT;
 BEGIN
-	i := 0;  res := AosV24.Ok;
-	WHILE (i # n) & (res = AosV24.Ok) DO
+	i := 0;  res := AosSerials.Ok;
+	WHILE (i # n) & (res = AosSerials.Ok) DO
 		Receive(portNo, x[i], res);  INC(i)
 	END
 END ReceiveBytes;
@@ -122,7 +126,7 @@ PROCEDURE Available*(portNo: LONGINT): LONGINT;
 BEGIN
 	RETURN ports[portNo].Available()
 END Available;
-BEGIN
+
 END V24.
 
 System.Free V24 ~

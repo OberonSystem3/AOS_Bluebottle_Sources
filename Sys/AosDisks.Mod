@@ -1,6 +1,6 @@
 (* Aos, Copyright 2001, Pieter Muller, ETH Zurich *)
 
- MODULE AosDisks; (** AUTHOR "pjm"; PURPOSE "Abstract disk driver"; *)
+MODULE AosDisks; (** AUTHOR "pjm"; PURPOSE "Abstract disk driver"; *)
 
 IMPORT SYSTEM, AosOut, AosModules, AosPlugins;
 
@@ -31,6 +31,8 @@ CONST
 	
 	Trace = FALSE;
 	TraceBoot = FALSE;
+	
+	Stats* = TRUE;
 
 TYPE
 	Message* = RECORD END;
@@ -52,6 +54,11 @@ TYPE
 			flags*: SET;	(** ReadOnly, Removable *)
 			table*: PartitionTable;	(** cache for partition table *)
 			openCount*: LONGINT;	(** number of times device has been opened *)
+			
+			(** statistics *)
+			NbytesRead*, NbytesWritten*, (** successfully tranfered bytes *)
+			NnofReads*, NnofWrites*, NnofOthers*, (** operation count *)
+			NnofErrors* : HUGEINT; (** read/write errors *)
 		
 		PROCEDURE Transfer*(op, block, num: LONGINT; VAR data: ARRAY OF CHAR; ofs: LONGINT; VAR res: LONGINT);
 		BEGIN
@@ -305,6 +312,7 @@ END AosDisks.
 16.02.1999	pjm	LRU design error fixed
 04.05.1999	pjm	Ported over new things from Native version, added partitioning
 20.10.2000	pjm	Added Cleanup and Valid from Native
+26.03.2007	staubesv Added Device.NnofReads, Device.NnofWrites, Device.NnofOthers and Device.NnofErrors
 
 Block size 512 and LONGINT block number limit us to 1TB = 1024GB.
 *)

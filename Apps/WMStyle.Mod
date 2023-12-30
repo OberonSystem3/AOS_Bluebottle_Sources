@@ -63,6 +63,7 @@ VAR filename : AosFS.FileName;
 		f : AosFS.File;
 		scanner : Scanner.Scanner;
 		parser : XMLParser.Parser;
+		reader : AosFS.Reader;
 		doc : XML.Document;
 		p : PTR;
 		cont : Objects.Enumerator;
@@ -100,10 +101,11 @@ BEGIN {EXCLUSIVE}
 	IF f # NIL THEN 
 		AosOut.String(" loaded."); AosOut.Ln;
 		hasErrors := FALSE;
-		NEW(scanner, f); NEW(parser, scanner); parser.reportError := ReportError; doc := parser.Parse();
+		NEW(reader, f, 0);
+		NEW(scanner, reader); NEW(parser, scanner); parser.reportError := ReportError; doc := parser.Parse();
 		IF ~hasErrors THEN 
 			NEW(desc);
-			desc.style := 2;
+			desc.useBitmaps := FALSE;
 			(* set default values for style 0 *)
 			desc.baCol := 0FFFF0H; desc.biCol := 0FF80H; desc.basw := 5; desc.bisw := 5;
 			desc.th := 20; desc.lw := 2; desc.rw := 2; desc.bh := 2; 
@@ -212,9 +214,6 @@ BEGIN {EXCLUSIVE}
 						ts := el(XML.Element).GetAttributeValue("desktopColor"); 
 						IF ts = NIL THEN desc.desktopColor := 08080FFFFH ELSE Utilities.HexStrToInt(ts^, desc.desktopColor, res) END;
 					ELSIF s^ = "Style" THEN
-						ts := el(XML.Element).GetAttributeValue("style"); 
-						IF ts = NIL THEN desc.style := 2 ELSE Utilities.StrToInt(ts^, desc.style) END;
-
 						ts := el(XML.Element).GetAttributeValue("lw"); 
 						IF ts = NIL THEN desc.lw := 2 ELSE Utilities.StrToInt(ts^, desc.lw) END;
 

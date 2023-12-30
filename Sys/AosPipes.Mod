@@ -6,7 +6,7 @@ IMPORT SYSTEM;
 
 CONST
 	Ok = 0;
-	Closed = 4301;
+	Closed = 4201;
 
 TYPE
 		(** A pipe is a bounded buffer that can be used as an AosIO Reader and Writer.  Everything sent to the sink can be read from the source. *)
@@ -14,17 +14,27 @@ TYPE
 		VAR
 			head, num: LONGINT;
 			buffer: POINTER TO ARRAY OF CHAR;
-		
+			closed: BOOLEAN;
+			
+		(** return the number of bytes that can be read without blocking *)
+		PROCEDURE Available*() : LONGINT;
+		BEGIN
+			RETURN num
+		END Available;
+
 		PROCEDURE Send*(VAR buf: ARRAY OF CHAR; ofs, len: LONGINT; propagate : BOOLEAN; VAR res: LONGINT);
 		BEGIN 
 			ASSERT(len >= 0);
 			LOOP 
 				BEGIN {EXCLUSIVE}
 					IF len = 0 THEN res := Ok; EXIT END;
-					AWAIT(num # LEN(buffer));
-					IF num = -1 THEN res := Closed; EXIT END;
-					buffer[(head+num) MOD LEN(buffer)] := buf[ofs];
-					INC(ofs); INC(num); DEC(len)
+					AWAIT((num < LEN(buffer)) OR closed);
+					IF closed THEN
+						res := Closed; EXIT
+					ELSIF num < LEN(buffer) THEN
+						buffer[(head+num) MOD LEN(buffer)] := buf[ofs];
+						INC(ofs); INC(num); DEC(len)
+					END
 				END
 			END
 		END Send;
@@ -35,27 +45,27 @@ TYPE
 			len := 0;
 			LOOP
 				BEGIN {EXCLUSIVE}
-					IF min # 0 THEN AWAIT(num # 0) END;	(* wait until some data available *)
+					IF min > 0 THEN AWAIT((num > 0) OR closed) END;	(* wait until some data available *)
 					IF num > 0 THEN
-						IF num = -1 THEN res := Closed; EXIT END;
 						buf[ofs] := buffer[head];
 						head := (head + 1) MOD LEN(buffer);
-						DEC(num); INC(ofs); INC(len); DEC(min); DEC(size);
+						DEC(num); INC(ofs); INC(len); DEC(min); DEC(size)
+					ELSIF closed THEN
+						res := Closed; EXIT
 					END;
-					IF num = -1 THEN res := Closed; EXIT END;
-					IF (num = 0) & (min <= 0) OR (size = 0) THEN res := Ok; EXIT END;
+					IF (num = 0) & (min <= 0) OR (size = 0) THEN res := Ok; EXIT END
 				END
 			END
 		END Receive;
 		
 		PROCEDURE &Init*(size: LONGINT);
 		BEGIN
-			head := 0; num := 0; NEW(buffer, size)	
+			head := 0; num := 0; NEW(buffer, size); closed := FALSE
 		END Init;
 		
 		PROCEDURE Close*;
 		BEGIN {EXCLUSIVE}
-			num := -1
+			closed := TRUE
 		END Close;
 		
 	END Pipe;
