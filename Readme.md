@@ -1,6 +1,14 @@
-# ETH AOS/Bluebottle System Sources
+# ETH Active Object/Bluebottle System Sources
 
-This is the source code of the last stable release of the ETH AOS/Bluebottle System, dated March 12, 2004, in plain ISO 8859-1 UTF-8 text files.
+The ETH Active Object System (AOS), also known as Bluebottle, was the successor of the ETH Oberon System 3. It was written in the [Active Oberon](https://web.archive.org/web/20040727081821/http://bluebottle.ethz.ch/languagereport/ActiveReport.pdf) programming language, which extended original Oberon by [monitor-based concurrency](https://en.wikipedia.org/wiki/Monitor_(synchronization)).
+
+For more information about the system, see
+
+- [The Active Object System - Design and Multiprocessor Implementation (2002)](https://www.research-collection.ethz.ch/bitstream/handle/20.500.11850/147091/eth-26082-02.pdf)
+- [Using Oberon’s Active Objects for Language Interoperability and Compilation (2003)](https://www.research-collection.ethz.ch/bitstream/handle/20.500.11850/72831/eth-26497-01.pdf)
+- [Bluebottle: A Thread-safe Multimedia and GUI Framework for Active Oberon (2005)](https://www.research-collection.ethz.ch/bitstream/handle/20.500.11850/72739/eth-27966-02.pdf)
+
+This repository includes the source code of the last stable release of the ETH AOS/Bluebottle System, dated March 12, 2004, in plain ISO 8859-1 UTF-8 text files.
 
 The following ZIP files with the source code have been downloaded from [the archived bluebottle.ethz.ch website](https://web.archive.org/web/20040802232503/http://bluebottle.ethz.ch/dllatest.html) on 2023-12-29.
 
@@ -20,6 +28,7 @@ The release downloaded here was accessible [from the bluebottle.ethz.ch website]
 There were some later releases called "Crazy-Fresh", described as "Never tested, never booted but as fresh as it can be"; the latest one from 2007-07-23 [can be accessed from here](https://web.archive.org/web/20071011134937/http://bluebottle.ethz.ch:80/dlcrazy.html). 
 
 By the end of 2005, the main contributors of the AOS/Bluebottle system (Pieter Johannes Muller, Patrik Reali and Thomas Martin Frey) were no longer at ETH, which is likely the reason why there was no later "Current" release.
+
 
 
 
