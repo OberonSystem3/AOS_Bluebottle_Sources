@@ -30,6 +30,6 @@ There were some later releases called "Crazy-Fresh", described as "Never tested,
 By the end of 2005, the main contributors of the AOS/Bluebottle system (Pieter Johannes Muller, Patrik Reali and Thomas Martin Frey) were no longer at ETH, which is likely the reason why there was no later "Current" release.
 
 
-
+Please also note that the ETH Active Object/Bluebottle system discussed here is not the same as [the A2 operating system](https://gitlab.inf.ethz.ch/felixf/oberon). The latter was implemented by different people using a different programming language (which is based on, but different from Active Oberon). A2 can be seen as a successor of the ETH Active Object/Bluebottle system, since it reuses parts of the existing code, but it has a different focus, more on mathematical features. 
 
 
