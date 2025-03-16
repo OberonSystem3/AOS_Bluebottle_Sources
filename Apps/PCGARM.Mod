@@ -109,8 +109,9 @@ BEGIN AosOut.Int(i, 0)
 END Int;
 
 PROCEDURE Hex(value, len: LONGINT);
-VAR hex: ARRAY len+2 OF CHAR; i: LONGINT;
+VAR hex: POINTER TO ARRAY OF CHAR; i: LONGINT;
 BEGIN 
+	NEW(hex, len+2); (* was VLA originally *)
 	FOR i := 1 TO len DO
 		hex[len-i] := HexTab[value MOD 16];
 		value := value DIV 16

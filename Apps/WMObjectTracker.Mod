@@ -174,6 +174,7 @@ TYPE
 				grid.model.SetCellText(cell, line, s)
 			END SetText;
 
+			(* RK: strange and not used anyway
 			PROCEDURE Handle(VAR x: WMMessages.Message);
 			BEGIN
 				IF (x.msgType = WMMessages.MsgExt) & (x.ext # NIL) THEN
@@ -184,6 +185,7 @@ TYPE
 				ELSE Handle^(x)
 				END
 			END Handle;
+			*)
 		
 		BEGIN (* {EXCLUSIVE} *)
 			(* count  the threads *)

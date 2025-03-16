@@ -21,8 +21,7 @@ TYPE
  OF CHAR;
 		readPos*: LONGINT;
 		insertPos*: LONGINT;
-		vbiSize
-*: LONGINT;
+		vbiSize*: LONGINT;
 	END VbiBuffer;
 
 	ChannelSwitchHandler* = PROCEDURE {DELEGATE} (freq: LONGINT);
@@ -248,37 +247,37 @@ TYPE
 
 	(** Get contrast value. *)
 	(** return value:	value of contrast multiplication factor *)
-		PROCEDURE GetContrast0* (): LONGINT;
+		PROCEDURE GetContrast* (): LONGINT;
 		BEGIN HALT(99);	(** abstract *)
 		END GetContrast;
 
 	(** Enable or disable color bars. *)
 	(** enable:	TRUE to enable color bars, FALSE for disabling color bars *)
-		PROCEDURE SetColorBars1* (enable: BOOLEAN);
+		PROCEDURE SetColorBars* (enable: BOOLEAN);
 		BEGIN HALT(99);	(** abstract *)
 		END SetColorBars;
 		
 	END TVTuner;
 
-	NotificationHandler2* = PROCEDURE {DELEGATE};
+	NotificationHandler* = PROCEDURE {DELEGATE};
 
 	(** The VideoCaptureDevice represents a video capture card with its tuning and audio components. *)
 	VideoCaptureDevice* = OBJECT (AosPlugins.Plugin)
 	(** Each VideoCaptureDevice must have a tuner, an audio and a vbiBuffer object. These can be accessed
 			via the appropriate GetXXX procedures *)
 
-		PROCEDURE & Init4* (base, irq, product, rev: LONGINT);
+		PROCEDURE & Init* (base, irq, product, rev: LONGINT);
 		BEGIN HALT(99);	(** abstract *)
 		END Init;
 	
 	(** Get the ringbuffer that contains the raw VBI data *)
-		PROCEDURE GetVbiData5* (): VbiBuffer6;
+		PROCEDURE GetVbiData* (): VbiBuffer;
 		BEGIN HALT(99);	(** abstract *)
 		END GetVbiData;
 
 	(** Get the TVTuner object of this VideoCaptureDevice object. *)
 	(** return value:	TVTuner object of this card *)
-		PROCEDURE GetTuner7* (): TVTuner8;
+		PROCEDURE GetTuner* (): TVTuner;
 		BEGIN HALT(99);	(** abstract *)
 		END GetTuner;
 
@@ -316,69 +315,69 @@ TYPE
 
 	(** Get the device status. *)
 	(** return value:	device status *)
-		PROCEDURE GetStatusA* (): LONGINT;
+		PROCEDURE GetStatus* (): LONGINT;
 		BEGIN HALT(99);	(** abstract *)
 		END GetStatus;
 
 	(** Set the video input format *)
 	(** format:	format of video signal (Bt848IFormPalBDGHI etc.) *)
-		PROCEDURE SetInputFormatB* (format: LONGINT);
+		PROCEDURE SetInputFormat* (format: LONGINT);
 		BEGIN HALT(99);	(** abstract *)
 		END SetInputFormatC;
 
 	(** Get the video input format. *)
-		PROCEDURE GetInputFormatD* (): LONGINT;
+		PROCEDURE GetInputFormat* (): LONGINT;
 		BEGIN HALT(99);	(** abstract *)
 		END GetInputFormat;
 		
-		PROCEDURE SetPixelFormatE* (format: LONGINT);
+		PROCEDURE SetPixelFormat* (format: LONGINT);
 		BEGIN HALT(99);	(** abstract *)
 		END SetPixelFormat;
 
 	(** Select RCA as input. *)
-		PROCEDURE SetInputDev0F*;
+		PROCEDURE SetInputDev0*;
 		BEGIN HALT(99);	(** abstract *)
 		END SetInputDev0;
 
 	(** Select the tuner as input. *)
-		PROCEDURE SetInputDev1G*;
+		PROCEDURE SetInputDev1*;
 		BEGIN HALT(99);	(** abstract *)
 		END SetInputDev1;
 
 	(** Select S-VHS (composite camera) as input. *)
-		PROCEDURE SetInputDev2H*;
+		PROCEDURE SetInputDev2*;
 		BEGIN HALT(99);	(** abstract *)
 		END SetInputDev2;
 
 	(** Select S-VHS as input. *)
-		PROCEDURE SetInputDevSVideoI*;
+		PROCEDURE SetInputDevSVideo*;
 		BEGIN HALT(99);	(** abstract *)
 		END SetInputDevSVideoJ;
 
 	(** Select MUX 3 as input. *)
-		PROCEDURE SetInputDev3K*;
+		PROCEDURE SetInputDev3*;
 		BEGIN HALT(99);	(** abstract *)
 		END SetInputDev3L;
 
 	(** Set the video data buffer. *)
 	(** addr:	physical address of target buffer for video data. *)
 	(** width:	line length of video frame buffer *)
-		PROCEDURE SetVideoM* (addr: LONGINT; width: LONGINT);
+		PROCEDURE SetVideo* (addr: LONGINT; width: LONGINT);
 		BEGIN HALT(99);	(** abstract *)
 		END SetVideo;
 
 	(** Capture a single frame. *)
-		PROCEDURE CaptureSingleN*;
+		PROCEDURE CaptureSingle*;
 		BEGIN HALT(99);	(** abstract *)
 		END CaptureSingle;
 
 	(** Start continuous frame capture. *)
-		PROCEDURE CaptureContinuousO*;
+		PROCEDURE CaptureContinuous*;
 		BEGIN HALT(99);	(** abstract *)
 		END CaptureContinuous;
 
 	(** Stop continuous video data capture. *)
-		PROCEDURE StopCaptureContinuousP*;
+		PROCEDURE StopCaptureContinuous*;
 		BEGIN HALT(99);	(** abstract *)
 		END StopCaptureContinuous;
 
@@ -387,46 +386,46 @@ TYPE
 	(** rows:	number of rows of a frame *)
 	(** frames:	number of frames allocated *)
 	(** format:	AosEvenOnly, AosOddOnly, none (interlaced) *)
-		PROCEDURE SetGeometryQ* (columns, rows, frames: LONGINT; format: SET);
+		PROCEDURE SetGeometry* (columns, rows, frames: LONGINT; format: SET);
 		BEGIN HALT(99);	(** abstract *)
 		END SetGeometry;
 		
 	END VideoCaptureDevice;
 
 	(** The Audio object represents the audio facilities of the video capture card. *)
-	AudioR* = OBJECT
-		PROCEDURE & InitS* (vcd: VideoCaptureDeviceT);
+	Audio* = OBJECT (* was AudioR, probably a typo *)
+		PROCEDURE & InitS* (vcd: VideoCaptureDevice);
 		BEGIN HALT(99);	(** abstract *)
 		END Init;
 
 	(** Select the tuner for audio input. *)
-		PROCEDURE SetAudioTunerU*;
+		PROCEDURE SetAudioTuner*;
 		BEGIN HALT(99);	(** abstract *)
 		END SetAudioTuner;
 	
 	(** Select external input for audio input. *)
-		PROCEDURE SetAudioExternV*;
+		PROCEDURE SetAudioExtern*;
 		BEGIN HALT(99);	(** abstract *)
 		END SetAudioExtern;
 	
 	(** Select internal input for audio input. *)
-		PROCEDURE SetAudioInternW*;
+		PROCEDURE SetAudioIntern*;
 		BEGIN HALT(99);	(** abstract *)
 		END SetAudioIntern;
 	
 	(** Set audio to mute. *)
-		PROCEDURE SetAudioMuteX*;
+		PROCEDURE SetAudioMute*;
 		BEGIN HALT(99);	(** abstract *)
 		END SetAudioMute;
 	
 	(** Unmute audio. *)
-		PROCEDURE SetAudioUnmuteY*;
+		PROCEDURE SetAudioUnmute*;
 		BEGIN HALT(99);	(** abstract *)
 		END SetAudioUnmute;
 	
 	(** Returns the mute state. *)
 	(** return value:	TRUE if audio is mute, otherwise FALSE *)
-		PROCEDURE IsAudioMuteZ* (): BOOLEAN;
+		PROCEDURE IsAudioMute* (): BOOLEAN;
 		BEGIN HALT(99);	(** abstract *)
 		END IsAudioMute;
 		

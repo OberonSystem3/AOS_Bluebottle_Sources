@@ -309,7 +309,7 @@ IMPORT
 		R.symmod.Update;	(* flush buffers to file *)
 		R.sym.Update;
 		IF OldFileFormat THEN
-			R.obj.RawNum(R.obj, R.symmod.sent + R.sym.sent);
+			R.obj.RawNum(R.symmod.sent + R.sym.sent);
 		ELSE
 			R.obj.RawNum(4 + R.symmod.sent + R.sym.sent);
 			R.obj.RawSet(codeOptions)

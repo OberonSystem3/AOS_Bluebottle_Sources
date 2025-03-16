@@ -703,8 +703,9 @@ END OpenOld;
 (** Open an existing file, searching through the mounted file system list if no prefix is specified. *)
 
 PROCEDURE Old*(name: ARRAY OF CHAR): File;
-VAR fs: FileSystem; f: File; prefix: Prefix; fname: ARRAY LEN(name) OF CHAR;
+VAR fs: FileSystem; f: File; prefix: Prefix; fname: POINTER TO ARRAY OF CHAR;
 BEGIN {EXCLUSIVE}
+	NEW(fname,LEN(name)); (* was VLA originally *)
 	f := NIL;
 	SplitName(name, prefix, fname);
 	IF prefix = "" THEN
@@ -721,8 +722,9 @@ END Old;
 (** Create a new file.  If no prefix is specified, create the file on the first file system in the mounted list. *)
 
 PROCEDURE New*(name: ARRAY OF CHAR): File;
-VAR fs: FileSystem; f: File; prefix: Prefix; fname: ARRAY LEN(name) OF CHAR;
+VAR fs: FileSystem; f: File; prefix: Prefix; fname: POINTER TO ARRAY OF CHAR;
 BEGIN {EXCLUSIVE}
+	NEW(fname,LEN(name)); (* was VLA originally *)
 	f := NIL; SplitName(name, prefix, fname);
 	IF prefix = "" THEN
 		fs := fsroot;	(* use default file system *)
@@ -751,8 +753,9 @@ END New;
 (** Delete a file. res = 0 indicates success. *)
 
 PROCEDURE Delete*(VAR name: ARRAY OF CHAR; VAR res: LONGINT);
-VAR fs: FileSystem; f: File; key: LONGINT; prefix: Prefix; fname: ARRAY LEN(name) OF CHAR;
+VAR fs: FileSystem; f: File; key: LONGINT; prefix: Prefix; fname: POINTER TO ARRAY OF CHAR;
 BEGIN {EXCLUSIVE}
+	NEW(fname, LEN(name)); (* was VLA originally *)
 	SplitName(name, prefix, fname);
 	IF prefix = "" THEN fs := fsroot ELSE fs := FindFS(prefix) END;
 	IF fs # NIL THEN
@@ -778,8 +781,10 @@ END Delete;
 PROCEDURE Rename*(VAR old, new: ARRAY OF CHAR; VAR res: LONGINT);
 VAR
 	key: LONGINT; ofs, nfs: FileSystem; f: File; pold, pnew: Prefix;
-	fold: ARRAY LEN(old) OF CHAR; fnew: ARRAY LEN(new) OF CHAR;
+	fold: POINTER TO ARRAY OF CHAR; fnew: POINTER TO ARRAY OF CHAR;
 BEGIN {EXCLUSIVE}
+	NEW(fold, LEN(old)); (* was VLA originally *)
+	NEW(fnew, LEN(new)); (* dito *)
 	SplitName(old, pold, fold);
 	SplitName(new, pnew, fnew);
 	IF pold = "" THEN ofs := fsroot ELSE ofs := FindFS(pold) END;
@@ -854,8 +859,9 @@ END RemoveDirectory;
 PROCEDURE Enumerate(VAR mask: ARRAY OF CHAR; flags: SET; enum: Enumerator);
 VAR
 	fs: FileSystem; ft: FileSystemTable; i: LONGINT;
-	prefix: Prefix; fmask: ARRAY LEN(mask) OF CHAR;
+	prefix: Prefix; fmask: POINTER TO ARRAY OF CHAR;
 BEGIN {}
+	NEW(fmask, LEN(mask)); (* was VLA originally *)
 	SplitName(mask, prefix, fmask);
 	IF prefix = "" THEN
 		GetList(ft);

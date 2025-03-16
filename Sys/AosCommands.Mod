@@ -119,8 +119,9 @@ END Activate;
 (** Activate a string of commands, including parameters.  The string is parsed from left to right and Activate is called for every command.  Parsing stops at the end of the string, or when Activate returns an error.  The flags are applied to every command, i.e., for sequential execution, use the Wait flag (the caller waits until all commands return).  Syntax: cmds = [mode " " ] cmd {";" cmd} . cmd = mod ["." proc] [" " params] .  params = {<any character except ";">} .  mode = "PAR" | "SEQ" . *)
 
 PROCEDURE Call*(cmds: ARRAY OF CHAR; flags: SET; VAR res: LONGINT; VAR msg: ARRAY OF CHAR);
-VAR p: Parameters; i, j, k: LONGINT; mode: ARRAY 5 OF CHAR; par: ARRAY LEN(cmds) OF CHAR;
+VAR p: Parameters; i, j, k: LONGINT; mode: ARRAY 5 OF CHAR; par: POINTER TO ARRAY OF CHAR;
 BEGIN
+	NEW(par, LEN(cmds)); (* originally declared as a VLA *)
 	i := 0; WHILE (i # 4) & (i # LEN(cmds)) DO mode[i] := cmds[i]; INC(i) END;
 	mode[i] := 0X;	(* copy at most first 4 characters *)
 	IF mode = "PAR " THEN EXCL(flags, Wait)
